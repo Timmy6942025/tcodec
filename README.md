@@ -38,7 +38,7 @@ ARM NEON SIMD execution. Every algorithm choice prioritizes:
 | NEON deblock | ✅ Done | Auto-dispatch on ARM |
 | NEON transform | ✅ Done | DCT + WHT, auto-dispatch on ARM |
 | WPP thread pool | ✅ Done | Per-row bitstream buffers + tANS encoders, entry point table, sequential fallback |
-| B-frames | ❌ Planned | Bi-prediction, COLLOCATED_MV |
+| B-frames | ✅ Done | Hierarchical GOP4 + bi-directional prediction (D4), display reorder, -b flag |
 | tANS context modeling | ❌ Planned | 16 contexts: 4 bands × 4 magnitude classes |
 | SAO filter | ❌ Planned | Post-deblock offset filter |
 | DCT-II alternative | ❌ Planned | Requires position-dependent dequant |
@@ -86,6 +86,20 @@ DCT functions exist in the codebase but are not yet wired into the pipeline.
 | 9 | 1 | QP delta (signed, encoded as `(uint8_t)(int8_t)(qp - 32)`) |
 | 10 | 1 | Frame number (low 8 bits) |
 | 11 | 1 | Reserved |
+
+| 12 | 1 | Profile/level |
+| 13 | 2 | Tool flags (entropy mode, B-frames, CRC, ...) |
+| 15 | 1 | Extension header (only when `TC_FLAG_EXT_HEADER`): bits 0-1 = frame type code (0=KEY, 1=INTER/P, 2=BIDIR/B), rest reserved |
+
+### B-frames (D4)
+
+Hierarchical GOP-4 with bi-directional prediction. Coding order per group:
+A(4k), A(4k+4), B(4k+2), B(4k+1), B(4k+3); the decoder reorders to display
+order. B blocks signal a 2-bit `ref_sel` (0=forward, 1=backward,
+2=bidirectional average with mirrored MV) on every inter block. Enable with
+`tcenc -b` (v1 streams only). Reorder latency is handled by
+`TC_ERR_NEED_MORE` on both encode and decode; drain with
+`tc_encoder_flush_tail` / `tc_decoder_flush_tail`.
 
 ### Block Mode Field (P-frames)
 

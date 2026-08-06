@@ -260,7 +260,8 @@ void tc_rc_dec_coeffs(tc_rc_dec_t *rc, tc_rc_ctx_t *ctx,
 #define RC_CTX_GT2         39
 #define RC_CTX_SIGN        41
 #define RC_CTX_LEVEL       42
-#define RC_CTX_MAX         48
+#define RC_CTX_REF_SEL     48   /* B-frame ref selection (0=fwd,1=bwd,2=bi) */
+#define RC_CTX_MAX         49
 
 /* Frequency band classification for a zigzag position.
  * Reserved for future JND-weighted quantization per coefficient.
@@ -417,8 +418,19 @@ typedef struct tc_encoder {
     int               num_threads;     /* Number of WPP worker threads */
     int               use_wpp;        /* 1 = use WPP, 0 = sequential */
 #endif
+    /* B-frame reorder state (D4). display-order input frames are
+     * buffered here until a full GOP is available, then emitted in
+     * coding order (anchor, B+2, B+1, B+3). */
+    struct {
+        tc_frame_buf_t *frame[8];        /* display-order buffer */
+        int             poc[8];          /* display POC of each slot */
+        int             n;               /* frames buffered */
+        int             emit_pos;        /* next emission in schedule */
+        int             b_mode;          /* cfg.enable_b_frames */
+        int             next_input;      /* display index of next input */
+    } bf;
     /* Stats */
-    int64_t           total_bytes;
+    int32_t           total_bytes;
     int32_t           total_frames;
     double            sum_psnr;
     /* Bitstream output buffer */
@@ -454,6 +466,16 @@ typedef struct tc_decoder {
     tc_frame_header_t last_header;
     /* v1 bitstream validation results */
     int             last_crc_valid;   /* 1 = CRC OK or no CRC, 0 = CRC mismatch */
+    /* B-frame display reorder (D4): decoded frames wait here until
+     * their display POC turns up; out_frames holds pending outputs. */
+    struct {
+        tc_frame_buf_t *frames[TC_REF_FRAMES + 1];
+        int             pocs[TC_REF_FRAMES + 1];
+        int             n;
+        int             next_display;    /* next POC to output */
+        int             active;          /* B reorder active in this stream */
+        tc_frame_buf_t *out;             /* scratch output frame */
+    } disp;
 } tc_decoder_t;
 
 /* ── PSNR computation ────────────────────────────────────────── */

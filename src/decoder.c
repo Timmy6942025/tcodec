@@ -114,16 +114,27 @@ static tc_error_t read_frame_header(tc_bs_reader_t *bs, tc_frame_header_t *hdr)
         hdr->profile   = (hdr->profile_level >> 4) & 0x0F;
         hdr->level_idx = hdr->profile_level & 0x0F;
 
+        /* Derived v1 flags (must precede the extension read below) */
+        hdr->is_rap       = (hdr->flags & TC_FLAG_RAP) ? 1 : 0;
+        hdr->has_crc      = (hdr->flags & TC_FLAG_CRC) ? 1 : 0;
+        hdr->has_ext_header = (hdr->flags & TC_FLAG_EXT_HEADER) ? 1 : 0;
+
+        /* v1 extension header (D4): optional frame-type byte for
+         * B-frame streams (written on every frame of such streams). */
+        if (hdr->has_ext_header) {
+            uint8_t fc = (uint8_t)tc_bs_reader_read_bits(bs, 8);
+            if (fc == 0)      hdr->frame_type_ext = TC_FRAME_KEY;
+            else if (fc == 2) hdr->frame_type_ext = TC_FRAME_BIDIR;
+            else              hdr->frame_type_ext = TC_FRAME_INTER;
+            hdr->has_type_ext = 1;
+        }
+
         /* Validate profile */
         if (hdr->profile > TC_PROFILE_MAX) {
             /* Unknown profile — cannot decode safely */
             return TC_ERR_BITSTREAM;
         }
 
-        /* Derived v1 flags */
-        hdr->is_rap       = (hdr->flags & TC_FLAG_RAP) ? 1 : 0;
-        hdr->has_crc      = (hdr->flags & TC_FLAG_CRC) ? 1 : 0;
-        hdr->has_ext_header = (hdr->flags & TC_FLAG_EXT_HEADER) ? 1 : 0;
 
         /* Validate level constraints (if explicit level set) */
         if (hdr->level_idx > 0 && hdr->level_idx <= TC_LEVEL_MAX) {
@@ -138,8 +149,16 @@ static tc_error_t read_frame_header(tc_bs_reader_t *bs, tc_frame_header_t *hdr)
          * since they have well-defined meanings. */
     }
 
-    /* Derived fields (common to v0 and v1) */
-    hdr->frame_type = (hdr->flags & TC_FLAG_KEY_FRAME) ? TC_FRAME_KEY : TC_FRAME_INTER;
+    /* Derived fields (common to v0 and v1). B-frames (D4) are
+     * signaled per frame through the v1 tool flags (TC_TOOL_BIPRED);
+     * the flags byte has no spare bits (tiles occupy bits 0-2). */
+    if (hdr->has_type_ext) {
+        hdr->frame_type = hdr->frame_type_ext;
+    } else if (hdr->flags & TC_FLAG_KEY_FRAME) {
+        hdr->frame_type = TC_FRAME_KEY;
+    } else {
+        hdr->frame_type = TC_FRAME_INTER;
+    }
     /* qp_delta is stored as uint8_t but was encoded as (int8_t)(qp - TC_QP_DEFAULT).
      * Cast through int8_t to correctly handle signed values (QP < 32). */
     hdr->qp = (uint8_t)tc_clip(TC_QP_DEFAULT + (int8_t)hdr->qp_delta, TC_QP_MIN, TC_QP_MAX);
@@ -147,6 +166,34 @@ static tc_error_t read_frame_header(tc_bs_reader_t *bs, tc_frame_header_t *hdr)
     hdr->tile_rows_log2 = (hdr->flags & TC_FLAG_TILE_R_MASK);
 
     return TC_OK;
+}
+
+/* ── DPB reference lookup by POC (B-frames) — mirrors the encoder
+ * exactly: forward = max POC < cur, backward = min POC > cur. */
+static const tc_frame_buf_t *dpb_find_poc_lt(const tc_ref_entry_t *dpb, int poc)
+{
+    const tc_frame_buf_t *best = NULL;
+    int best_p = -1;
+    for (int i = 0; i < TC_REF_FRAMES; i++) {
+        if (dpb[i].frame && dpb[i].poc >= 0 && dpb[i].poc < poc && dpb[i].poc > best_p) {
+            best_p = dpb[i].poc;
+            best = dpb[i].frame;
+        }
+    }
+    return best;
+}
+
+static const tc_frame_buf_t *dpb_find_poc_gt(const tc_ref_entry_t *dpb, int poc)
+{
+    const tc_frame_buf_t *best = NULL;
+    int best_p = 0x7FFFFFFF;
+    for (int i = 0; i < TC_REF_FRAMES; i++) {
+        if (dpb[i].frame && dpb[i].poc >= 0 && dpb[i].poc > poc && dpb[i].poc < best_p) {
+            best_p = dpb[i].poc;
+            best = dpb[i].frame;
+        }
+    }
+    return best;
 }
 
 /* ── Decode one 8×8 block ───────────────────────────────────── */
@@ -159,7 +206,7 @@ static tc_error_t read_frame_header(tc_bs_reader_t *bs, tc_frame_header_t *hdr)
 
 static void decode_block(tc_decoder_t *dec, int ctu_idx, int blk_idx,
                          int frame_x, int frame_y,
-                         int qp, tc_frame_type_t frame_type,
+                         int qp, tc_frame_type_t frame_type, int frame_poc,
                          tc_bs_reader_t *bs, tc_tans_dec_t *tans,
                          tc_rc_dec_t *rc, tc_rc_ctx_t *rc_ctx)
 {
@@ -228,6 +275,15 @@ static void decode_block(tc_decoder_t *dec, int ctu_idx, int blk_idx,
         tc_mv_s mv;
         const tc_frame_buf_t *selected_ref;
 
+        /* B-frames: ref selection for every inter-coded block
+         * (skip / inter / merge) — 0 = forward, 1 = backward,
+         * 2 = bidirectional average (D4). Context from neighbors. */
+        int ref_sel = 0;
+        if (frame_type == TC_FRAME_BIDIR) {
+            ref_sel = (int)dec_read_bits(bs, rc, rc_ctx, RC_CTX_REF_SEL, 2);
+            if (ref_sel > 2) ref_sel = 1;  /* Safety clamp */
+        }
+
         if (is_merge) {
             /* Merge mode: MV derived from median of spatial neighbors.
              * No ref_idx or MVD is signaled — significant bitrate savings.
@@ -263,15 +319,24 @@ static void decode_block(tc_decoder_t *dec, int ctu_idx, int blk_idx,
                     mv.y = py;
                 }
             }
-            selected_ref = dec->dpb[0].frame;  /* Merge always uses ref 0 */
+            if (frame_type == TC_FRAME_BIDIR) {
+                selected_ref = ref_sel ? dpb_find_poc_gt(dec->dpb, frame_poc)
+                                       : dpb_find_poc_lt(dec->dpb, frame_poc);
+            } else {
+                selected_ref = dec->dpb[0].frame;  /* Merge uses ref 0 on P */
+            }
         } else {
-            /* Skip/inter: read ref_idx + MVD from bitstream */
+            /* Skip/inter: read ref_idx + MVD from bitstream.
+             * ref_idx is only transmitted on P-frames; B-frames use
+             * the ref_sel bit and POC-implied references. */
             uint32_t ref_idx = 0;
-            if (frame_type != TC_FRAME_KEY) {
+            if (frame_type != TC_FRAME_KEY && frame_type != TC_FRAME_BIDIR) {
                 ref_idx = dec_read_bits(bs, rc, rc_ctx, RC_CTX_REF_IDX, 2);
                 if (ref_idx >= TC_REF_FRAMES) ref_idx = 0;  /* Safety clamp */
+            } else if (frame_type == TC_FRAME_BIDIR) {
+                ref_idx = (uint32_t)ref_sel;
             }
-            block_ref_idx = (uint8_t)ref_idx;  /* Save for ctu_data */
+            block_ref_idx = (uint8_t)ref_idx;  /* ref_sel for B-frames */
 
             /* Compute median MV predictor — must match encoder exactly.
              * MVD is coded relative to this predictor, not collocated.
@@ -310,7 +375,12 @@ static void decode_block(tc_decoder_t *dec, int ctu_idx, int blk_idx,
             int32_t mvd_x = dec_read_se(bs, rc, rc_ctx, RC_CTX_MVD_X);
             int32_t mvd_y = dec_read_se(bs, rc, rc_ctx, RC_CTX_MVD_Y);
             mv = (tc_mv_s){ mvd_x + predictor_mv.x, mvd_y + predictor_mv.y };
-            selected_ref = dec->dpb[ref_idx].frame;
+            if (frame_type == TC_FRAME_BIDIR) {
+                selected_ref = ref_sel ? dpb_find_poc_gt(dec->dpb, frame_poc)
+                                       : dpb_find_poc_lt(dec->dpb, frame_poc);
+            } else {
+                selected_ref = dec->dpb[ref_idx].frame;
+            }
         }
 
         block_mv = mv;  /* Save for ctu_data storage below */
@@ -319,8 +389,28 @@ static void decode_block(tc_decoder_t *dec, int ctu_idx, int blk_idx,
          * clamping) for any MV, so we call it unconditionally for every
          * reference that exists. This guarantees decoder output matches
          * encoder recon bit-exactly: the encoder emits whatever MV it
-         * finds, and both sides run the identical interpolation path. */
-        if (selected_ref) {
+         * finds, and both sides run the identical interpolation path.
+         * ref_sel == 2 (B-frames): average of forward and mirrored
+         * backward predictions — must match the encoder's bi path. */
+        if (frame_type == TC_FRAME_BIDIR && ref_sel == 2) {
+            const tc_frame_buf_t *rf = dpb_find_poc_lt(dec->dpb, frame_poc);
+            const tc_frame_buf_t *rb = dpb_find_poc_gt(dec->dpb, frame_poc);
+            if (rf && rb) {
+                tc_pixel_t pa[64], pb[64];
+                tc_inter_predict(rf->y, rf->stride_y,
+                                 rf->width, rf->height,
+                                 mv, pa, blk_size, blk_size);
+                tc_mv_s mvb = { -mv.x, -mv.y };
+                tc_inter_predict(rb->y, rb->stride_y,
+                                 rb->width, rb->height,
+                                 mvb, pb, blk_size, blk_size);
+                for (int i = 0; i < n_coeff; i++) {
+                    pred_block[i] = (tc_pixel_t)((pa[i] + pb[i] + 1) >> 1);
+                }
+            } else {
+                memset(pred_block, 128, (size_t)n_coeff);
+            }
+        } else if (selected_ref) {
             tc_inter_predict(selected_ref->y, selected_ref->stride_y,
                              selected_ref->width, selected_ref->height,
                              mv, pred_block, blk_size, blk_size);
@@ -507,7 +597,7 @@ static void decode_block(tc_decoder_t *dec, int ctu_idx, int blk_idx,
 /* ── Decode one CTU row ───────────────────────────────────── */
 
 static void decode_row_impl(tc_decoder_t *dec, int row, int qp,
-                             tc_frame_type_t frame_type,
+                             tc_frame_type_t frame_type, int frame_poc,
                              tc_bs_reader_t *bs, tc_tans_dec_t *tans,
                              tc_rc_dec_t *rc, tc_rc_ctx_t *rc_ctx)
 {
@@ -525,7 +615,7 @@ static void decode_row_impl(tc_decoder_t *dec, int row, int qp,
                 if (blk_x + 8 > dec->width || blk_y + 8 > dec->height) continue;
 
                 decode_block(dec, ctu_idx, by * 8 + bx, blk_x, blk_y,
-                             qp, frame_type, bs, tans,
+                             qp, frame_type, frame_poc, bs, tans,
                              rc, rc_ctx);
             }
         }
@@ -548,6 +638,7 @@ typedef struct {
     tc_decoder_t   *dec;
     int             qp;
     tc_frame_type_t frame_type;
+    int             frame_poc;
     tc_bs_reader_t *row_bs;      /* Per-row reader array */
     tc_tans_dec_t  *row_tans;    /* Per-row tANS decoder array */
     tc_rc_dec_t    *row_rc;      /* Per-row range coder (NULL if not entropy coded) */
@@ -557,7 +648,7 @@ typedef struct {
 static void decode_row_wpp(void *ctx, int row)
 {
     dec_wpp_ctx_t *wctx = (dec_wpp_ctx_t *)ctx;
-    decode_row_impl(wctx->dec, row, wctx->qp, wctx->frame_type,
+    decode_row_impl(wctx->dec, row, wctx->qp, wctx->frame_type, wctx->frame_poc,
                     &wctx->row_bs[row], &wctx->row_tans[row],
                     wctx->row_rc ? &wctx->row_rc[row] : NULL,
                     wctx->row_rc_ctx ? &wctx->row_rc_ctx[row * TC_NUM_CONTEXTS_RC] : NULL);
@@ -613,6 +704,10 @@ void tc_decoder_destroy(tc_decoder_t *dec)
 {
     if (!dec) return;
     tc_frame_free(dec->cur);
+    tc_frame_free(dec->disp.out);
+    for (int i = 0; i < dec->disp.n; i++) {
+        tc_frame_free(dec->disp.frames[i]);
+    }
     for (int i = 0; i < TC_REF_FRAMES; i++) {
         tc_frame_free(dec->dpb[i].frame);
     }
@@ -836,6 +931,7 @@ tc_error_t tc_decoder_decode(tc_decoder_t *dec,
             wctx.dec        = dec;
             wctx.qp         = qp;
             wctx.frame_type = hdr.frame_type;
+    wctx.frame_poc = hdr.frame_num;
             wctx.row_bs     = dec->row_bs;
             wctx.row_tans   = dec->row_tans;
             wctx.row_rc     = NULL;
@@ -860,7 +956,7 @@ tc_error_t tc_decoder_decode(tc_decoder_t *dec,
         }
 
         for (int row = 0; row < num_ctu_rows; row++) {
-            decode_row_impl(dec, row, qp, hdr.frame_type,
+            decode_row_impl(dec, row, qp, hdr.frame_type, hdr.frame_num,
                             &dec->bs, &dec->tans,
                             rc_ptr, rc_ctx_ptr);
             /* WPP rows are byte-aligned — skip padding to reach
@@ -900,6 +996,54 @@ tc_error_t tc_decoder_decode(tc_decoder_t *dec,
 
     dec->prev_qp = qp;
 
+    /* B-frame display reorder (D4): once a B-frame stream is
+     * detected (any frame carries the extension header), decoded
+     * frames are buffered by display POC and released one per call
+     * in display order. This matches the encoder's coding-order
+     * emission (anchor-first) while presenting decode output in
+     * presentation order. RAP/key frames reset the reorder window
+     * (seek support). */
+    if (hdr.has_ext_header) {
+        int is_rap = (hdr.flags & TC_FLAG_RAP) != 0;
+        if (is_rap && dec->disp.active) {
+            for (int i = 0; i < dec->disp.n; i++) tc_frame_free(dec->disp.frames[i]);
+            dec->disp.n = 0;
+            dec->disp.next_display = (int)hdr.frame_num;
+        }
+        dec->disp.active = 1;
+        if (dec->disp.n < TC_REF_FRAMES + 1) {
+            dec->disp.frames[dec->disp.n] = tc_frame_clone(dec->cur);
+            dec->disp.pocs[dec->disp.n] = (int)hdr.frame_num;
+            dec->disp.n++;
+        }
+        /* Pop the next display frame if its turn has come. */
+        for (int i = 0; i < dec->disp.n; i++) {
+            if (dec->disp.pocs[i] == dec->disp.next_display) {
+                if (!dec->disp.out) {
+                    dec->disp.out = tc_frame_alloc(dec->width, dec->height);
+                    if (!dec->disp.out) return TC_ERR_MEMORY;
+                }
+                tc_frame_copy(dec->disp.out, dec->disp.frames[i]);
+                tc_frame_free(dec->disp.frames[i]);
+                for (int k = i; k < dec->disp.n - 1; k++) {
+                    dec->disp.frames[k] = dec->disp.frames[k + 1];
+                    dec->disp.pocs[k]   = dec->disp.pocs[k + 1];
+                }
+                dec->disp.n--;
+                dec->disp.next_display++;
+                if (y)         *y        = dec->disp.out->y;
+                if (stride_y)  *stride_y = dec->disp.out->stride_y;
+                if (cb)        *cb       = dec->disp.out->cb;
+                if (stride_cb) *stride_cb = dec->disp.out->stride_c;
+                if (cr)        *cr       = dec->disp.out->cr;
+                if (stride_cr) *stride_cr = dec->disp.out->stride_c;
+                return TC_OK;
+            }
+        }
+        /* No display frame ready yet (reorder buffering). */
+        return TC_ERR_NEED_MORE;
+    }
+
     /* Output */
     if (y)         *y        = dec->cur->y;
     if (stride_y)  *stride_y = dec->cur->stride_y;
@@ -909,4 +1053,38 @@ tc_error_t tc_decoder_decode(tc_decoder_t *dec,
     if (stride_cr) *stride_cr = dec->cur->stride_c;
 
     return TC_OK;
+}
+
+/* Drain display-order frames still buffered after the last packet of
+ * a B-frame stream. Same output contract as tc_decoder_decode. */
+tc_error_t tc_decoder_flush_tail(tc_decoder_t *dec,
+                              const tc_pixel_t **y,  int *stride_y,
+                              const tc_pixel_t **cb, int *stride_cb,
+                              const tc_pixel_t **cr, int *stride_cr)
+{
+    if (!dec || !dec->disp.active) return TC_ERR_EOF;
+    for (int i = 0; i < dec->disp.n; i++) {
+        if (dec->disp.pocs[i] == dec->disp.next_display) {
+            if (!dec->disp.out) {
+                dec->disp.out = tc_frame_alloc(dec->width, dec->height);
+                if (!dec->disp.out) return TC_ERR_MEMORY;
+            }
+            tc_frame_copy(dec->disp.out, dec->disp.frames[i]);
+            tc_frame_free(dec->disp.frames[i]);
+            for (int k = i; k < dec->disp.n - 1; k++) {
+                dec->disp.frames[k] = dec->disp.frames[k + 1];
+                dec->disp.pocs[k]   = dec->disp.pocs[k + 1];
+            }
+            dec->disp.n--;
+            dec->disp.next_display++;
+            if (y)         *y        = dec->disp.out->y;
+            if (stride_y)  *stride_y = dec->disp.out->stride_y;
+            if (cb)        *cb       = dec->disp.out->cb;
+            if (stride_cb) *stride_cb = dec->disp.out->stride_c;
+            if (cr)        *cr       = dec->disp.out->cr;
+            if (stride_cr) *stride_cr = dec->disp.out->stride_c;
+            return TC_OK;
+        }
+    }
+    return TC_ERR_EOF;
 }

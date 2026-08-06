@@ -51,6 +51,11 @@ void tc_encoder_get_stats(tc_encoder_t *enc,
                            int32_t *total_frames,
                            double  *avg_psnr);
 
+/* Drain remaining buffered packets after the last input (B-frame):
+ * encodes the tail of the sequence as forward-only frames. Returns
+ * TC_OK and fills packet_out while packets remain, else TC_ERR_EOF. */
+tc_error_t tc_encoder_flush_tail(tc_encoder_t *enc, tc_packet_t *packet_out);
+
 /* ── Decoder API ─────────────────────────────────────────────── */
 
 typedef struct tc_decoder tc_decoder_t;
@@ -73,6 +78,14 @@ tc_error_t tc_decoder_decode(tc_decoder_t *dec,
 /* Get decoded frame dimensions. */
 void tc_decoder_get_info(tc_decoder_t *dec,
                           int32_t *width, int32_t *height);
+
+/* Drain display-order frames still buffered for B-frame reorder.
+ * Same output contract as tc_decoder_decode: TC_OK with output while
+ * a frame is available, then TC_ERR_EOF. */
+tc_error_t tc_decoder_flush_tail(tc_decoder_t *dec,
+                              const tc_pixel_t **y,  int *stride_y,
+                              const tc_pixel_t **cb, int *stride_cb,
+                              const tc_pixel_t **cr, int *stride_cr);
 
 /* Get CRC validation result from last decoded frame.
  * Returns 1 if CRC was OK or no CRC was present, 0 if CRC mismatch.

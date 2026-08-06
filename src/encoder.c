@@ -131,12 +131,43 @@ static double histogram_distance(const tc_pixel_t *cur, int cur_stride,
     return dist / (double)total;
 }
 
+/* ── DPB reference lookup by POC (B-frames) ─────────────────────
+ * B-frames reference the nearest decoded frames on each side of
+ * their display position: forward = max POC < cur, backward = min
+ * POC > cur. Both encoder and decoder resolve references the same
+ * way from the DPB ring, so no explicit ref index is transmitted. */
+static const tc_frame_buf_t *dpb_find_poc_lt(const tc_ref_entry_t *dpb, int poc)
+{
+    const tc_frame_buf_t *best = NULL;
+    int best_p = -1;
+    for (int i = 0; i < TC_REF_FRAMES; i++) {
+        if (dpb[i].frame && dpb[i].poc >= 0 && dpb[i].poc < poc && dpb[i].poc > best_p) {
+            best_p = dpb[i].poc;
+            best = dpb[i].frame;
+        }
+    }
+    return best;
+}
+
+static const tc_frame_buf_t *dpb_find_poc_gt(const tc_ref_entry_t *dpb, int poc)
+{
+    const tc_frame_buf_t *best = NULL;
+    int best_p = 0x7FFFFFFF;
+    for (int i = 0; i < TC_REF_FRAMES; i++) {
+        if (dpb[i].frame && dpb[i].poc >= 0 && dpb[i].poc > poc && dpb[i].poc < best_p) {
+            best_p = dpb[i].poc;
+            best = dpb[i].frame;
+        }
+    }
+    return best;
+}
+
 /* ── Encode one 8×8 block ───────────────────────────────────── */
 
 static void encode_block(tc_encoder_t *enc, tc_ctu_info_t *ctu,
                          int blk_idx, int bx, int by,
                          int frame_x, int frame_y,
-                         int qp, tc_frame_type_t frame_type,
+                         int qp, tc_frame_type_t frame_type, int frame_poc,
                          tc_bs_writer_t *bs, tc_tans_enc_t *tans,
                          tc_rc_enc_t *rc, tc_rc_ctx_t *rc_ctx)
 {
@@ -204,6 +235,7 @@ static void encode_block(tc_encoder_t *enc, tc_ctu_info_t *ctu,
      * and as ME search center). Computed once, reused for all refs. */
     tc_mv_s  merge_mv = {frame_x * 4, frame_y * 4};  /* Default: collocated */
     tc_sad_t merge_sad = 0x7FFFFFFF;
+    int merge_ref_sel = 0;      /* For B-frames: 0=fwd, 1=bwd */
     int merge_available = 0;
 
     if (frame_type != TC_FRAME_KEY) {
@@ -242,15 +274,34 @@ static void encode_block(tc_encoder_t *enc, tc_ctu_info_t *ctu,
         if (enc->cfg.preset == TC_PRESET_ULTRAFAST)  search_range = 16;
         if (enc->cfg.preset == TC_PRESET_SLOW)       search_range = 64;
 
-        /* Try each reference frame in DPB.
-         * Only search multiple refs on SLOW preset AND streaming-main+ profile.
-         * Baseline-mobile profile must never produce multi-ref bitstreams —
-         * a baseline-mobile decoder wouldn't know how to handle ref_idx. */
-        int max_refs = (enc->cfg.preset == TC_PRESET_SLOW &&
-                        enc->cfg.profile >= TC_PROFILE_STREAMING_MAIN) ? TC_REF_FRAMES : 1;
-        for (int ri = 0; ri < max_refs; ri++) {
-            const tc_frame_buf_t *rframe = enc->dpb[ri].frame;
-            if (!rframe) continue;
+        /* Candidate reference frames:
+         *  - P-frames: DPB slots (multi-ref on slow preset only)
+         *  - B-frames: forward ref (max POC < cur) and backward ref
+         *    (min POC > cur); the 1-bit ref_sel selects the winner.
+         * Baseline-mobile profile must never produce multi-ref P
+         * bitstreams — a baseline-mobile decoder wouldn't know how
+         * to handle ref_idx. */
+        const tc_frame_buf_t *cand_ref[2];
+        int cand_sel[2];
+        int n_cand = 0;
+        if (frame_type == TC_FRAME_BIDIR) {
+            const tc_frame_buf_t *fwd = dpb_find_poc_lt(enc->dpb, frame_poc);
+            const tc_frame_buf_t *bwd = dpb_find_poc_gt(enc->dpb, frame_poc);
+            if (fwd) { cand_ref[n_cand] = fwd; cand_sel[n_cand] = 0; n_cand++; }
+            if (bwd) { cand_ref[n_cand] = bwd; cand_sel[n_cand] = 1; n_cand++; }
+        } else {
+            int max_refs = (enc->cfg.preset == TC_PRESET_SLOW &&
+                            enc->cfg.profile >= TC_PROFILE_STREAMING_MAIN) ? TC_REF_FRAMES : 1;
+            for (int ri = 0; ri < max_refs && n_cand < 2; ri++) {
+                if (enc->dpb[ri].frame) {
+                    cand_ref[n_cand] = enc->dpb[ri].frame;
+                    cand_sel[n_cand] = ri;
+                    n_cand++;
+                }
+            }
+        }
+        for (int ci = 0; ci < n_cand; ci++) {
+            const tc_frame_buf_t *rframe = cand_ref[ci];
 
             /* Search center from merge MV (median predictor) */
             int center_x = tc_clip(merge_mv.x / 4, 0, rframe->width - blk_size);
@@ -267,41 +318,124 @@ static void encode_block(tc_encoder_t *enc, tc_ctu_info_t *ctu,
             if (ref_sad < best_inter_sad) {
                 best_inter_sad = ref_sad;
                 best_mv = ref_mv;
-                best_ref_idx = ri;
+                best_ref_idx = cand_sel[ci];
+            }
+        }
+
+        /* B-frames: bidirectional average candidate (D4). The winning
+         * MV is applied to both references (backward one mirrored) and
+         * the averaged prediction competes against the single-ref
+         * results; ref_sel = 2 signals it. */
+        if (frame_type == TC_FRAME_BIDIR && n_cand == 2) {
+            const tc_frame_buf_t *fwd = cand_ref[0];
+            const tc_frame_buf_t *bwd = cand_ref[1];
+            tc_pixel_t pa[64], pb[64];
+            tc_inter_predict(fwd->y, fwd->stride_y,
+                             fwd->width, fwd->height,
+                             best_mv, pa, blk_size, blk_size);
+            tc_mv_s mvb = { -best_mv.x, -best_mv.y };
+            tc_inter_predict(bwd->y, bwd->stride_y,
+                             bwd->width, bwd->height,
+                             mvb, pb, blk_size, blk_size);
+            tc_sad_t s = 0;
+            for (int i2 = 0; i2 < blk_size * blk_size; i2++) {
+                tc_pixel_t avg = (tc_pixel_t)((pa[i2] + pb[i2] + 1) >> 1);
+                s += (tc_sad_t)abs((int)orig_block[i2] - (int)avg);
+            }
+            if (s < best_inter_sad) {
+                best_inter_sad = s;
+                best_ref_idx = 2;
             }
         }
 
         /* Generate inter prediction from best reference */
         if (best_inter_sad < best_intra_sad) {
-            const tc_frame_buf_t *best_ref = enc->dpb[best_ref_idx].frame;
-            tc_inter_predict(best_ref->y, best_ref->stride_y,
-                             best_ref->width, best_ref->height,
-                             best_mv, inter_pred, blk_size, blk_size);
-            blk->is_intra = 0;
-            blk->mv = best_mv;
-            blk->ref_idx = (uint8_t)best_ref_idx;
-            memcpy(pred_block, inter_pred, (size_t)n_coeff * sizeof(tc_pixel_t));
+            const tc_frame_buf_t *best_ref = NULL;
+            if (frame_type == TC_FRAME_BIDIR && best_ref_idx == 2) {
+                const tc_frame_buf_t *fwd = dpb_find_poc_lt(enc->dpb, frame_poc);
+                const tc_frame_buf_t *bwd = dpb_find_poc_gt(enc->dpb, frame_poc);
+                if (fwd && bwd) {
+                    tc_pixel_t pa[64], pb[64];
+                    tc_inter_predict(fwd->y, fwd->stride_y,
+                                     fwd->width, fwd->height,
+                                     best_mv, pa, blk_size, blk_size);
+                    tc_mv_s mvb = { -best_mv.x, -best_mv.y };
+                    tc_inter_predict(bwd->y, bwd->stride_y,
+                                     bwd->width, bwd->height,
+                                     mvb, pb, blk_size, blk_size);
+                    for (int i2 = 0; i2 < blk_size * blk_size; i2++) {
+                        inter_pred[i2] = (tc_pixel_t)((pa[i2] + pb[i2] + 1) >> 1);
+                    }
+                }
+            } else if (frame_type == TC_FRAME_BIDIR) {
+                best_ref = best_ref_idx ? dpb_find_poc_gt(enc->dpb, frame_poc)
+                                        : dpb_find_poc_lt(enc->dpb, frame_poc);
+            } else {
+                best_ref = enc->dpb[best_ref_idx].frame;
+            }
+            if (best_ref) {
+                tc_inter_predict(best_ref->y, best_ref->stride_y,
+                                 best_ref->width, best_ref->height,
+                                 best_mv, inter_pred, blk_size, blk_size);
+                blk->is_intra = 0;
+                blk->mv = best_mv;
+                blk->ref_idx = (uint8_t)best_ref_idx;
+                memcpy(pred_block, inter_pred, (size_t)n_coeff * sizeof(tc_pixel_t));
+            } else if (frame_type == TC_FRAME_BIDIR && best_ref_idx == 2) {
+                blk->is_intra = 0;
+                blk->mv = best_mv;
+                blk->ref_idx = 2;
+                memcpy(pred_block, inter_pred, (size_t)n_coeff * sizeof(tc_pixel_t));
+            }
         }
 
         /* Compute merge SAD: prediction quality at the merge MV position.
-         * This determines whether merge mode (implicit MV, no MVD/ref_idx)
-         * is a good choice — significant bitrate savings when the median
-         * predictor is accurate. */
+         * This determines whether merge mode (implicit MV, no ref_idx/MVD)
+         * is a good choice. For B-frames the better of the two references
+         * wins, and ref_sel is signaled. */
         if (merge_available) {
-            const tc_frame_buf_t *rframe = enc->dpb[0].frame;
-            if (rframe) {
+            for (int ci = 0; ci < n_cand; ci++) {
+                const tc_frame_buf_t *rframe = cand_ref[ci];
                 int mx = merge_mv.x >> 2;
                 int my = merge_mv.y >> 2;
                 if (mx >= 0 && my >= 0 &&
                     mx + blk_size <= rframe->width &&
                     my + blk_size <= rframe->height) {
-                    merge_sad = tc_sad(rframe->y + my * rframe->stride_y + mx,
-                                       rframe->stride_y,
-                                       orig_block, blk_size, blk_size);
+                    tc_sad_t s = tc_sad(rframe->y + my * rframe->stride_y + mx,
+                                        rframe->stride_y,
+                                        orig_block, blk_size, blk_size);
+                    if (s < merge_sad) {
+                        merge_sad = s;
+                        merge_ref_sel = cand_sel[ci];
+                    }
+                }
+            }
+            /* B-frames: bidirectional merge candidate (avg of both
+             * references at the merge MV, backward mirrored). */
+            if (frame_type == TC_FRAME_BIDIR && n_cand == 2) {
+                const tc_frame_buf_t *fwd = cand_ref[0];
+                const tc_frame_buf_t *bwd = cand_ref[1];
+                tc_pixel_t pa[64], pb[64];
+                tc_inter_predict(fwd->y, fwd->stride_y,
+                                 fwd->width, fwd->height,
+                                 merge_mv, pa, blk_size, blk_size);
+                tc_mv_s mvb = { -merge_mv.x, -merge_mv.y };
+                tc_inter_predict(bwd->y, bwd->stride_y,
+                                 bwd->width, bwd->height,
+                                 mvb, pb, blk_size, blk_size);
+                tc_sad_t s = 0;
+                for (int i2 = 0; i2 < blk_size * blk_size; i2++) {
+                    tc_pixel_t avg = (tc_pixel_t)((pa[i2] + pb[i2] + 1) >> 1);
+                    s += (tc_sad_t)abs((int)orig_block[i2] - (int)avg);
+                }
+                if (s < merge_sad) {
+                    merge_sad = s;
+                    merge_ref_sel = 2;
                 }
             }
         }
     }
+
 
     /* ── Compute residual ──────────────────────────────────── */
     for (int i = 0; i < n_coeff; i++) {
@@ -462,19 +596,45 @@ static void encode_block(tc_encoder_t *enc, tc_ctu_info_t *ctu,
 
     /* For merge: override prediction with merge MV (from median predictor) */
     if (is_merge) {
-        const tc_frame_buf_t *rframe = enc->dpb[0].frame;
-        if (rframe) {
-            tc_inter_predict(rframe->y, rframe->stride_y,
-                             rframe->width, rframe->height,
-                             merge_mv, pred_block, blk_size, blk_size);
+        if (frame_type == TC_FRAME_BIDIR && merge_ref_sel == 2) {
+            const tc_frame_buf_t *fwd = dpb_find_poc_lt(enc->dpb, frame_poc);
+            const tc_frame_buf_t *bwd = dpb_find_poc_gt(enc->dpb, frame_poc);
+            if (fwd && bwd) {
+                tc_pixel_t pa[64], pb[64];
+                tc_inter_predict(fwd->y, fwd->stride_y,
+                                 fwd->width, fwd->height,
+                                 merge_mv, pa, blk_size, blk_size);
+                tc_mv_s mvb = { -merge_mv.x, -merge_mv.y };
+                tc_inter_predict(bwd->y, bwd->stride_y,
+                                 bwd->width, bwd->height,
+                                 mvb, pb, blk_size, blk_size);
+                for (int i2 = 0; i2 < n_coeff; i2++) {
+                    pred_block[i2] = (tc_pixel_t)((pa[i2] + pb[i2] + 1) >> 1);
+                }
+            } else {
+                memset(pred_block, 128, (size_t)n_coeff);
+            }
         } else {
-            /* Safety: dpb[0] should never be NULL on P-frames, but if it is,
-             * fill prediction with 128 to avoid stale intra pred data. */
-            memset(pred_block, 128, (size_t)n_coeff);
+            const tc_frame_buf_t *rframe = NULL;
+            if (frame_type == TC_FRAME_BIDIR) {
+                rframe = merge_ref_sel ? dpb_find_poc_gt(enc->dpb, frame_poc)
+                                       : dpb_find_poc_lt(enc->dpb, frame_poc);
+            } else {
+                rframe = enc->dpb[0].frame;
+            }
+            if (rframe) {
+                tc_inter_predict(rframe->y, rframe->stride_y,
+                                 rframe->width, rframe->height,
+                                 merge_mv, pred_block, blk_size, blk_size);
+            } else {
+                /* Safety: should never be NULL on inter frames, but if it is,
+                 * fill prediction with 128 to avoid stale intra pred data. */
+                memset(pred_block, 128, (size_t)n_coeff);
+            }
         }
         blk->is_intra = 0;
         blk->mv = merge_mv;
-        blk->ref_idx = 0;
+        blk->ref_idx = (uint8_t)merge_ref_sel;
     }
 
     /* ── Write mode decision to bitstream ──────────────────── */
@@ -491,6 +651,15 @@ static void encode_block(tc_encoder_t *enc, tc_ctu_info_t *ctu,
         }
     }
 
+    /* B-frames: ref selection for every inter-coded block
+     * (skip / inter / merge): 0 = forward, 1 = backward, 2 = average
+     * of both (bidirectional). The context is derived from the
+     * neighbors' refs (D4): class = ref_sel_ctx(). */
+    if (frame_type == TC_FRAME_BIDIR && !blk->is_intra) {
+        enc_write_bits(bs, rc, rc_ctx, RC_CTX_REF_SEL,
+                       (uint32_t)(blk->ref_idx & 3), 2);
+    }
+
     if (blk->is_intra && !is_skip && !is_merge) {
         enc_write_bits(bs, rc, rc_ctx, RC_CTX_INTRA_MODE, (uint32_t)blk->intra_mode, 5);
     }
@@ -499,8 +668,9 @@ static void encode_block(tc_encoder_t *enc, tc_ctu_info_t *ctu,
      * derives MV from spatial neighbors, saving ref_idx + MVD bits). */
     if (!blk->is_intra && !is_merge) {
         /* Write ref_idx (2 bits, supports up to 4 reference frames).
-         * Only written for inter/skip blocks on P-frames. */
-        if (frame_type != TC_FRAME_KEY) {
+         * Written for inter/skip blocks on P-frames only — B-frames
+         * transmit ref_sel instead (their refs are POC-implied). */
+        if (frame_type != TC_FRAME_KEY && frame_type != TC_FRAME_BIDIR) {
             enc_write_bits(bs, rc, rc_ctx, RC_CTX_REF_IDX, (uint32_t)blk->ref_idx, 2);
         }
         /* Write MVD for inter/skip blocks.
@@ -728,6 +898,7 @@ typedef struct {
     tc_encoder_t *enc;
     int qp;
     tc_frame_type_t frame_type;
+    int poc;
 #if !defined(TCODEC_NO_THREADS)
     int use_wpp;       /* 1 = use per-row buffers, 0 = use main buffer */
 #endif
@@ -793,7 +964,7 @@ static void encode_row(void *ctx, int row)
                      * (written only for non-skip blocks) */
                     encode_block(enc, ctu, blk_idx, bx, by,
                                  blk_x, blk_y,
-                                 qp, rctx->frame_type, bs, tans,
+                                 qp, rctx->frame_type, rctx->poc, bs, tans,
                                  rc, rc_ctx);
                 }
             }
@@ -847,6 +1018,16 @@ static void write_frame_header(tc_bs_writer_t *bs, tc_frame_header_t *hdr)
         tc_bs_writer_write_bits(bs, hdr->profile_level, 8);
         /* v1: tool_flags (16 bits) */
         tc_bs_writer_write_bits(bs, hdr->tool_flags, 16);
+
+        /* v1 extension header (D4): one byte carrying the frame type
+         * code (bits 0-1: 0=KEY, 1=INTER, 2=BIDIR), written on every
+         * frame of a B-frame stream. The flags byte has no spare bits
+         * (tiles occupy 0-2), so B/stream signaling lives here. */
+        if (hdr->has_ext_header) {
+            uint8_t fc = (hdr->frame_type == TC_FRAME_KEY) ? 0 :
+                         (hdr->frame_type == TC_FRAME_BIDIR) ? 2 : 1;
+            tc_bs_writer_write_bits(bs, fc, 8);
+        }
     }
 
     tc_bs_writer_byte_align(bs);
@@ -890,6 +1071,9 @@ tc_encoder_t *tc_encoder_create(const tc_config_t *config)
 
     /* Init entropy coding mode */
     enc->use_entropy_coded = config->enable_entropy_coded ? 1 : 0;
+
+    /* B-frame reorder state */
+    enc->bf.b_mode = config->enable_b_frames ? 1 : 0;
 
     /* Init rate control */
     tc_ratectl_init(&enc->rc, config);
@@ -965,6 +1149,10 @@ void tc_encoder_destroy(tc_encoder_t *enc)
     for (int i = 0; i < TC_REF_FRAMES; i++) {
         tc_frame_free(enc->dpb[i].frame);
     }
+    /* B-frame pending display buffer */
+    for (int i = 0; i < enc->bf.n; i++) {
+        tc_frame_free(enc->bf.frame[i]);
+    }
     free(enc->ctu_data);
     free(enc->out_buf);
 #if !defined(TCODEC_NO_THREADS)
@@ -1000,53 +1188,62 @@ void tc_encoder_get_stats(tc_encoder_t *enc,
         ? enc->sum_psnr / enc->total_frames : 0.0;
 }
 
+tc_error_t tc_encoder_flush_tail(tc_encoder_t *enc, tc_packet_t *packet_out);
+static int  bf_can_emit(const tc_encoder_t *enc);
+static tc_error_t bf_emit_scheduled(tc_encoder_t *enc, tc_packet_t *out);
+
 /* ── Main encode function ────────────────────────────────────── */
 
-tc_error_t tc_encoder_encode(tc_encoder_t *enc,
-                              const tc_pixel_t *y,  int stride_y,
-                              const tc_pixel_t *cb, int stride_cb,
-                              const tc_pixel_t *cr, int stride_cr,
+static tc_error_t encode_poc_frame(tc_encoder_t *enc,
+                              const tc_frame_buf_t *frame,
+                              int poc, int b_layer_qp_off,
                               tc_packet_t *packet_out)
 {
-    /* Copy input to internal frame */
-    for (int row = 0; row < enc->cfg.height; row++) {
-        memcpy(enc->cur->y + row * enc->cur->stride_y,
-               y + row * stride_y, (size_t)enc->cfg.width);
-    }
-    for (int row = 0; row < enc->cfg.height / 2; row++) {
-        memcpy(enc->cur->cb + row * enc->cur->stride_c,
-               cb + row * stride_cb, (size_t)(enc->cfg.width / 2));
-        memcpy(enc->cur->cr + row * enc->cur->stride_c,
-               cr + row * stride_cr, (size_t)(enc->cfg.width / 2));
-    }
+    /* Source pixels: encode_block reads enc->cur, so the display
+     * frame (bf buffer in B-mode) must be staged into enc->cur. */
+    tc_frame_copy(enc->cur, frame);
 
-    /* Determine frame type */
-    int is_key = enc->force_keyframe || (enc->frame_count == 0);
+    /* Determine frame type. With B-frames the POC (display position)
+     * drives the decision: keyframes land on anchor positions that are
+     * multiples of the keyframe interval. Without B-frames the legacy
+     * path (frame_count == frame) is preserved exactly, including scene
+     * cut detection (disabled in B-mode — the reorder buffer makes
+     * per-frame cuts ambiguous). */
     int keyframe_interval = enc->cfg.keyframe_interval > 0
         ? enc->cfg.keyframe_interval : 30;
-
-    if (!is_key && (enc->frame_count % keyframe_interval == 0)) {
-        is_key = 1;
-    }
-
-    /* Scene cut detection: compare current vs previous frame */
-    if (!is_key && enc->frame_count > 0 && enc->dpb[0].frame != NULL) {
-        double cut_dist = histogram_distance(
-            enc->cur->y, enc->cur->stride_y,
-            enc->dpb[0].frame->y, enc->dpb[0].frame->stride_y,
-            enc->cfg.width, enc->cfg.height);
-        if (cut_dist > SCENE_CUT_THRESHOLD) {
+    int is_key;
+    if (enc->bf.b_mode) {
+        is_key = enc->force_keyframe || (poc == 0) || (poc % keyframe_interval == 0);
+    } else {
+        is_key = enc->force_keyframe || (enc->frame_count == 0);
+        if (!is_key && (enc->frame_count % keyframe_interval == 0)) {
             is_key = 1;
         }
+        if (!is_key && enc->frame_count > 0 && enc->dpb[0].frame != NULL) {
+            double cut_dist = histogram_distance(
+                frame->y, frame->stride_y,
+                enc->dpb[0].frame->y, enc->dpb[0].frame->stride_y,
+                enc->cfg.width, enc->cfg.height);
+            if (cut_dist > SCENE_CUT_THRESHOLD) {
+                is_key = 1;
+            }
+        }
     }
-
     enc->force_keyframe = 0;
 
-    tc_frame_type_t frame_type = is_key ? TC_FRAME_KEY : TC_FRAME_INTER;
+    tc_frame_type_t frame_type;
+    if (is_key)                 frame_type = TC_FRAME_KEY;
+    else if (b_layer_qp_off > 0) frame_type = TC_FRAME_BIDIR;
+    else                        frame_type = TC_FRAME_INTER;
 
-    /* Rate control */
+    /* Rate control: hierarchical QP offsets for B layers (D4):
+     * middle B (+2) one step above its anchors, outer B's (+1/+3)
+     * two steps — a classic hierarchical quality ladder. */
     tc_ratectl_frame_start(&enc->rc, frame_type);
     int qp = tc_ratectl_get_qp(&enc->rc);
+    if (frame_type == TC_FRAME_BIDIR) {
+        qp = tc_clip(qp + b_layer_qp_off, 0, 63);
+    }
 
     /* Reset bitstream writer.
      * Zero the output buffer for deterministic encoding — even though
@@ -1120,6 +1317,11 @@ tc_error_t tc_encoder_encode(tc_encoder_t *enc,
         if (enc->use_entropy_coded) {
             tools |= TC_TOOL_ENTROPY_CODED;
         }
+        /* B-frames (D4): signaled per frame so the decoder knows the
+         * block syntax carries the ref_sel bit. */
+        if (frame_type == TC_FRAME_BIDIR) {
+            tools |= TC_TOOL_BIPRED;
+        }
         /* Future tools (not yet implemented):
          * TC_TOOL_DERINGING      — directional deringing (Phase 7)
          * TC_TOOL_SAO            — sample adaptive offset (Phase 7)
@@ -1130,11 +1332,15 @@ tc_error_t tc_encoder_encode(tc_encoder_t *enc,
         hdr.tool_flags = tools;
         hdr.is_rap       = is_key ? 1 : 0;
         hdr.has_crc      = enc->cfg.enable_crc ? 1 : 0;
-        hdr.has_ext_header = 0;  /* No extension headers yet */
+        /* B-frame streams carry the per-frame type extension (D4):
+         * written on every frame so the decoder activates display
+         * reorder from the first packet. */
+        hdr.has_ext_header = enc->bf.b_mode ? 1 : 0;
+        if (hdr.has_ext_header) hdr.flags |= TC_FLAG_EXT_HEADER;
     }
 
     hdr.qp_delta  = (uint8_t)(int8_t)(qp - TC_QP_DEFAULT);
-    hdr.frame_num = (uint8_t)(enc->frame_count & 0xFF);
+    hdr.frame_num = (uint8_t)(poc & 0xFF);   /* POC = display index */
     hdr.frame_type = frame_type;
     hdr.qp = (uint8_t)qp;
 
@@ -1145,7 +1351,7 @@ tc_error_t tc_encoder_encode(tc_encoder_t *enc,
      * inter prediction, so clearing dpb[0] too is safe. If we only
      * cleared slots 1+, the DPB shift after encoding would copy the
      * stale dpb[0] (pre-cut frame) into dpb[1]. */
-    if (is_key && enc->frame_count > 0) {
+    if (is_key && poc > 0) {
         for (int i = 0; i < TC_REF_FRAMES; i++) {
             if (enc->dpb[i].frame) {
                 tc_frame_free(enc->dpb[i].frame);
@@ -1160,6 +1366,7 @@ tc_error_t tc_encoder_encode(tc_encoder_t *enc,
     rctx.enc = enc;
     rctx.qp = qp;
     rctx.frame_type = frame_type;
+    rctx.poc = poc;
 
     /* Set up range coder state if entropy coded is active.
      * Contexts are initialized fresh per frame (not persisted). */
@@ -1267,7 +1474,7 @@ tc_error_t tc_encoder_encode(tc_encoder_t *enc,
     tc_ratectl_frame_end(&enc->rc, (int64_t)frame_bytes * 8);
 
     /* Compute PSNR */
-    double psnr = tc_psnr(enc->cur->y, enc->cur->stride_y,
+    double psnr = tc_psnr(frame->y, frame->stride_y,
                            enc->recon->y, enc->recon->stride_y,
                            enc->cfg.width, enc->cfg.height);
     enc->sum_psnr += psnr;
@@ -1283,13 +1490,13 @@ tc_error_t tc_encoder_encode(tc_encoder_t *enc,
         enc->dpb[i] = enc->dpb[i - 1];
     }
     enc->dpb[0].frame = tc_frame_clone(enc->recon);
-    enc->dpb[0].poc = enc->frame_count;
+    enc->dpb[0].poc = poc;
     enc->dpb[0].qp_avg = (uint8_t)qp;
 
     /* Fill output packet */
     packet_out->data = enc->out_buf;
     packet_out->size = frame_bytes;
-    packet_out->pts  = enc->frame_count;
+    packet_out->pts  = poc;
     packet_out->key_frame = is_key;
 
     enc->total_bytes += (int64_t)frame_bytes;
@@ -1297,4 +1504,154 @@ tc_error_t tc_encoder_encode(tc_encoder_t *enc,
     enc->frame_count++;
 
     return TC_OK;
+}
+
+/*
+ * ── B-frame emission path (D4) ───────────────────────────────────
+ * display-order inputs are buffered in enc->bf; the codec emits
+ * packets in coding order so every reference is already decoded:
+ *   A(0), then for group k=1,2,...: A(4k), B(4k-2), B(4k-3), B(4k-1).
+ * B(4k-2) references {A(4k-4), A(4k)}, B(4k-3) references
+ * {A(4k-4), B(4k-2)}, B(4k-1) references {B(4k-2), A(4k)} — the
+ * hierarchical ladder. QP offsets: middle B +1, outer B's +2.
+ */
+static int bf_schedule_poc(int emit_pos)
+{
+    if (emit_pos == 0) return 0;
+    int k  = (emit_pos + 3) / 4;
+    int c  = (emit_pos - 1) % 4;
+    const int off[4] = {0, -2, -3, -1};
+    return 4 * k + off[c];
+}
+
+static int bf_sched_qp_off(int emit_pos)
+{
+    (void)emit_pos;
+    return 0;  /* D4 tunable: B frames at anchor QP */
+}
+
+static void bf_push(tc_encoder_t *enc, const tc_frame_buf_t *frame, int poc)
+{
+    if (enc->bf.n >= 8) return;
+    enc->bf.frame[enc->bf.n] = tc_frame_clone(frame);
+    enc->bf.poc[enc->bf.n] = poc;
+    enc->bf.n++;
+}
+
+static int bf_find(const tc_encoder_t *enc, int poc)
+{
+    for (int i = 0; i < enc->bf.n; i++)
+        if (enc->bf.poc[i] == poc) return i;
+    return -1;
+}
+
+static void bf_remove(tc_encoder_t *enc, int idx)
+{
+    tc_frame_free(enc->bf.frame[idx]);
+    for (int i = idx; i < enc->bf.n - 1; i++) {
+        enc->bf.frame[i] = enc->bf.frame[i + 1];
+        enc->bf.poc[i] = enc->bf.poc[i + 1];
+    }
+    enc->bf.n--;
+}
+
+/*
+ * ── Encode one frame (public entry) ──────────────────────────────
+ */
+tc_error_t tc_encoder_encode(tc_encoder_t *enc,
+                              const tc_pixel_t *y,  int stride_y,
+                              const tc_pixel_t *cb, int stride_cb,
+                              const tc_pixel_t *cr, int stride_cr,
+                              tc_packet_t *packet_out)
+{
+    /* Copy input to internal frame */
+    for (int row = 0; row < enc->cfg.height; row++) {
+        memcpy(enc->cur->y + row * enc->cur->stride_y,
+               y + row * stride_y, (size_t)enc->cfg.width);
+    }
+    for (int row = 0; row < enc->cfg.height / 2; row++) {
+        memcpy(enc->cur->cb + row * enc->cur->stride_c,
+               cb + row * stride_cb, (size_t)(enc->cfg.width / 2));
+        memcpy(enc->cur->cr + row * enc->cur->stride_c,
+               cr + row * stride_cr, (size_t)(enc->cfg.width / 2));
+    }
+
+    if (enc->bf.b_mode) {
+        /* Buffer this display input, then emit the next coding-order
+         * packet when its GOP is complete (TC_ERR_NEED_MORE signals
+         * the caller to keep feeding frames; the CLI drains the tail
+         * with tc_encoder_flush_tail after the last input). */
+        bf_push(enc, enc->cur, enc->bf.next_input);
+        enc->bf.next_input++;
+        if (!bf_can_emit(enc)) return TC_ERR_NEED_MORE;
+        return bf_emit_scheduled(enc, packet_out);
+    }
+
+    /* Legacy path: exactly one packet per input frame. */
+    return encode_poc_frame(enc, enc->cur, enc->frame_count, 0, packet_out);
+}
+
+/*
+ * ── Tail drain ───────────────────────────────────────────────────
+ * Encodes buffered display frames that could not form a complete
+ * GOP (the tail of the sequence) as forward-only P frames. Also used
+ * as the regular emit path when B-frames are enabled.
+ */
+/* Position of the anchor slot (A(4k)) inside the current group:
+ * emit_pos 1,5,9,... are anchor slots themselves. */
+static int bf_anchor_slot(int emit_pos)
+{
+    if (emit_pos == 0) return 0;
+    return emit_pos - ((emit_pos - 1) % 4);
+}
+
+/* Can the next scheduled packet be emitted? Its own POC must be
+ * buffered, and the group anchor must be available: buffered for
+ * the anchor slot itself, or already emitted (it lives in the DPB)
+ * for the B slots that follow it. */
+static int bf_can_emit(const tc_encoder_t *enc)
+{
+    if (enc->bf.n == 0) return 0;
+    int p = enc->bf.emit_pos;
+    int want = bf_schedule_poc(p);
+    if (bf_find(enc, want) < 0) return 0;
+    if (p == 0) return 1;
+    if ((p - 1) % 4 == 0) return 1;         /* anchor slot: want == anchor */
+    return enc->bf.emit_pos > bf_anchor_slot(p);
+}
+
+/* Emit the next scheduled packet (caller verified bf_can_emit). */
+static tc_error_t bf_emit_scheduled(tc_encoder_t *enc, tc_packet_t *out)
+{
+    int p = enc->bf.emit_pos;
+    int poc = bf_schedule_poc(p);
+    int idx = bf_find(enc, poc);
+    enc->bf.emit_pos++;
+    tc_error_t r = encode_poc_frame(enc, enc->bf.frame[idx], poc,
+                                    bf_sched_qp_off(p), out);
+    bf_remove(enc, idx);
+    return r;
+}
+
+tc_error_t tc_encoder_flush_tail(tc_encoder_t *enc, tc_packet_t *packet_out)
+{
+    if (!enc->bf.b_mode) return TC_ERR_EOF;
+
+    /* 1) Keep advancing the schedule while it is satisfiable. */
+    if (bf_can_emit(enc)) return bf_emit_scheduled(enc, packet_out);
+
+    /* 2) End-of-stream: the remaining display frames cannot form a
+     * complete GOP (its future anchor never arrived). Emit them as
+     * forward-only P frames in display order. */
+    if (enc->bf.n > 0) {
+        int best = 0;
+        for (int i = 1; i < enc->bf.n; i++)
+            if (enc->bf.poc[i] < enc->bf.poc[best]) best = i;
+        int pb = enc->bf.poc[best];
+        tc_error_t r = encode_poc_frame(enc, enc->bf.frame[best], pb, 0,
+                                        packet_out);
+        bf_remove(enc, best);
+        return r;
+    }
+    return TC_ERR_EOF;
 }

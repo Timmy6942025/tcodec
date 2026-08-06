@@ -159,6 +159,7 @@ typedef enum {
     TC_ERR_BITSTREAM   = -3,
     TC_ERR_EOF         = -4,
     TC_ERR_INTERNAL    = -5,
+    TC_ERR_NEED_MORE   = -6,   /* No output frame ready yet (B-frame reorder) */
 } tc_error_t;
 
 /* ── Motion vector ────────────────────────────────────────────── */
@@ -229,6 +230,8 @@ typedef struct tc_frame_header {
 
     /* ── Derived fields (not in bitstream) ── */
     tc_frame_type_t frame_type;
+    tc_frame_type_t frame_type_ext;   /* From v1 extension header (D4) */
+    int             has_type_ext;     /* 1 if extension header present */
     uint8_t         qp;               /* Absolute QP for this frame */
     uint8_t         tile_cols_log2;
     uint8_t         tile_rows_log2;
@@ -265,7 +268,7 @@ typedef struct tc_frame_header {
 #define TC_TOOL_DERINGING         (1u << 7)  /* Directional deringing (future) */
 #define TC_TOOL_SAO               (1u << 8)  /* Sample Adaptive Offset (future) */
 #define TC_TOOL_GRAIN_SYNTHESIS   (1u << 9)  /* Film grain synthesis (future) */
-#define TC_TOOL_BIPRED            (1u << 10) /* Bi-prediction (future) */
+#define TC_TOOL_BIPRED            (1u << 10) /* B-frames: bi-directional prediction (D4) */
 #define TC_TOOL_LOOP_RESTORATION  (1u << 11) /* Wiener-like restoration (future) */
 #define TC_TOOL_AFFINE_MOTION     (1u << 12) /* Affine motion model (future) */
 #define TC_TOOL_EXTENDED_PART     (1u << 13) /* Extended partition types (future) */
@@ -333,6 +336,7 @@ typedef struct tc_config {
     uint8_t         level_idx;        /* Level index (0 = auto) */
     int             enable_crc;      /* 1 = add CRC-16 to frames (v1 only) */
     int             enable_entropy_coded; /* 1 = use range coder (Phase 3, v1 only) */
+    int             enable_b_frames;      /* 1 = hierarchical B-frames, GOP 4 (D4, v1 only) */
 } tc_config_t;
 
 #ifdef __cplusplus

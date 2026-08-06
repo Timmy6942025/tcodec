@@ -49,7 +49,8 @@ static void print_usage(const char *prog)
         "  --bs-version V Bitstream version 0 or 1 (default 1)\n"
         "  --profile P     Profile 0-3 (default 0=baseline-mobile)\n"
         "  --level L       Level 0-8 (default 0=auto)\n"
-        "  --crc           Enable CRC-16 (v1 only)\n"        "  --entropy       Use context-modeled range coder (v1 only)\n",
+        "  --crc           Enable CRC-16 (v1 only)\n"        "  --entropy       Use context-modeled range coder (v1 only)\n"
+        "  -b, --bframes   Hierarchical B-frames (v1 only)\n",
         TCODEC_VERSION_STRING, prog);
 }
 
@@ -67,6 +68,7 @@ int main(int argc, char **argv)
     int level = -1;
     int enable_crc = 0;
     int enable_entropy = 0;
+    int enable_b = 0;
 
     /* Parse arguments */
     for (int i = 1; i < argc; i++) {
@@ -98,6 +100,8 @@ int main(int argc, char **argv)
             enable_crc = 1;
         } else if (strcmp(argv[i], "--entropy") == 0) {
             enable_entropy = 1;
+        } else if (strcmp(argv[i], "-b") == 0 || strcmp(argv[i], "--bframes") == 0) {
+            enable_b = 1;
         } else if (strcmp(argv[i], "-n") == 0 && i + 1 < argc) {
             max_frames = atoi(argv[++i]);
         } else if (strcmp(argv[i], "-v") == 0) {
@@ -161,6 +165,13 @@ int main(int argc, char **argv)
             fprintf(stderr, "Warning: --entropy has no effect with v0 bitstream (RC is v1-only)\n");
         }
         cfg.enable_entropy_coded = 1;
+    }
+
+    if (enable_b) {
+        if (cfg.bitstream_version == TC_VERSION_V0) {
+            fprintf(stderr, "Warning: -b has no effect with v0 bitstream (B-frames are v1-only)\n");
+        }
+        cfg.enable_b_frames = 1;
     }
 
     if (target_bitrate_kbps > 0) {
@@ -268,6 +279,13 @@ int main(int argc, char **argv)
                                             cb_buf, width / 2,
                                             cr_buf, width / 2,
                                             &pkt);
+        if (err == TC_ERR_NEED_MORE) {
+            /* B-frame reorder buffering: keep feeding frames. */
+            if (verbose) fprintf(stderr, "Frame %4d: buffered (NEED_MORE)\n",
+                                 frame_count);
+            frame_count++;
+            continue;
+        }
         if (err != TC_OK) {
             fprintf(stderr, "Error: encode failed at frame %d: %s\n",
                     frame_count, tc_error_string(err));
@@ -287,6 +305,22 @@ int main(int argc, char **argv)
         }
 
         frame_count++;
+    }
+
+    /* B-frame tail drain: the final partial GOP cannot reference a
+     * future anchor, so tc_encoder_flush_tail emits the remaining
+     * display frames as forward-only P packets. */
+    for (;;) {
+        tc_packet_t pkt;
+        tc_error_t err = tc_encoder_flush_tail(enc, &pkt);
+        if (err == TC_ERR_EOF) break;
+        if (err != TC_OK) {
+            fprintf(stderr, "Error: flush tail failed: %s\n", tc_error_string(err));
+            break;
+        }
+        uint32_t pkt_size = (uint32_t)pkt.size;
+        fwrite(&pkt_size, 4, 1, fout);
+        fwrite(pkt.data, 1, pkt.size, fout);
     }
 
     clock_t end = clock();

@@ -35,6 +35,27 @@ static void print_usage(const char *prog)
         TCODEC_VERSION_STRING, prog);
 }
 
+
+static void tc_write_yuv(FILE *fout,
+                         const tc_pixel_t *y, int stride_y,
+                         const tc_pixel_t *cb, int stride_cb,
+                         const tc_pixel_t *cr, int stride_cr,
+                         int w, int h, int is_rgb, uint8_t *rgb_buf)
+{
+    if (is_rgb) {
+        tc_ycbcr_to_rgb(y, stride_y, cb, stride_cb, cr, stride_cr,
+                        rgb_buf, w * 3, w, h);
+        fwrite(rgb_buf, 1, (size_t)(w * h * 3), fout);
+    } else {
+        for (int row = 0; row < h; row++)
+            fwrite(y + row * stride_y, 1, (size_t)w, fout);
+        for (int row = 0; row < h / 2; row++)
+            fwrite(cb + row * stride_cb, 1, (size_t)(w / 2), fout);
+        for (int row = 0; row < h / 2; row++)
+            fwrite(cr + row * stride_cr, 1, (size_t)(w / 2), fout);
+    }
+}
+
 int main(int argc, char **argv)
 {
     const char *input_path = NULL;
@@ -156,6 +177,12 @@ int main(int argc, char **argv)
                                             &cr, &stride_cr);
         free(pkt_data);
 
+        if (err == TC_ERR_NEED_MORE) {
+            /* B-frame reorder: no display frame ready yet — keep
+             * feeding packets (output arrives via later calls and
+             * the tail drain). */
+            continue;
+        }
         if (err != TC_OK) {
             fprintf(stderr, "Error: decode failed at frame %d: %s\n",
                     frame_count, tc_error_string(err));
@@ -167,24 +194,8 @@ int main(int argc, char **argv)
         tc_decoder_get_info(dec, &dec_w, &dec_h);
 
         /* Write output */
-        if (is_rgb) {
-            tc_ycbcr_to_rgb(y, stride_y, cb, stride_cb, cr, stride_cr,
-                            rgb_buf, dec_w * 3, dec_w, dec_h);
-            fwrite(rgb_buf, 1, (size_t)(dec_w * dec_h * 3), fout);
-        } else {
-            /* Write planar Y */
-            for (int row = 0; row < dec_h; row++) {
-                fwrite(y + row * stride_y, 1, (size_t)dec_w, fout);
-            }
-            /* Write Cb */
-            for (int row = 0; row < dec_h / 2; row++) {
-                fwrite(cb + row * stride_cb, 1, (size_t)(dec_w / 2), fout);
-            }
-            /* Write Cr */
-            for (int row = 0; row < dec_h / 2; row++) {
-                fwrite(cr + row * stride_cr, 1, (size_t)(dec_w / 2), fout);
-            }
-        }
+        tc_write_yuv(fout, y, stride_y, cb, stride_cb, cr, stride_cr,
+                     dec_w, dec_h, is_rgb, rgb_buf);
 
         /* PSNR check */
         if (check_psnr && fref) {
@@ -211,6 +222,24 @@ int main(int argc, char **argv)
         }
 
         frame_count++;
+    }
+
+    /* Drain remaining display-order frames still buffered by the
+     * B-frame reorder window (D4). */
+    int32_t dec_w, dec_h;
+    tc_decoder_get_info(dec, &dec_w, &dec_h);
+    for (;;) {
+        const tc_pixel_t *y, *cb, *cr;
+        int stride_y, stride_cb, stride_cr;
+        tc_error_t err = tc_decoder_flush_tail(dec, &y, &stride_y,
+                                               &cb, &stride_cb,
+                                               &cr, &stride_cr);
+        if (err != TC_OK) break;
+        tc_write_yuv(fout, y, stride_y, cb, stride_cb, cr, stride_cr,
+                     dec_w, dec_h, is_rgb, rgb_buf);
+        frame_count++;
+        if (verbose) fprintf(stderr, "  drain frame %d\n", frame_count);
+        if (max_frames > 0 && frame_count >= max_frames) break;
     }
 
     clock_t end = clock();

@@ -1312,6 +1312,168 @@ static void test_decoder_mismatch(void)
  * parallel decode), but the coding decisions and therefore the
  * DECODED PIXELS must be byte-identical to a sequential encode
  * (D1: "WPP byte-identical to sequential" is asserted on output). */
+/* ── Test: B-frames (D4) ───────────────────────────────────────
+ * Hierarchical GOP4: display-order outputs, NEED_MORE buffering,
+ * tail drain, and 4-thread WPP decode parity.
+ */
+static void test_b_frames(void)
+{
+    TEST(b_frames_hierarchical);
+    int w = 128, h = 128;
+    int n_frames = 12;
+
+    tc_config_t cfg;
+    tc_config_defaults(&cfg, w, h);
+    cfg.qp = 28;
+    cfg.enable_b_frames = 1;
+    cfg.threads = 1;
+
+    tc_encoder_t *enc = tc_encoder_create(&cfg);
+    ASSERT_NE(enc, NULL, "encoder NULL");
+
+    /* Distinct random-content frames so output order is verifiable:
+     * decoded frame i must match input frame i better than any other. */
+    tc_pixel_t *y  = (tc_pixel_t *)calloc((size_t)(w * h), 1);
+    tc_pixel_t *cb = (tc_pixel_t *)calloc((size_t)(w/2 * h/2), 1);
+    tc_pixel_t *cr = (tc_pixel_t *)calloc((size_t)(w/2 * h/2), 1);
+    uint32_t seed = 12345;
+    tc_pixel_t *yseq = (tc_pixel_t *)calloc((size_t)(w * h * n_frames), 1);
+    tc_packet_t pkts[16];
+    int npk = 0;
+
+    for (int f = 0; f < n_frames; f++) {
+        for (int i = 0; i < w * h; i++) {
+            seed = seed * 1103515245u + 12345u;
+            y[i] = (tc_pixel_t)((seed >> 16) & 0xFF);
+        }
+        for (int i = 0; i < w/2*h/2; i++) {
+            seed = seed * 1103515245u + 12345u;
+            cb[i] = (tc_pixel_t)((seed >> 16) & 0xFF);
+            cr[i] = (tc_pixel_t)((seed >> 16) & 0xFF);
+        }
+        memcpy(yseq + (size_t)f * w * h, y, (size_t)(w * h));
+        tc_packet_t pkt;
+        tc_error_t err = tc_encoder_encode(enc, y, w, cb, w/2, cr, w/2, &pkt);
+        if (err == TC_OK) {
+            /* Encoder reuses its packet buffer on later calls: copy. */
+            pkts[npk].size = pkt.size;
+            pkts[npk].data = malloc(pkt.size);
+            ASSERT_NE(pkts[npk].data, NULL, "pkt malloc");
+            memcpy(pkts[npk].data, pkt.data, pkt.size);
+            npk++;
+        } else if (err == TC_ERR_NEED_MORE) {
+            /* Expected while the reorder buffer fills — no packet. */
+        } else {
+            ASSERT_EQ(err, TC_OK, "B-mode encode failed");
+        }
+    }
+    /* Drain the reorder tail. */
+    for (int i = npk; i < 16; i++) {
+        tc_packet_t pkt;
+        tc_error_t err = tc_encoder_flush_tail(enc, &pkt);
+        if (err == TC_ERR_EOF) break;
+        ASSERT_EQ(err, TC_OK, "flush_tail failed");
+        pkts[npk].size = pkt.size;
+        pkts[npk].data = malloc(pkt.size);
+        ASSERT_NE(pkts[npk].data, NULL, "pkt malloc (tail)");
+        memcpy(pkts[npk].data, pkt.data, pkt.size);
+        npk++;
+    }
+    ASSERT_EQ(npk, n_frames, "expected 12 packets for 12 B-mode frames");
+    tc_encoder_destroy(enc);
+
+    /* Decode: display order must be preserved. */
+    tc_decoder_t *dec = tc_decoder_create(0, 0);
+    ASSERT_NE(dec, NULL, "decoder NULL");
+
+    tc_pixel_t *decseq = (tc_pixel_t *)calloc((size_t)(w * h * n_frames), 1);
+    int ndec = 0;
+    for (int p = 0; p < npk; p++) {
+        const tc_pixel_t *yy, *ccb, *ccr;
+        int sy, scb, scr;
+        tc_error_t err = tc_decoder_decode(dec, pkts[p].data, pkts[p].size,
+                                           &yy, &sy, &ccb, &scb, &ccr, &scr);
+        if (err == TC_ERR_NEED_MORE) continue;  /* reorder buffering */
+        ASSERT_EQ(err, TC_OK, "decode failed");
+        for (int r = 0; r < h; r++)
+            memcpy(decseq + (size_t)ndec * w * h + (size_t)r * w,
+                   yy + r * sy, (size_t)w);
+        ndec++;
+    }
+    for (;;) {
+        const tc_pixel_t *yy, *ccb, *ccr;
+        int sy, scb, scr;
+        tc_error_t err = tc_decoder_flush_tail(dec, &yy, &sy, &ccb, &scb, &ccr, &scr);
+        if (err == TC_ERR_EOF) break;
+        ASSERT_EQ(err, TC_OK, "flush tail decode failed");
+        for (int r = 0; r < h; r++)
+            memcpy(decseq + (size_t)ndec * w * h + (size_t)r * w,
+                   yy + r * sy, (size_t)w);
+        ndec++;
+    }
+    ASSERT_EQ(ndec, n_frames, "decoder must emit all 12 frames");
+
+    /* Order verification: each output frame must be closest to its own
+     * input frame (smallest SAD). */
+    for (int i = 0; i < n_frames; i++) {
+        int best = -1;
+        int64_t best_sad = INT64_MAX;
+        for (int j = 0; j < n_frames; j++) {
+            int64_t sad = 0;
+            for (int k = 0; k < w * h; k++) {
+                int d = (int)decseq[(size_t)i*w*h+k] - (int)yseq[(size_t)j*w*h+k];
+                sad += (d < 0 ? -d : d);
+            }
+            if (sad < best_sad) { best_sad = sad; best = j; }
+        }
+        ASSERT_EQ(best, i, "B-frame display order violated");
+    }
+
+    /* WPP parity: 4-thread decode must be pixel-identical to the
+     * sequential decode of the same B stream. */
+    {
+        tc_decoder_t *dec4 = tc_decoder_create(4, 0);
+        ASSERT_NE(dec4, NULL, "decoder4 NULL");
+        int n4 = 0;
+        for (int p = 0; p < npk; p++) {
+            const tc_pixel_t *yy, *ccb, *ccr;
+            int sy, scb, scr;
+            tc_error_t err = tc_decoder_decode(dec4, pkts[p].data, pkts[p].size,
+                                               &yy, &sy, &ccb, &scb, &ccr, &scr);
+            if (err == TC_ERR_NEED_MORE) continue;
+            ASSERT_EQ(err, TC_OK, "wpp decode failed");
+            if (n4 < n_frames) {
+                for (int r = 0; r < h; r++)
+                    ASSERT_EQ(memcmp(decseq + (size_t)n4*w*h + (size_t)r*w,
+                                     yy + r * sy, (size_t)w), 0,
+                              "WPP/sequential B decode mismatch");
+            }
+            n4++;
+        }
+        for (;;) {
+            const tc_pixel_t *yy, *ccb, *ccr;
+            int sy, scb, scr;
+            tc_error_t err = tc_decoder_flush_tail(dec4, &yy, &sy, &ccb, &scb, &ccr, &scr);
+            if (err == TC_ERR_EOF) break;
+            ASSERT_EQ(err, TC_OK, "wpp flush tail decode failed");
+            if (n4 < n_frames) {
+                for (int r = 0; r < h; r++)
+                    ASSERT_EQ(memcmp(decseq + (size_t)n4*w*h + (size_t)r*w,
+                                     yy + r * sy, (size_t)w), 0,
+                              "WPP/sequential B decode mismatch (tail)");
+            }
+            n4++;
+        }
+        ASSERT_EQ(n4, n_frames, "wpp decoder must emit all 12 frames");
+        tc_decoder_destroy(dec4);
+    }
+
+    free(yseq); free(decseq); free(y); free(cb); free(cr);
+    for (int p = 0; p < npk; p++) free(pkts[p].data);
+    tc_decoder_destroy(dec);
+    PASS();
+}
+
 static void test_wpp_sequential_parity(void)
 {
     TEST(wpp_sequential_pixel_parity);
@@ -2769,6 +2931,7 @@ int main(void)
     test_long_run();
     test_all_intra();
     test_decoder_mismatch();
+    test_b_frames();
     test_wpp_sequential_parity();
     test_boundary_conditions();
     test_rate_control_cbr();
