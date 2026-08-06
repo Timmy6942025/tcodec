@@ -128,6 +128,14 @@ void tc_idct4x4(const tc_coeff_t *TCODEC_RESTRICT in,
                 tc_pixel_t *TCODEC_RESTRICT out, int stride);
 void tc_idct8x8(const tc_coeff_t *TCODEC_RESTRICT in,
                 tc_pixel_t *TCODEC_RESTRICT out, int stride);
+void tc_fdct4x4_res(const tc_coeff_t *TCODEC_RESTRICT in, int stride,
+                    tc_coeff_t *TCODEC_RESTRICT out);
+void tc_idct4x4_res(const tc_coeff_t *TCODEC_RESTRICT in,
+                    tc_coeff_t *TCODEC_RESTRICT out, int stride);
+void tc_fdct8x8_res(const tc_coeff_t *TCODEC_RESTRICT in, int stride,
+                    tc_coeff_t *TCODEC_RESTRICT out);
+void tc_idct8x8_res(const tc_coeff_t *TCODEC_RESTRICT in,
+                    tc_coeff_t *TCODEC_RESTRICT out, int stride);
 
 /* Residual-mode Walsh-Hadamard Transform — self-inverting (H*H=n*I),
  * operates on signed residuals without ±128 level shift.
@@ -154,6 +162,7 @@ void tc_dequantize(tc_coeff_t *TCODEC_RESTRICT coeffs, int n,
 
 /* Get quantization step size for given QP. */
 int tc_qscale(int qp);
+int tc_lambda(int qp);
 
 /* JND-based weight for a coefficient position in a band. */
 int tc_jnd_weight(int band, int pos);

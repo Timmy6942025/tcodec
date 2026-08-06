@@ -342,8 +342,11 @@ static void decode_block(tc_decoder_t *dec, int ctu_idx, int blk_idx,
             }
         }
     } else {
-        /* Non-skip: read DCT size flag + coefficients + reconstruct */
-        uint32_t dct_size_id = dec_read_bits(bs, rc, rc_ctx, RC_CTX_DCT_SIZE, 1);
+        /* Non-skip: read transform flag (bit0 = WHT/DCT, bit1 = 4×4/8×8)
+         * + coefficients + reconstruct */
+        uint32_t transform_id = dec_read_bits(bs, rc, rc_ctx, RC_CTX_DCT_SIZE, 2);
+        uint32_t dct_size_id = (transform_id >> 1) & 1;
+        uint32_t transform_type = transform_id & 1;
 
         if (dct_size_id == TC_BLOCK_4x4_ID) {
             for (int sy = 0; sy < 2; sy++) {
@@ -360,7 +363,8 @@ static void decode_block(tc_decoder_t *dec, int ctu_idx, int blk_idx,
                         else if (sub[i] < 0) sub[i] = (tc_coeff_t)(sub[i] * eff - (eff >> 1));
                     }
                     tc_coeff_t rec[16];
-                    tc_iwht4x4(sub, rec, 4);
+                    if (transform_type == 0) tc_iwht4x4(sub, rec, 4);
+                    else tc_idct4x4_res(sub, rec, 4);
                     for (int r = 0; r < 4; r++) {
                         for (int c = 0; c < 4; c++) {
                             int px = frame_x + sx * 4 + c;
@@ -387,7 +391,8 @@ static void decode_block(tc_decoder_t *dec, int ctu_idx, int blk_idx,
                 else if (dct_coeff[i] < 0) dct_coeff[i] = (tc_coeff_t)(dct_coeff[i] * eff - (eff >> 1));
             }
             tc_coeff_t rec[64];
-            tc_iwht8x8(dct_coeff, rec, 8);
+            if (transform_type == 0) tc_iwht8x8(dct_coeff, rec, 8);
+            else tc_idct8x8_res(dct_coeff, rec, 8);
             for (int r = 0; r < 8; r++) {
                 for (int c = 0; c < 8; c++) {
                     int px = frame_x + c;

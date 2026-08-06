@@ -1236,7 +1236,7 @@ static void test_boundary_conditions(void)
     ASSERT_EQ(err, TC_OK, "decode boundary test failed");
 
     double psnr = tc_psnr(y, w, dy, sy, w, h);
-    printf(" [%dx%d PSNR=%.1fdB]", w, h, psnr);
+    printf(" [%dx%d PSNR=%.4fdB]", w, h, psnr);
     ASSERT_RANGE(psnr, 15.0, 100.0, "boundary condition PSNR out of range");
 
     /* Verify corner pixels are within reasonable range */
@@ -2093,6 +2093,66 @@ static void test_v0_backward_compat(void)
     PASS();
 }
 
+/* ── Test: Residual transform roundtrip (WHT + DCT-II) ── */
+
+static void test_transform_roundtrip(void)
+{
+    TEST(transform_residual_roundtrip);
+    tc_coeff_t in[64], fwd[64], rec[64];
+    int fail = 0;
+
+    /* WHT4: DC gain 4, roundtrip tight */
+    for (int i = 0; i < 16; i++) in[i] = 100;
+    tc_fwht4x4(in, 4, fwd);
+    ASSERT_EQ(fwd[0], 400, "WHT4 DC gain");
+    tc_iwht4x4(fwd, rec, 4);
+    for (int i = 0; i < 16; i++)
+        if (rec[i] != 100) { fail++; }
+    ASSERT_EQ(fail, 0, "WHT4 DC roundtrip");
+
+    /* DCT4 (D5): DC gain 4, roundtrip within ±1 */
+    fail = 0;
+    for (int i = 0; i < 16; i++) in[i] = 100;
+    tc_fdct4x4_res(in, 4, fwd);
+    ASSERT_EQ(fwd[0], 400, "DCT4 DC gain");
+    tc_idct4x4_res(fwd, rec, 4);
+    for (int i = 0; i < 16; i++)
+        if (rec[i] < 99 || rec[i] > 101) { fail++; }
+    ASSERT_EQ(fail, 0, "DCT4 DC roundtrip");
+
+    /* DCT8 (D5): DC gain 8, roundtrip within ±1 */
+    fail = 0;
+    for (int i = 0; i < 64; i++) in[i] = 100;
+    tc_fdct8x8_res(in, 8, fwd);
+    ASSERT_EQ(fwd[0], 800, "DCT8 DC gain");
+    tc_idct8x8_res(fwd, rec, 8);
+    for (int i = 0; i < 64; i++)
+        if (rec[i] < 99 || rec[i] > 101) { fail++; }
+    ASSERT_EQ(fail, 0, "DCT8 DC roundtrip");
+
+    /* Random-block roundtrips (inputs in the encoder's realistic
+     * residual range ±2000; tc_coeff_t is int16 so larger values
+     * would overflow the transform output): max abs error <= 2 */
+    unsigned long long rs = 99887766;
+    for (int rep = 0; rep < 64; rep++) {
+        for (int i = 0; i < 64; i++) {
+            rs = rs * 6364136223846793005ULL + 1442695040888963407ULL;
+            in[i] = (tc_coeff_t)((int)((rs >> 33) % 4001) - 2000);
+        }
+        tc_fdct4x4_res(in, 4, fwd);
+        tc_idct4x4_res(fwd, rec, 4);
+        for (int i = 0; i < 16; i++)
+            if (in[i] - rec[i] > 2 || rec[i] - in[i] > 2) { fail++; }
+        tc_fdct8x8_res(in, 8, fwd);
+        tc_idct8x8_res(fwd, rec, 8);
+        for (int i = 0; i < 64; i++)
+            if (in[i] - rec[i] > 2 || rec[i] - in[i] > 2) { fail++; }
+    }
+    ASSERT_EQ(fail, 0, "DCT random roundtrip bound");
+
+    PASS();
+}
+
 /* ── Phase 3: Range coder engine roundtrip ────────────────── */
 
 static void test_rc_engine_roundtrip(void)
@@ -2549,6 +2609,7 @@ int main(void)
     test_rc_context_model();
     test_rc_coeff_coding();
     test_rc_full_roundtrip();
+    test_transform_roundtrip();
 
     /* Summary */
     printf("\n════════════════════════════════════════════════════════\n");

@@ -130,3 +130,21 @@ void tc_dequantize(tc_coeff_t *TCODEC_RESTRICT coeffs, int n,
         }
     }
 }
+
+
+/* ════════════════════════════════════════════════════════════════
+ * Lagrange multiplier (RDO-lite / D7)
+ *
+ * Integer-only approximation of the H.264-style lambda curve:
+ *   lambda = 0.85 · 2^((qp-12)/3)
+ * returned as a Q8 fixed-point value (<< 8). Used by the encoder
+ * for mode/transform decisions: cost = SSE + lambda·rate.
+ * Decoder never needs this — it is encoder-side only.
+ * ════════════════════════════════════════════════════════════════ */
+int tc_lambda(int qp)
+{
+    int e = (qp - 12) / 3;
+    if (e < 0) e = 0;
+    if (e > 30) e = 30;
+    return (217 << e) >> 8;   /* 0.85 << 8, then 2^e */
+}

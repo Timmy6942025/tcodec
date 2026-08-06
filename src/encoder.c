@@ -316,58 +316,125 @@ static void encode_block(tc_encoder_t *enc, tc_ctu_info_t *ctu,
     }
     blk->dct_size = (tc_block_size_t)dct_size_id;
 
-    /* ── Forward DCT + quantize ────────────────────────────── */
+    /* ── Forward transform + quantize (RDO-lite: WHT vs DCT-II) ─
+     * Both candidates are forward-transformed and quantized with
+     * identical JND band weighting. Cost is PIXEL-domain SSE
+     * (dequant + inverse transform + prediction vs original) plus
+     * λ·rate — the honest RDO-lite cost (D5/D7), so the transform
+     * choice maximizes real reconstruction quality per bit.
+     * transform_id bits: bit0 = type (0 WHT, 1 DCT), bit1 = size
+     * (0 4×4, 1 8×8) — legacy WHT ids 0/1 map to the old 4×4/8×8. */
+    int transform_type = 0;
+    int transform_id = 0;
     int all_zero = 1;  /* Track if all quantized coefficients are zero */
+    {
+        tc_coeff_t winner_cand[64];
+        long long best_cost = (long long)1 << 62;
+        int best_nz = 0;
+        int qp_lambda = tc_lambda(qp);
 
-    if (dct_size_id == TC_BLOCK_4x4_ID) {
-        /* Process each 4×4 sub-block */
-        for (int sy = 0; sy < 2; sy++) {
-            for (int sx = 0; sx < 2; sx++) {
-                tc_coeff_t sub_in[16], sub_out[16];
-                for (int r = 0; r < 4; r++) {
-                    for (int c = 0; c < 4; c++) {
-                        sub_in[r * 4 + c] = residual[(sy * 4 + r) * 8 + (sx * 4 + c)];
+        for (int t = 0; t < 2; t++) {          /* 0=WHT, 1=DCT-II */
+            tc_coeff_t cand[64], dq[64];
+            int nz = 0;
+            long long dist = 0;
+
+            if (dct_size_id == TC_BLOCK_4x4_ID) {
+                for (int sy = 0; sy < 2; sy++) {
+                    for (int sx = 0; sx < 2; sx++) {
+                        tc_coeff_t sub_in[16], sub_out[16], sub_dq[16], rec[16];
+                        for (int r = 0; r < 4; r++)
+                            for (int c = 0; c < 4; c++)
+                                sub_in[r * 4 + c] = residual[(sy * 4 + r) * 8 + (sx * 4 + c)];
+                        if (t == 0) tc_fwht4x4(sub_in, 4, sub_out);
+                        else        tc_fdct4x4_res(sub_in, 4, sub_out);
+                        for (int i = 0; i < 16; i++) {
+                            int band = tc_freq_band(i, 4);
+                            int w = tc_jnd_weight(band, i);
+                            int scale = tc_qscale(qp);
+                            int eff = (scale * w + 4) >> 3;
+                            if (eff < 1) eff = 1;
+                            int offset = eff / 3;
+                            int c = sub_out[i];
+                            int qv = 0;
+                            if (c > 0) qv = (c + offset) / eff;
+                            else if (c < 0) qv = -((-c + offset) / eff);
+                            sub_out[i] = (tc_coeff_t)qv;
+                            if (qv != 0) nz++;
+                            if (qv > 0) sub_dq[i] = (tc_coeff_t)(qv * eff + (eff >> 1));
+                            else if (qv < 0) sub_dq[i] = (tc_coeff_t)(qv * eff - (eff >> 1));
+                            else sub_dq[i] = 0;
+                        }
+                        if (t == 0) tc_iwht4x4(sub_dq, rec, 4);
+                        else        tc_idct4x4_res(sub_dq, rec, 4);
+                        /* Pixel-domain SSE against original (in-bounds) */
+                        for (int r = 0; r < 4; r++) {
+                            for (int c = 0; c < 4; c++) {
+                                int px = frame_x + sx * 4 + c;
+                                int py = frame_y + sy * 4 + r;
+                                if (px < enc->recon->width && py < enc->recon->height) {
+                                    int val = (int)pred_block[(sy * 4 + r) * blk_size + (sx * 4 + c)]
+                                              + (int)rec[r * 4 + c];
+                                    long long d = (long long)orig_block[(sy * 4 + r) * blk_size + (sx * 4 + c)]
+                                                  - (long long)tc_clip(val, 0, 255);
+                                    dist += d * d;
+                                }
+                            }
+                        }
+                        for (int r = 0; r < 4; r++)
+                            for (int c = 0; c < 4; c++)
+                                cand[(sy * 4 + r) * 8 + (sx * 4 + c)] = sub_out[r * 4 + c];
                     }
                 }
-                tc_fwht4x4(sub_in, 4, sub_out);
-                /* Apply JND band weighting per coefficient */
-                for (int i = 0; i < 16; i++) {
-                    int band = tc_freq_band(i, 4);
+            } else {
+                tc_coeff_t rec[64];
+                if (t == 0) tc_fwht8x8(residual, 8, cand);
+                else        tc_fdct8x8_res(residual, 8, cand);
+                for (int i = 0; i < 64; i++) {
+                    int band = tc_freq_band(i, 8);
                     int w = tc_jnd_weight(band, i);
                     int scale = tc_qscale(qp);
                     int eff = (scale * w + 4) >> 3;
                     if (eff < 1) eff = 1;
                     int offset = eff / 3;
-                    int c = sub_out[i];
-                    if (c > 0) sub_out[i] = (tc_coeff_t)((c + offset) / eff);
-                    else if (c < 0) sub_out[i] = (tc_coeff_t)(-((-c + offset) / eff));
-                    else sub_out[i] = 0;
-                    if (sub_out[i] != 0) all_zero = 0;
+                    int c = cand[i];
+                    int qv = 0;
+                    if (c > 0) qv = (c + offset) / eff;
+                    else if (c < 0) qv = -((-c + offset) / eff);
+                    cand[i] = (tc_coeff_t)qv;
+                    if (qv != 0) nz++;
+                    if (qv > 0) dq[i] = (tc_coeff_t)(qv * eff + (eff >> 1));
+                    else if (qv < 0) dq[i] = (tc_coeff_t)(qv * eff - (eff >> 1));
+                    else dq[i] = 0;
                 }
-
-                for (int r = 0; r < 4; r++) {
-                    for (int c = 0; c < 4; c++) {
-                        dct_out[(sy * 4 + r) * 8 + (sx * 4 + c)] = sub_out[r * 4 + c];
+                if (t == 0) tc_iwht8x8(dq, rec, 8);
+                else        tc_idct8x8_res(dq, rec, 8);
+                for (int r = 0; r < 8; r++) {
+                    for (int c = 0; c < 8; c++) {
+                        int px = frame_x + c;
+                        int py = frame_y + r;
+                        if (px < enc->recon->width && py < enc->recon->height) {
+                            int val = (int)pred_block[r * blk_size + c] + (int)rec[r * 8 + c];
+                            long long d = (long long)orig_block[r * blk_size + c]
+                                          - (long long)tc_clip(val, 0, 255);
+                            dist += d * d;
+                        }
                     }
                 }
             }
+
+            /* RDO-lite cost: pixel SSE + λ·rate (rate ∝ non-zero count + flag) */
+            long long cost = dist + (long long)qp_lambda * (4LL * nz + 2);
+            if (cost < best_cost || (cost == best_cost && t == 0)) {
+                best_cost = cost;
+                best_nz = nz;
+                transform_type = t;
+                memcpy(winner_cand, cand, sizeof(cand));
+            }
         }
-    } else {
-        /* 8×8 DCT on residual — apply JND band weighting per coefficient */
-        tc_fwht8x8(residual, 8, dct_out);
-        for (int i = 0; i < 64; i++) {
-            int band = tc_freq_band(i, 8);
-            int w = tc_jnd_weight(band, i);
-            int scale = tc_qscale(qp);
-            int eff = (scale * w + 4) >> 3;
-            if (eff < 1) eff = 1;
-            int offset = eff / 3;
-            int c = dct_out[i];
-            if (c > 0) dct_out[i] = (tc_coeff_t)((c + offset) / eff);
-            else if (c < 0) dct_out[i] = (tc_coeff_t)(-((-c + offset) / eff));
-            else dct_out[i] = 0;
-            if (dct_out[i] != 0) all_zero = 0;
-        }
+
+        all_zero = (best_nz == 0);
+        transform_id = (dct_size_id == TC_BLOCK_8x8_ID ? 2 : 0) | transform_type;
+        memcpy(dct_out, winner_cand, sizeof(tc_coeff_t) * 64);
     }
 
     /* ── Mode decision: merge > skip > inter > intra ──────────
@@ -464,7 +531,7 @@ static void encode_block(tc_encoder_t *enc, tc_ctu_info_t *ctu,
         }
     } else {
         /* Non-skip/non-merge: write DCT flag, encode coefficients, reconstruct */
-        enc_write_bits(bs, rc, rc_ctx, RC_CTX_DCT_SIZE, dct_size_id, 1);
+        enc_write_bits(bs, rc, rc_ctx, RC_CTX_DCT_SIZE, (uint32_t)transform_id, 2);
 
         /* ── tANS / Range-coder encode coefficients ────────── */
         if (dct_size_id == TC_BLOCK_4x4_ID) {
@@ -504,7 +571,8 @@ static void encode_block(tc_encoder_t *enc, tc_ctu_info_t *ctu,
                         else if (sub[i] < 0) sub[i] = (tc_coeff_t)(sub[i] * eff - (eff >> 1));
                     }
                     tc_coeff_t rec[16];
-                    tc_iwht4x4(sub, rec, 4);
+                    if (transform_type == 0) tc_iwht4x4(sub, rec, 4);
+                    else                     tc_idct4x4_res(sub, rec, 4);
                     for (int r = 0; r < 4; r++) {
                         for (int c = 0; c < 4; c++) {
                             int px = frame_x + sx * 4 + c;
@@ -529,7 +597,8 @@ static void encode_block(tc_encoder_t *enc, tc_ctu_info_t *ctu,
                 else if (dct_out[i] < 0) dct_out[i] = (tc_coeff_t)(dct_out[i] * eff - (eff >> 1));
             }
             tc_coeff_t rec[64];
-            tc_iwht8x8(dct_out, rec, 8);
+            if (transform_type == 0) tc_iwht8x8(dct_out, rec, 8);
+            else tc_idct8x8_res(dct_out, rec, 8);
             for (int r = 0; r < 8; r++) {
                 for (int c = 0; c < 8; c++) {
                     int px = frame_x + c;

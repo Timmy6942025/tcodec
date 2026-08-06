@@ -296,6 +296,152 @@ void tc_idct8x8(const tc_coeff_t *TCODEC_RESTRICT in,
 }
 
 #endif /* !TCODEC_NEON — scalar DCT fallback (4×4 + 8×8) */
+/* ════════════════════════════════════════════════════════════════
+ * Residual-mode DCT (DCT-II on signed residuals)
+ *
+ * True DCT-II with orthonormal rows, 14-bit fixed-point constants.
+ * Scaling is normalized to match the WHT gains used by the quantizer:
+ *   4×4: forward gain 4  (same as WHT4), inverse gain 1/4
+ *   8×8: forward gain 8  (same as WHT8), inverse gain 1/8
+ * so the same JND quantizer step gives comparable R-D for both
+ * transforms. Forward = C·X·Cᵀ << log2(gain); inverse = Cᵀ·Y·C >> log2.
+ * ════════════════════════════════════════════════════════════════ */
+
+#if !TCODEC_NEON  /* Scalar residual DCT — NEON version in transform_neon.c */
+
+/* Orthonormal DCT-II matrices, 14-bit fixed point */
+static const int dct4_c[4][4] = {
+    { 8192,  8192,  8192,  8192},
+    {10703,  4433, -4433,-10703},
+    { 8192, -8192, -8192,  8192},
+    { 4433,-10703, 10703, -4433}
+};
+
+static const int dct8_c[8][8] = {
+    { 5793,  5793,  5793,  5793,  5793,  5793,  5793,  5793},
+    { 8035,  6811,  4551,  1598, -1598, -4551, -6811, -8035},
+    { 7568,  3135, -3135, -7568, -7568, -3135,  3135,  7568},
+    { 6811, -1598, -8035, -4551,  4551,  8035,  1598, -6811},
+    { 5793, -5793, -5793,  5793,  5793, -5793, -5793,  5793},
+    { 4551, -8035,  1598,  6811, -6811, -1598,  8035, -4551},
+    { 3135, -7568,  7568, -3135, -3135,  7568, -7568,  3135},
+    { 1598, -4551,  6811, -8035,  8035, -6811,  4551, -1598}
+};
+
+static void dct4_point(const int *in, int *out, int transpose)
+{
+    const int (*C)[4] = dct4_c;
+    for (int k = 0; k < 4; k++) {
+        int64_t acc = 0;
+        for (int n = 0; n < 4; n++) {
+            int c = transpose ? C[n][k] : C[k][n];
+            acc += (int64_t)c * in[n];
+        }
+        out[k] = (int)((acc + (1 << 13)) >> 14);
+    }
+}
+
+static void dct8_point2(const int *in, int *out, int transpose)
+{
+    const int (*C)[8] = dct8_c;
+    for (int k = 0; k < 8; k++) {
+        int64_t acc = 0;
+        for (int n = 0; n < 8; n++) {
+            int c = transpose ? C[n][k] : C[k][n];
+            acc += (int64_t)c * in[n];
+        }
+        out[k] = (int)((acc + (1 << 13)) >> 14);
+    }
+}
+
+void tc_fdct4x4_res(const tc_coeff_t *TCODEC_RESTRICT in, int stride,
+                    tc_coeff_t *TCODEC_RESTRICT out)
+{
+    int tmp[4][4], t2[4][4];
+
+    for (int i = 0; i < 4; i++) {
+        int row[4];
+        for (int j = 0; j < 4; j++) row[j] = in[i*stride+j];
+        dct4_point(row, tmp[i], 0);
+    }
+    for (int j = 0; j < 4; j++) {
+        int col[4];
+        for (int i = 0; i < 4; i++) col[i] = tmp[i][j];
+        dct4_point(col, t2[j], 0);
+    }
+    /* <<2: forward gain 4 (matches WHT4) */
+    for (int i = 0; i < 4; i++)
+        for (int j = 0; j < 4; j++)
+            out[i*4+j] = (tc_coeff_t)t2[j][i];
+}
+
+void tc_idct4x4_res(const tc_coeff_t *TCODEC_RESTRICT in,
+                    tc_coeff_t *TCODEC_RESTRICT out, int stride)
+{
+    int tmp[4][4], t2[4][4];
+
+    for (int i = 0; i < 4; i++) {
+        int row[4];
+        for (int j = 0; j < 4; j++) row[j] = in[i*4+j];
+        dct4_point(row, tmp[i], 1);
+    }
+    for (int j = 0; j < 4; j++) {
+        int col[4];
+        for (int i = 0; i < 4; i++) col[i] = tmp[i][j];
+        dct4_point(col, t2[j], 1);
+    }
+    /* >>2: inverse gain 1/4 (matches WHT4) */
+    for (int i = 0; i < 4; i++)
+        for (int j = 0; j < 4; j++)
+            out[i*stride+j] = (tc_coeff_t)t2[j][i];
+}
+
+void tc_fdct8x8_res(const tc_coeff_t *TCODEC_RESTRICT in, int stride,
+                    tc_coeff_t *TCODEC_RESTRICT out)
+{
+    int tmp[8][8], t2[8][8];
+
+    for (int i = 0; i < 8; i++) {
+        int row[8];
+        for (int j = 0; j < 8; j++) row[j] = in[i*stride+j];
+        dct8_point2(row, tmp[i], 0);
+    }
+    for (int j = 0; j < 8; j++) {
+        int col[8];
+        for (int i = 0; i < 8; i++) col[i] = tmp[i][j];
+        dct8_point2(col, t2[j], 0);
+    }
+    /* <<3: forward gain 8 (matches WHT8) */
+    for (int i = 0; i < 8; i++)
+        for (int j = 0; j < 8; j++)
+            out[i*8+j] = (tc_coeff_t)t2[j][i];
+}
+
+void tc_idct8x8_res(const tc_coeff_t *TCODEC_RESTRICT in,
+                    tc_coeff_t *TCODEC_RESTRICT out, int stride)
+{
+    int tmp[8][8], t2[8][8];
+
+    for (int i = 0; i < 8; i++) {
+        int row[8];
+        for (int j = 0; j < 8; j++) row[j] = in[i*8+j];
+        dct8_point2(row, tmp[i], 1);
+    }
+    for (int j = 0; j < 8; j++) {
+        int col[8];
+        for (int i = 0; i < 8; i++) col[i] = tmp[i][j];
+        dct8_point2(col, t2[j], 1);
+    }
+    /* >>3: inverse gain 1/8 (matches WHT8) */
+    for (int i = 0; i < 8; i++)
+        for (int j = 0; j < 8; j++)
+            out[i*stride+j] = (tc_coeff_t)t2[j][i];
+}
+
+#endif /* !TCODEC_NEON — scalar residual DCT */
+
+
+
 
 /* ════════════════════════════════════════════════════════════════
  * Residual-mode transforms — Walsh-Hadamard Transform (WHT)
