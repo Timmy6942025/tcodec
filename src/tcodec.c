@@ -94,4 +94,5 @@ void tc_config_defaults(tc_config_t *cfg, int width, int height)
     cfg->profile    = TC_PROFILE_BASELINE_MOBILE;
     cfg->level_idx  = TC_LEVEL_AUTO;         /* Auto */
     cfg->enable_crc = 0;                     /* CRC off by default */
+    cfg->enable_entropy_coded = 0;           /* Range coder off by default */
 }

@@ -2093,6 +2093,400 @@ static void test_v0_backward_compat(void)
     PASS();
 }
 
+/* ── Phase 3: Range coder engine roundtrip ────────────────── */
+
+static void test_rc_engine_roundtrip(void)
+{
+    TEST(range_coder_engine_roundtrip);
+
+    /* Allocate a small buffer for bitstream */
+    size_t buf_size = 4096;
+    uint8_t *buf = (uint8_t *)calloc(buf_size, 1);
+    ASSERT_NE(buf, NULL, "buffer alloc failed");
+
+    /* Encoder side */
+    tc_bs_writer_t bs_w;
+    tc_bs_writer_init(&bs_w, buf, buf_size);
+
+    tc_rc_enc_t rc_enc;
+    tc_rc_enc_init(&rc_enc, &bs_w);
+
+    tc_rc_ctx_t enc_ctx[TC_NUM_CONTEXTS_RC];
+    tc_rc_ctx_init(enc_ctx, TC_NUM_CONTEXTS_RC);
+
+    /* Encode a sequence of 1000 bits with known pattern */
+    uint8_t bits[1000];
+    unsigned seed = 12345;
+    for (int i = 0; i < 1000; i++) {
+        seed = seed * 1103515245 + 12345;
+        bits[i] = (uint8_t)((seed >> 16) & 1);
+        tc_rc_enc_bit(&rc_enc, &enc_ctx[i % RC_CTX_MAX], bits[i]);
+    }
+    tc_rc_enc_flush(&rc_enc);
+
+    size_t enc_bytes = tc_bs_writer_bytes(&bs_w);
+    printf(" [%zu bytes for 1000 bits]", enc_bytes);
+    /* Range coder should compress below 1000 bits (125 bytes) for non-random data
+     * but random bits may expand slightly due to overhead. Still reasonable. */
+    ASSERT_RANGE(enc_bytes, 80, 500, "encoded size out of reasonable range");
+
+    /* Decoder side */
+    tc_bs_reader_t bs_r;
+    tc_bs_reader_init(&bs_r, buf, enc_bytes);
+
+    tc_rc_dec_t rc_dec;
+    tc_rc_dec_init(&rc_dec, &bs_r);
+
+    tc_rc_ctx_t dec_ctx[TC_NUM_CONTEXTS_RC];
+    tc_rc_ctx_init(dec_ctx, TC_NUM_CONTEXTS_RC);
+
+    /* Decode and verify */
+    int mismatches = 0;
+    for (int i = 0; i < 1000; i++) {
+        int dec_bit = tc_rc_dec_bit(&rc_dec, &dec_ctx[i % RC_CTX_MAX]);
+        if (dec_bit != (int)bits[i]) mismatches++;
+    }
+    ASSERT_EQ(mismatches, 0, "range coder decode mismatch");
+
+    /* Verify contexts match between encoder and decoder */
+    int ctx_mismatch = 0;
+    for (int i = 0; i < TC_NUM_CONTEXTS_RC; i++) {
+        if (enc_ctx[i] != dec_ctx[i]) ctx_mismatch++;
+    }
+    ASSERT_EQ(ctx_mismatch, 0, "context state mismatch between encoder and decoder");
+
+    free(buf);
+    PASS();
+}
+
+/* ── Phase 3: Context model state transitions ───────────────── */
+
+static void test_rc_context_model(void)
+{
+    TEST(range_coder_context_model);
+
+    size_t buf_size = 1024;
+    uint8_t *buf = (uint8_t *)calloc(buf_size, 1);
+
+    /* Test 1: MPS coding increases state (up to 63) */
+    {
+        tc_bs_writer_t bs_w;
+        tc_bs_writer_init(&bs_w, buf, buf_size);
+        tc_rc_enc_t rc_enc;
+        tc_rc_enc_init(&rc_enc, &bs_w);
+        tc_rc_ctx_t ctx = 0;  /* State 0, MPS=0 */
+
+        for (int i = 0; i < 64; i++) {
+            int state_before = ctx & 0x3F;
+            tc_rc_enc_bit(&rc_enc, &ctx, 0);  /* Encode MPS */
+            int state_after = ctx & 0x3F;
+            /* MPS → state+1 (capped at 63) */
+            ASSERT_EQ(state_after, tc_min(state_before + 1, 63), "MPS state increment");
+        }
+        /* After 64 MPSes from state 0, state should be capped at 63 */
+        ASSERT_EQ(ctx & 0x3F, 63, "state should cap at 63");
+        tc_rc_enc_flush(&rc_enc);
+    }
+
+    /* Test 2: LPS at state 0 flips MPS */
+    {
+        tc_bs_writer_t bs_w;
+        tc_bs_writer_init(&bs_w, buf, buf_size);
+        tc_rc_enc_t rc_enc;
+        tc_rc_enc_init(&rc_enc, &bs_w);
+        tc_rc_ctx_t ctx = 0;  /* State 0, MPS=0 */
+
+        int mps_before = ctx >> 7;
+        tc_rc_enc_bit(&rc_enc, &ctx, 1);  /* Encode LPS (MPS=0, so LPS=1) */
+        int mps_after = ctx >> 7;
+        ASSERT_NE(mps_before, mps_after, "LPS at state 0 should flip MPS");
+        tc_rc_enc_flush(&rc_enc);
+    }
+
+    /* Test 3: Roundtrip end-to-end also verifies state sync */
+
+    free(buf);
+    PASS();
+}
+
+/* ── Phase 3: Coefficient coding roundtrip ──────────────────── */
+
+static void test_rc_coeff_coding(void)
+{
+    TEST(range_coder_coefficient_coding);
+
+    size_t buf_size = 8192;
+    uint8_t *buf = (uint8_t *)calloc(buf_size, 1);
+    ASSERT_NE(buf, NULL, "buffer alloc failed");
+
+    /* Test several coefficient patterns */
+    int test_sizes[]  = { 16, 64 };  /* 4x4, 8x8 */
+    const char *size_names[] = { "4x4", "8x8" };
+
+    for (int ts = 0; ts < 2; ts++) {
+        int n = test_sizes[ts];
+        tc_block_size_t dct_size = (ts == 0) ? TC_BLOCK_4x4_ID : TC_BLOCK_8x8_ID;
+
+        /* Pattern 1: All zeros */
+        {
+            tc_coeff_t coeffs[64] = {0};
+            memset(buf, 0, buf_size);
+
+            tc_bs_writer_t bs_w;
+            tc_bs_writer_init(&bs_w, buf, buf_size);
+            tc_rc_enc_t rc_enc;
+            tc_rc_enc_init(&rc_enc, &bs_w);
+            tc_rc_ctx_t enc_ctx[TC_NUM_CONTEXTS_RC];
+            tc_rc_ctx_init(enc_ctx, TC_NUM_CONTEXTS_RC);
+
+            tc_rc_enc_coeffs(&rc_enc, enc_ctx, coeffs, n, dct_size);
+            tc_rc_enc_flush(&rc_enc);
+
+            size_t sz = tc_bs_writer_bytes(&bs_w);
+
+            tc_bs_reader_t bs_r;
+            tc_bs_reader_init(&bs_r, buf, sz);
+            tc_rc_dec_t rc_dec;
+            tc_rc_dec_init(&rc_dec, &bs_r);
+            tc_rc_ctx_t dec_ctx[TC_NUM_CONTEXTS_RC];
+            tc_rc_ctx_init(dec_ctx, TC_NUM_CONTEXTS_RC);
+
+            tc_coeff_t decoded[64] = {1};  /* deliberately nonzero */
+            tc_rc_dec_coeffs(&rc_dec, dec_ctx, decoded, n, dct_size);
+
+            for (int i = 0; i < n; i++) {
+                ASSERT_EQ(decoded[i], 0, "all-zero: decoded coeff not zero");
+            }
+        }
+
+        /* Pattern 2: Single non-zero coefficient */
+        {
+            tc_coeff_t coeffs[64] = {0};
+            coeffs[0] = 5;
+            memset(buf, 0, buf_size);
+
+            tc_bs_writer_t bs_w;
+            tc_bs_writer_init(&bs_w, buf, buf_size);
+            tc_rc_enc_t rc_enc;
+            tc_rc_enc_init(&rc_enc, &bs_w);
+            tc_rc_ctx_t enc_ctx[TC_NUM_CONTEXTS_RC];
+            tc_rc_ctx_init(enc_ctx, TC_NUM_CONTEXTS_RC);
+
+            tc_rc_enc_coeffs(&rc_enc, enc_ctx, coeffs, n, dct_size);
+            tc_rc_enc_flush(&rc_enc);
+
+            size_t sz = tc_bs_writer_bytes(&bs_w);
+
+            tc_bs_reader_t bs_r;
+            tc_bs_reader_init(&bs_r, buf, sz);
+            tc_rc_dec_t rc_dec;
+            tc_rc_dec_init(&rc_dec, &bs_r);
+            tc_rc_ctx_t dec_ctx[TC_NUM_CONTEXTS_RC];
+            tc_rc_ctx_init(dec_ctx, TC_NUM_CONTEXTS_RC);
+
+            tc_coeff_t decoded[64] = {0};
+            tc_rc_dec_coeffs(&rc_dec, dec_ctx, decoded, n, dct_size);
+
+            for (int i = 0; i < n; i++) {
+                if (i == 0) ASSERT_EQ(decoded[i], 5, "single coeff: DC mismatch");
+                else        ASSERT_EQ(decoded[i], 0, "single coeff: nonzero at wrong position");
+            }
+        }
+
+        /* Pattern 3: Sparse coefficients (5 non-zeros) */
+        {
+            tc_coeff_t coeffs[64] = {0};
+            coeffs[0]  = 1;
+            coeffs[1]  = -2;
+            coeffs[2]  = 0;
+            coeffs[3]  = 10;
+            coeffs[7]  = -5;
+            coeffs[15] = 3;
+            memset(buf, 0, buf_size);
+
+            tc_bs_writer_t bs_w;
+            tc_bs_writer_init(&bs_w, buf, buf_size);
+            tc_rc_enc_t rc_enc;
+            tc_rc_enc_init(&rc_enc, &bs_w);
+            tc_rc_ctx_t enc_ctx[TC_NUM_CONTEXTS_RC];
+            tc_rc_ctx_init(enc_ctx, TC_NUM_CONTEXTS_RC);
+
+            tc_rc_enc_coeffs(&rc_enc, enc_ctx, coeffs, n, dct_size);
+            tc_rc_enc_flush(&rc_enc);
+
+            size_t sz = tc_bs_writer_bytes(&bs_w);
+
+            tc_bs_reader_t bs_r;
+            tc_bs_reader_init(&bs_r, buf, sz);
+            tc_rc_dec_t rc_dec;
+            tc_rc_dec_init(&rc_dec, &bs_r);
+            tc_rc_ctx_t dec_ctx[TC_NUM_CONTEXTS_RC];
+            tc_rc_ctx_init(dec_ctx, TC_NUM_CONTEXTS_RC);
+
+            tc_coeff_t decoded[64] = {0};
+            tc_rc_dec_coeffs(&rc_dec, dec_ctx, decoded, n, dct_size);
+
+            for (int i = 0; i < n; i++) {
+                if (decoded[i] != coeffs[i]) {
+                    char msg[64];
+                    snprintf(msg, sizeof(msg), "%s sparse: coeff[%d] mismatch %d != %d",
+                             size_names[ts], i, decoded[i], coeffs[i]);
+                    FAIL(msg);
+                    free(buf);
+                    return;
+                }
+            }
+        }
+
+        /* Pattern 4: Dense coefficients (many non-zeros) */
+        {
+            tc_coeff_t coeffs[64];
+            unsigned seed2 = 42;
+            for (int i = 0; i < n; i++) {
+                seed2 = seed2 * 1103515245 + 12345;
+                int val = (int)((seed2 >> 20) & 0x7F) - 63;
+                if (val > -4 && val < 4) val = 0;  /* Sparse-like */
+                coeffs[i] = (tc_coeff_t)val;
+            }
+            memset(buf, 0, buf_size);
+
+            tc_bs_writer_t bs_w;
+            tc_bs_writer_init(&bs_w, buf, buf_size);
+            tc_rc_enc_t rc_enc;
+            tc_rc_enc_init(&rc_enc, &bs_w);
+            tc_rc_ctx_t enc_ctx[TC_NUM_CONTEXTS_RC];
+            tc_rc_ctx_init(enc_ctx, TC_NUM_CONTEXTS_RC);
+
+            tc_rc_enc_coeffs(&rc_enc, enc_ctx, coeffs, n, dct_size);
+            tc_rc_enc_flush(&rc_enc);
+
+            size_t sz = tc_bs_writer_bytes(&bs_w);
+
+            tc_bs_reader_t bs_r;
+            tc_bs_reader_init(&bs_r, buf, sz);
+            tc_rc_dec_t rc_dec;
+            tc_rc_dec_init(&rc_dec, &bs_r);
+            tc_rc_ctx_t dec_ctx[TC_NUM_CONTEXTS_RC];
+            tc_rc_ctx_init(dec_ctx, TC_NUM_CONTEXTS_RC);
+
+            tc_coeff_t decoded[64] = {0};
+            tc_rc_dec_coeffs(&rc_dec, dec_ctx, decoded, n, dct_size);
+
+            for (int i = 0; i < n; i++) {
+                if (decoded[i] != coeffs[i]) {
+                    char msg[64];
+                    snprintf(msg, sizeof(msg), "%s dense: coeff[%d] mismatch %d != %d",
+                             size_names[ts], i, decoded[i], coeffs[i]);
+                    FAIL(msg);
+                    free(buf);
+                    return;
+                }
+            }
+        }
+    }
+
+    free(buf);
+    PASS();
+}
+
+/* ── Phase 3: Full encode/decode with entropy coding ──────── */
+
+static void test_rc_full_roundtrip(void)
+{
+    TEST(range_coder_full_encode_decode);
+    int w = 128, h = 128;
+
+    tc_config_t cfg;
+    tc_config_defaults(&cfg, w, h);
+    cfg.qp = 30;
+    cfg.enable_entropy_coded = 1;  /* Phase 3: use range coder */
+
+    tc_encoder_t *enc = tc_encoder_create(&cfg);
+    tc_decoder_t *dec = tc_decoder_create(0, 0);
+    ASSERT_NE(enc, NULL, "encoder NULL");
+    ASSERT_NE(dec, NULL, "decoder NULL");
+
+    tc_pixel_t *y  = (tc_pixel_t *)calloc((size_t)(w * h), 1);
+    tc_pixel_t *cb = (tc_pixel_t *)calloc((size_t)(w/2 * h/2), 1);
+    tc_pixel_t *cr = (tc_pixel_t *)calloc((size_t)(w/2 * h/2), 1);
+
+    int n_frames = 5;
+    double total_psnr = 0;
+    size_t total_size = 0;
+    int entropy_coded_frames = 0;
+
+    for (int f = 0; f < n_frames; f++) {
+        /* Generate content */
+        for (int row = 0; row < h; row++) {
+            for (int col = 0; col < w; col++) {
+                y[row * w + col] = (tc_pixel_t)((row * 255 / h + col * 255 / w) / 2);
+            }
+        }
+        memset(cb, 128, (size_t)(w/2 * h/2));
+        memset(cr, 128, (size_t)(w/2 * h/2));
+
+        tc_packet_t pkt;
+        tc_error_t err = tc_encoder_encode(enc, y, w, cb, w/2, cr, w/2, &pkt);
+        ASSERT_EQ(err, TC_OK, "entropy-coded encode failed");
+
+        /* Verify TC_TOOL_ENTROPY_CODED flag is in v1 tool_flags */
+        ASSERT_EQ(pkt.data[3], TC_VERSION_V1, "must be v1 for entropy coded");
+        uint16_t tool_flags = (uint16_t)((pkt.data[12] << 8) | pkt.data[13]);
+        ASSERT_EQ((tool_flags & TC_TOOL_ENTROPY_CODED) != 0, 1, "entropy_coded flag not set");
+
+        const tc_pixel_t *dy, *dcb, *dcr;
+        int sy, scb, scr;
+        err = tc_decoder_decode(dec, pkt.data, pkt.size,
+                                &dy, &sy, &dcb, &scb, &dcr, &scr);
+        ASSERT_EQ(err, TC_OK, "entropy-coded decode failed");
+
+        /* Verify tc_decoder_entropy_coded() reports correctly */
+        ASSERT_EQ(tc_decoder_entropy_coded(dec), 1, "decoder should report entropy_coded");
+
+        double psnr = tc_psnr(y, w, dy, sy, w, h);
+        total_psnr += psnr;
+        total_size += pkt.size;
+
+        if (tc_decoder_entropy_coded(dec)) entropy_coded_frames++;
+    }
+
+    double avg_psnr = total_psnr / n_frames;
+    printf(" [avgPSNR=%.1fdB avgSize=%.0fB entropy=%d/%d]",
+           avg_psnr, (double)total_size / n_frames, entropy_coded_frames, n_frames);
+
+    ASSERT_RANGE(avg_psnr, 15.0, 100.0, "entropy-coded PSNR out of range");
+    ASSERT_EQ(entropy_coded_frames, n_frames, "not all frames used entropy coding");
+
+    /* Verify encoder recon matches decoder output (Phase 0 invariant) */
+    const tc_pixel_t *dy, *dcb, *dcr;
+    int sy, scb, scr;
+
+    gen_noise(y, w, h, w, 9999);
+    memset(cb, 128, (size_t)(w/2 * h/2));
+    memset(cr, 128, (size_t)(w/2 * h/2));
+
+    tc_packet_t pkt;
+    tc_encoder_encode(enc, y, w, cb, w/2, cr, w/2, &pkt);
+    tc_decoder_decode(dec, pkt.data, pkt.size, &dy, &sy, &dcb, &scb, &dcr, &scr);
+
+    const tc_pixel_t *enc_recon_y = enc->recon->y;
+    int enc_stride = enc->recon->stride_y;
+
+    int mismatch_count = 0;
+    for (int row = 0; row < h; row++) {
+        for (int col = 0; col < w; col++) {
+            if (enc_recon_y[row * enc_stride + col] != dy[row * sy + col])
+                mismatch_count++;
+        }
+    }
+    ASSERT_EQ(mismatch_count, 0, "encoder recon and decoder output differ with entropy coding");
+
+    tc_encoder_destroy(enc);
+    tc_decoder_destroy(dec);
+    free(y); free(cb); free(cr);
+    PASS();
+}
+
 /* ── Main ──────────────────────────────────────────────────────── */
 
 int main(void)
@@ -2149,6 +2543,12 @@ int main(void)
     test_v1_rap();
     test_v1_crc();
     test_v0_backward_compat();
+
+    /* Phase 3: Range coder tests */
+    test_rc_engine_roundtrip();
+    test_rc_context_model();
+    test_rc_coeff_coding();
+    test_rc_full_roundtrip();
 
     /* Summary */
     printf("\n════════════════════════════════════════════════════════\n");

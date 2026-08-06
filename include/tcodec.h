@@ -79,6 +79,11 @@ void tc_decoder_get_info(tc_decoder_t *dec,
  * Only meaningful for v1 bitstreams with TC_FLAG_CRC set. */
 int tc_decoder_crc_valid(tc_decoder_t *dec);
 
+/* Check if last decoded frame used context-modeled entropy coding.
+ * Returns 1 if range coder was active, 0 if Exp-Golomb was used.
+ * Only meaningful for v1 bitstreams with TC_TOOL_ENTROPY_CODED set. */
+int tc_decoder_entropy_coded(tc_decoder_t *dec);
+
 /* ── Utility functions ───────────────────────────────────────── */
 
 /* Get human-readable error string. */

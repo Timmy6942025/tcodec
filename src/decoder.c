@@ -21,6 +21,48 @@
 
 /* ── Read frame header ──────────────────────────────────────── */
 
+/* ── Dual-path decoding helpers (raw bits vs range coder) ─────
+ *
+ * When rc!=NULL (TC_TOOL_ENTROPY_CODED active), use context-modeled
+ * range coder. When rc==NULL, use raw bitstream reads.
+ * This avoids duplicating decode_block for the two paths.
+ * ══════════════════════════════════════════════════════════════ */
+
+static TCODEC_FORCEINLINE uint32_t dec_read_bits(
+    tc_bs_reader_t *bs, tc_rc_dec_t *rc, tc_rc_ctx_t *ctx,
+    int base_ctx, int nbits)
+{
+    if (rc) return tc_rc_dec_bits(rc, ctx, base_ctx, nbits);
+    else    return tc_bs_reader_read_bits(bs, nbits);
+}
+
+static TCODEC_FORCEINLINE int32_t dec_read_se(
+    tc_bs_reader_t *bs, tc_rc_dec_t *rc, tc_rc_ctx_t *ctx,
+    int base_ctx)
+{
+    if (rc) {
+        uint32_t mapped = tc_rc_dec_ue(rc, ctx, base_ctx);
+        /* Invert the signed-to-unsigned mapping from encoder:
+         *   0 → 0, 1 → 1, 2 → -1, 3 → 2, 4 → -2, ...
+         *   val>0 → mapped=2*val-1, val<0 → mapped=-2*val */
+        if (mapped == 0) return 0;
+        if (mapped & 1) return (int32_t)((mapped + 1) >> 1);
+        else            return -(int32_t)(mapped >> 1);
+    } else {
+        return tc_bs_reader_read_se(bs);
+    }
+}
+
+static TCODEC_FORCEINLINE void dec_read_coeffs(
+    tc_tans_dec_t *tans, tc_rc_dec_t *rc, tc_rc_ctx_t *rc_ctx,
+    tc_coeff_t *coeffs, int n, tc_block_size_t dct_size)
+{
+    if (rc) tc_rc_dec_coeffs(rc, rc_ctx, coeffs, n, dct_size);
+    else    tc_tans_dec_coeffs(tans, coeffs, n, dct_size);
+}
+
+/* ── Read frame header ──────────────────────────────────────── */
+
 static tc_error_t read_frame_header(tc_bs_reader_t *bs, tc_frame_header_t *hdr)
 {
     if (tc_bs_reader_eof(bs)) return TC_ERR_EOF;
@@ -118,7 +160,8 @@ static tc_error_t read_frame_header(tc_bs_reader_t *bs, tc_frame_header_t *hdr)
 static void decode_block(tc_decoder_t *dec, int ctu_idx, int blk_idx,
                          int frame_x, int frame_y,
                          int qp, tc_frame_type_t frame_type,
-                         tc_bs_reader_t *bs, tc_tans_dec_t *tans)
+                         tc_bs_reader_t *bs, tc_tans_dec_t *tans,
+                         tc_rc_dec_t *rc, tc_rc_ctx_t *rc_ctx)
 {
     int blk_size = 8;
     int n_coeff  = 64;
@@ -134,7 +177,7 @@ static void decode_block(tc_decoder_t *dec, int ctu_idx, int blk_idx,
     int is_merge = 0;
     if (frame_type != TC_FRAME_KEY) {
         /* 2-bit mode: 0=skip, 1=inter, 2=intra, 3=merge */
-        uint32_t mode = tc_bs_reader_read_bits(bs, 2);
+        uint32_t mode = dec_read_bits(bs, rc, rc_ctx, RC_CTX_BLOCK_MODE, 2);
         switch (mode) {
         case TC_MODE_SKIP:
             is_skip  = 1;
@@ -160,7 +203,7 @@ static void decode_block(tc_decoder_t *dec, int ctu_idx, int blk_idx,
     /* ── Intra mode + prediction ───────────────────────────── */
     if (is_intra) {
         /* Read intra mode (5 bits = enough for 18 modes) */
-        uint32_t im = tc_bs_reader_read_bits(bs, 5);
+        uint32_t im = dec_read_bits(bs, rc, rc_ctx, RC_CTX_INTRA_MODE, 5);
         if (im >= TC_INTRA_MODES) im = TC_INTRA_DC;
         intra_mode = (tc_intra_mode_t)im;
 
@@ -225,7 +268,7 @@ static void decode_block(tc_decoder_t *dec, int ctu_idx, int blk_idx,
             /* Skip/inter: read ref_idx + MVD from bitstream */
             uint32_t ref_idx = 0;
             if (frame_type != TC_FRAME_KEY) {
-                ref_idx = tc_bs_reader_read_bits(bs, 2);
+                ref_idx = dec_read_bits(bs, rc, rc_ctx, RC_CTX_REF_IDX, 2);
                 if (ref_idx >= TC_REF_FRAMES) ref_idx = 0;  /* Safety clamp */
             }
             block_ref_idx = (uint8_t)ref_idx;  /* Save for ctu_data */
@@ -264,27 +307,23 @@ static void decode_block(tc_decoder_t *dec, int ctu_idx, int blk_idx,
                 }
             }
 
-            int32_t mvd_x = tc_bs_reader_read_se(bs);
-            int32_t mvd_y = tc_bs_reader_read_se(bs);
+            int32_t mvd_x = dec_read_se(bs, rc, rc_ctx, RC_CTX_MVD_MAG);
+            int32_t mvd_y = dec_read_se(bs, rc, rc_ctx, RC_CTX_MVD_MAG);
             mv = (tc_mv_s){ mvd_x + predictor_mv.x, mvd_y + predictor_mv.y };
             selected_ref = dec->dpb[ref_idx].frame;
         }
 
         block_mv = mv;  /* Save for ctu_data storage below */
 
-        /* Inter predict with bounds checking */
+        /* Inter predict. tc_inter_predict() is OOB-safe (per-pixel
+         * clamping) for any MV, so we call it unconditionally for every
+         * reference that exists. This guarantees decoder output matches
+         * encoder recon bit-exactly: the encoder emits whatever MV it
+         * finds, and both sides run the identical interpolation path. */
         if (selected_ref) {
-            int fx = mv.x >> 2;
-            int fy = mv.y >> 2;
-            if (fx >= 0 && fy >= 0 &&
-                fx + blk_size + 1 <= selected_ref->width &&
-                fy + blk_size + 1 <= selected_ref->height) {
-                tc_inter_predict(selected_ref->y, selected_ref->stride_y,
-                                 selected_ref->width, selected_ref->height,
-                                 mv, pred_block, blk_size, blk_size);
-            } else {
-                memset(pred_block, 128, (size_t)n_coeff);
-            }
+            tc_inter_predict(selected_ref->y, selected_ref->stride_y,
+                             selected_ref->width, selected_ref->height,
+                             mv, pred_block, blk_size, blk_size);
         } else {
             memset(pred_block, 128, (size_t)n_coeff);
         }
@@ -304,13 +343,13 @@ static void decode_block(tc_decoder_t *dec, int ctu_idx, int blk_idx,
         }
     } else {
         /* Non-skip: read DCT size flag + coefficients + reconstruct */
-        uint32_t dct_size_id = tc_bs_reader_read_bits(bs, 1);
+        uint32_t dct_size_id = dec_read_bits(bs, rc, rc_ctx, RC_CTX_DCT_SIZE, 1);
 
         if (dct_size_id == TC_BLOCK_4x4_ID) {
             for (int sy = 0; sy < 2; sy++) {
                 for (int sx = 0; sx < 2; sx++) {
                     tc_coeff_t sub[16];
-                    tc_tans_dec_coeffs(tans, sub, 16, TC_BLOCK_4x4_ID);
+                    dec_read_coeffs(tans, rc, rc_ctx, sub, 16, TC_BLOCK_4x4_ID);
                     for (int i = 0; i < 16; i++) {
                         int band = tc_freq_band(i, 4);
                         int w = tc_jnd_weight(band, i);
@@ -337,7 +376,7 @@ static void decode_block(tc_decoder_t *dec, int ctu_idx, int blk_idx,
                 }
             }
         } else {
-            tc_tans_dec_coeffs(tans, dct_coeff, 64, TC_BLOCK_8x8_ID);
+            dec_read_coeffs(tans, rc, rc_ctx, dct_coeff, 64, TC_BLOCK_8x8_ID);
             for (int i = 0; i < 64; i++) {
                 int band = tc_freq_band(i, 8);
                 int w = tc_jnd_weight(band, i);
@@ -429,7 +468,7 @@ static void decode_block(tc_decoder_t *dec, int ctu_idx, int blk_idx,
              * in tc_quantize/tc_dequantize, this decoder path must be updated
              * to apply matching JND weighting (like the luma path does inline). */
             tc_coeff_t c_coeff[16];
-            tc_tans_dec_coeffs(tans, c_coeff, 16, TC_BLOCK_4x4_ID);
+            dec_read_coeffs(tans, rc, rc_ctx, c_coeff, 16, TC_BLOCK_4x4_ID);
             tc_dequantize(c_coeff, 16, chroma_qp, 0);
 
             tc_coeff_t c_rec[16];
@@ -464,7 +503,8 @@ static void decode_block(tc_decoder_t *dec, int ctu_idx, int blk_idx,
 
 static void decode_row_impl(tc_decoder_t *dec, int row, int qp,
                              tc_frame_type_t frame_type,
-                             tc_bs_reader_t *bs, tc_tans_dec_t *tans)
+                             tc_bs_reader_t *bs, tc_tans_dec_t *tans,
+                             tc_rc_dec_t *rc, tc_rc_ctx_t *rc_ctx)
 {
     for (int col = 0; col < dec->num_ctu_cols; col++) {
         int ctu_x = col * TC_CTU_SIZE;
@@ -480,7 +520,8 @@ static void decode_row_impl(tc_decoder_t *dec, int row, int qp,
                 if (blk_x + 8 > dec->width || blk_y + 8 > dec->height) continue;
 
                 decode_block(dec, ctu_idx, by * 8 + bx, blk_x, blk_y,
-                             qp, frame_type, bs, tans);
+                             qp, frame_type, bs, tans,
+                             rc, rc_ctx);
             }
         }
 
@@ -504,13 +545,17 @@ typedef struct {
     tc_frame_type_t frame_type;
     tc_bs_reader_t *row_bs;      /* Per-row reader array */
     tc_tans_dec_t  *row_tans;    /* Per-row tANS decoder array */
+    tc_rc_dec_t    *row_rc;      /* Per-row range coder (NULL if not entropy coded) */
+    tc_rc_ctx_t    *row_rc_ctx;  /* Flat: num_rows * TC_NUM_CONTEXTS_RC */
 } dec_wpp_ctx_t;
 
 static void decode_row_wpp(void *ctx, int row)
 {
     dec_wpp_ctx_t *wctx = (dec_wpp_ctx_t *)ctx;
     decode_row_impl(wctx->dec, row, wctx->qp, wctx->frame_type,
-                    &wctx->row_bs[row], &wctx->row_tans[row]);
+                    &wctx->row_bs[row], &wctx->row_tans[row],
+                    wctx->row_rc ? &wctx->row_rc[row] : NULL,
+                    wctx->row_rc_ctx ? &wctx->row_rc_ctx[row * TC_NUM_CONTEXTS_RC] : NULL);
 }
 #endif /* !TCODEC_NO_THREADS */
 
@@ -587,6 +632,12 @@ int tc_decoder_crc_valid(tc_decoder_t *dec)
     return dec->last_crc_valid;
 }
 
+int tc_decoder_entropy_coded(tc_decoder_t *dec)
+{
+    if (!dec) return 0;
+    return dec->use_entropy_coded;
+}
+
 /* ── Main decode function ────────────────────────────────────── */
 
 tc_error_t tc_decoder_decode(tc_decoder_t *dec,
@@ -632,6 +683,26 @@ tc_error_t tc_decoder_decode(tc_decoder_t *dec,
 
     /* Init tANS decoder */
     tc_tans_dec_init(&dec->tans, &dec->bs);
+
+    /* Determine if entropy coding is active for this frame.
+     * TC_TOOL_ENTROPY_CODED is mutually exclusive with WPP
+     * (serial bitstream; WPP+RC to be addressed in Phase 9). */
+    int use_entropy_coded = 0;
+    if (hdr.version == TC_VERSION_V1 && (hdr.tool_flags & TC_TOOL_ENTROPY_CODED)) {
+        use_entropy_coded = 1;
+    }
+    dec->use_entropy_coded = use_entropy_coded;
+
+    /* Set up range coder if entropy coded is active */
+    tc_rc_dec_t  rc_dec_local;
+    tc_rc_ctx_t *rc_ctx_ptr = NULL;
+    tc_rc_dec_t *rc_ptr     = NULL;
+    if (use_entropy_coded) {
+        tc_rc_ctx_init(dec->rc_ctx, TC_NUM_CONTEXTS_RC);
+        tc_rc_dec_init(&rc_dec_local, &dec->bs);
+        rc_ctx_ptr = dec->rc_ctx;
+        rc_ptr     = &rc_dec_local;
+    }
 
     /* Clear CTU block info for new frame (stale MVs from previous frame
      * could cause incorrect merge MV derivation). */
@@ -762,6 +833,8 @@ tc_error_t tc_decoder_decode(tc_decoder_t *dec,
             wctx.frame_type = hdr.frame_type;
             wctx.row_bs     = dec->row_bs;
             wctx.row_tans   = dec->row_tans;
+            wctx.row_rc     = NULL;
+            wctx.row_rc_ctx = NULL;
             tc_threadpool_run(dec->pool, decode_row_wpp, &wctx, num_ctu_rows);
         }
     }
@@ -783,7 +856,8 @@ tc_error_t tc_decoder_decode(tc_decoder_t *dec,
 
         for (int row = 0; row < num_ctu_rows; row++) {
             decode_row_impl(dec, row, qp, hdr.frame_type,
-                            &dec->bs, &dec->tans);
+                            &dec->bs, &dec->tans,
+                            rc_ptr, rc_ctx_ptr);
             /* WPP rows are byte-aligned — skip padding to reach
              * the next row's start. Without this, the reader would
              * misinterpret padding bits as block data.

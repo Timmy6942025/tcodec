@@ -55,7 +55,8 @@ extern "C" {
 #define TC_QP_DEFAULT       32
 #define TC_TANS_TABLE_BITS  10          /* tANS table = 1024 entries */
 #define TC_TANS_TABLE_SIZE  (1 << TC_TANS_TABLE_BITS)
-#define TC_NUM_CONTEXTS     16          /* Reserved for future ANS context coding */
+#define TC_NUM_CONTEXTS     16          /* Reserved for legacy ANS context coding */
+#define TC_NUM_CONTEXTS_RC  64          /* Range coder contexts (Phase 3) */
 #define TC_TILE_MAX         8
 
 /* Magic bytes */
@@ -331,6 +332,7 @@ typedef struct tc_config {
     uint8_t         profile;          /* tc_profile_t */
     uint8_t         level_idx;        /* Level index (0 = auto) */
     int             enable_crc;      /* 1 = add CRC-16 to frames (v1 only) */
+    int             enable_entropy_coded; /* 1 = use range coder (Phase 3, v1 only) */
 } tc_config_t;
 
 #ifdef __cplusplus

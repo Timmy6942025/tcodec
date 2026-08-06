@@ -18,6 +18,10 @@
  *   --rgb        Input is packed RGB24 instead of YCbCr
  *   -n frames    Number of frames to encode (0=all)
  *   -v           Verbose: print per-frame stats
+ *   --bs-version V Bitstream version: 0 or 1 (default 1)
+ *   --profile P  Profile: 0=baseline-mobile 1=streaming-main 2=archive-high 3=grain-cinema
+ *   --level L     Level index: 0=auto 1..8 (default 0)
+ *   --crc         Enable CRC-16 error detection (v1 only)
  */
 
 #include "tcodec.h"
@@ -41,7 +45,11 @@ static void print_usage(const char *prog)
         "  -t THR    Threads (default 4)\n"
         "  --rgb     Input is RGB24\n"
         "  -n N      Encode N frames (0=all)\n"
-        "  -v        Verbose\n",
+        "  -v        Verbose\n"
+        "  --bs-version V Bitstream version 0 or 1 (default 1)\n"
+        "  --profile P     Profile 0-3 (default 0=baseline-mobile)\n"
+        "  --level L       Level 0-8 (default 0=auto)\n"
+        "  --crc           Enable CRC-16 (v1 only)\n"        "  --entropy       Use context-modeled range coder (v1 only)\n",
         TCODEC_VERSION_STRING, prog);
 }
 
@@ -54,6 +62,11 @@ int main(int argc, char **argv)
     int keyframe_interval = 30, threads = 4;
     int target_bitrate_kbps = 0;
     int is_rgb = 0, max_frames = 0, verbose = 0;
+    int bitstream_version = -1;  /* -1 = use default from tc_config_defaults */
+    int profile = -1;
+    int level = -1;
+    int enable_crc = 0;
+    int enable_entropy = 0;
 
     /* Parse arguments */
     for (int i = 1; i < argc; i++) {
@@ -75,6 +88,16 @@ int main(int argc, char **argv)
             threads = atoi(argv[++i]);
         } else if (strcmp(argv[i], "--rgb") == 0) {
             is_rgb = 1;
+        } else if (strcmp(argv[i], "--bs-version") == 0 && i + 1 < argc) {
+            bitstream_version = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--profile") == 0 && i + 1 < argc) {
+            profile = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--level") == 0 && i + 1 < argc) {
+            level = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--crc") == 0) {
+            enable_crc = 1;
+        } else if (strcmp(argv[i], "--entropy") == 0) {
+            enable_entropy = 1;
         } else if (strcmp(argv[i], "-n") == 0 && i + 1 < argc) {
             max_frames = atoi(argv[++i]);
         } else if (strcmp(argv[i], "-v") == 0) {
@@ -95,17 +118,50 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    /* Configure encoder */
+    /* Configure encoder using defaults (includes v1 bitstream fields) */
     tc_config_t cfg;
-    memset(&cfg, 0, sizeof(cfg));
-    cfg.width  = width;
-    cfg.height = height;
+    tc_config_defaults(&cfg, width, height);
     cfg.preset = (tc_preset_t)preset;
     cfg.qp = qp;
     cfg.fps_num = fps;
     cfg.fps_den = 1;
     cfg.keyframe_interval = keyframe_interval;
     cfg.threads = threads;
+
+    /* Override v1 bitstream options if specified */
+    if (bitstream_version >= 0) {
+        if (bitstream_version > TC_VERSION_V1) {
+            fprintf(stderr, "Error: bitstream version must be 0 or 1\n");
+            return 1;
+        }
+        cfg.bitstream_version = (uint8_t)bitstream_version;
+    }
+    if (profile >= 0) {
+        if (profile > TC_PROFILE_MAX) {
+            fprintf(stderr, "Error: profile must be 0-%d\n", TC_PROFILE_MAX);
+            return 1;
+        }
+        cfg.profile = (uint8_t)profile;
+    }
+    if (level >= 0) {
+        if (level > TC_LEVEL_MAX) {
+            fprintf(stderr, "Error: level must be 0-%d\n", TC_LEVEL_MAX);
+            return 1;
+        }
+        cfg.level_idx = (uint8_t)level;
+    }
+    if (enable_crc) {
+        if (cfg.bitstream_version == TC_VERSION_V0) {
+            fprintf(stderr, "Warning: --crc has no effect with v0 bitstream (CRC is v1-only)\n");
+        }
+        cfg.enable_crc = 1;
+    }
+    if (enable_entropy) {
+        if (cfg.bitstream_version == TC_VERSION_V0) {
+            fprintf(stderr, "Warning: --entropy has no effect with v0 bitstream (RC is v1-only)\n");
+        }
+        cfg.enable_entropy_coded = 1;
+    }
 
     if (target_bitrate_kbps > 0) {
         cfg.rc_method = TC_RC_CBR;

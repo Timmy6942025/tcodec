@@ -20,6 +20,47 @@
 /* Forward declaration — defined later in this file */
 void tc_encoder_destroy(tc_encoder_t *enc);
 
+/* ── Dual-path encoding helpers (raw bits vs range coder) ─────
+ *
+ * When rc!=NULL (TC_TOOL_ENTROPY_CODED active), use context-modeled
+ * range coder. When rc==NULL, use raw bitstream writes.
+ * This avoids duplicating encode_block for the two paths.
+ * ══════════════════════════════════════════════════════════════ */
+
+static TCODEC_FORCEINLINE void enc_write_bits(
+    tc_bs_writer_t *bs, tc_rc_enc_t *rc, tc_rc_ctx_t *ctx,
+    int base_ctx, uint32_t val, int nbits)
+{
+    if (rc) tc_rc_enc_bits(rc, ctx, base_ctx, val, nbits);
+    else    tc_bs_writer_write_bits(bs, val, nbits);
+}
+
+static TCODEC_FORCEINLINE void enc_write_se(
+    tc_bs_writer_t *bs, tc_rc_enc_t *rc, tc_rc_ctx_t *ctx,
+    int base_ctx, int32_t val)
+{
+    if (rc) {
+        /* Map signed to unsigned, then context-coded EG */
+        uint32_t mapped;
+        if (val > 0)       mapped = (uint32_t)(2 * val - 1);
+        else if (val < 0)  mapped = (uint32_t)(-2 * val);
+        else               mapped = 0;
+        tc_rc_enc_ue(rc, ctx, base_ctx, mapped);
+    } else {
+        tc_bs_writer_write_se(bs, val);
+    }
+}
+
+static TCODEC_FORCEINLINE void enc_write_coeffs(
+    tc_bs_writer_t *bs, tc_tans_enc_t *tans,
+    tc_rc_enc_t *rc, tc_rc_ctx_t *rc_ctx,
+    const tc_coeff_t *coeffs, int n, tc_block_size_t dct_size)
+{
+    if (rc) tc_rc_enc_coeffs(rc, rc_ctx, coeffs, n, dct_size);
+    else    tc_tans_enc_coeffs(tans, coeffs, n, dct_size);
+    (void)bs;
+}
+
 /* ── Variance-based DCT size selection ─────────────────────────
  *
  * For each 8×8 block, compute variance:
@@ -96,7 +137,8 @@ static void encode_block(tc_encoder_t *enc, tc_ctu_info_t *ctu,
                          int blk_idx, int bx, int by,
                          int frame_x, int frame_y,
                          int qp, tc_frame_type_t frame_type,
-                         tc_bs_writer_t *bs, tc_tans_enc_t *tans)
+                         tc_bs_writer_t *bs, tc_tans_enc_t *tans,
+                         tc_rc_enc_t *rc, tc_rc_ctx_t *rc_ctx)
 {
     tc_block_info_t *blk = &ctu->blocks[blk_idx];
 
@@ -372,18 +414,18 @@ static void encode_block(tc_encoder_t *enc, tc_ctu_info_t *ctu,
     if (frame_type != TC_FRAME_KEY) {
         /* Mode: 0=skip, 1=inter, 2=intra, 3=merge (2 bits) */
         if (is_merge) {
-            tc_bs_writer_write_bits(bs, 3, 2);  /* merge */
+            enc_write_bits(bs, rc, rc_ctx, RC_CTX_BLOCK_MODE, 3, 2);
         } else if (is_skip) {
-            tc_bs_writer_write_bits(bs, 0, 2);  /* skip */
+            enc_write_bits(bs, rc, rc_ctx, RC_CTX_BLOCK_MODE, 0, 2);
         } else if (blk->is_intra) {
-            tc_bs_writer_write_bits(bs, 2, 2);  /* intra */
+            enc_write_bits(bs, rc, rc_ctx, RC_CTX_BLOCK_MODE, 2, 2);
         } else {
-            tc_bs_writer_write_bits(bs, 1, 2);  /* inter with residual */
+            enc_write_bits(bs, rc, rc_ctx, RC_CTX_BLOCK_MODE, 1, 2);
         }
     }
 
     if (blk->is_intra && !is_skip && !is_merge) {
-        tc_bs_writer_write_bits(bs, (uint32_t)blk->intra_mode, 5);
+        enc_write_bits(bs, rc, rc_ctx, RC_CTX_INTRA_MODE, (uint32_t)blk->intra_mode, 5);
     }
 
     /* ref_idx + MVD: written for inter/skip only (NOT merge — merge
@@ -392,7 +434,7 @@ static void encode_block(tc_encoder_t *enc, tc_ctu_info_t *ctu,
         /* Write ref_idx (2 bits, supports up to 4 reference frames).
          * Only written for inter/skip blocks on P-frames. */
         if (frame_type != TC_FRAME_KEY) {
-            tc_bs_writer_write_bits(bs, (uint32_t)blk->ref_idx, 2);
+            enc_write_bits(bs, rc, rc_ctx, RC_CTX_REF_IDX, (uint32_t)blk->ref_idx, 2);
         }
         /* Write MVD for inter/skip blocks.
          * Skip blocks carry the actual MV — skip means zero residual,
@@ -403,8 +445,8 @@ static void encode_block(tc_encoder_t *enc, tc_ctu_info_t *ctu,
          * matching the decoder's predictor_mv derivation exactly. */
         int32_t mvd_x = blk->mv.x - merge_mv.x;
         int32_t mvd_y = blk->mv.y - merge_mv.y;
-        tc_bs_writer_write_se(bs, mvd_x);
-        tc_bs_writer_write_se(bs, mvd_y);
+        enc_write_se(bs, rc, rc_ctx, RC_CTX_MVD_MAG, mvd_x);
+        enc_write_se(bs, rc, rc_ctx, RC_CTX_MVD_MAG, mvd_y);
     }
 
     /* ── Reconstruct + encode coefficients ──────────────────── */
@@ -422,9 +464,9 @@ static void encode_block(tc_encoder_t *enc, tc_ctu_info_t *ctu,
         }
     } else {
         /* Non-skip/non-merge: write DCT flag, encode coefficients, reconstruct */
-        tc_bs_writer_write_bits(bs, dct_size_id, 1);
+        enc_write_bits(bs, rc, rc_ctx, RC_CTX_DCT_SIZE, dct_size_id, 1);
 
-        /* ── tANS encode coefficients ────────────────────────── */
+        /* ── tANS / Range-coder encode coefficients ────────── */
         if (dct_size_id == TC_BLOCK_4x4_ID) {
             for (int sy = 0; sy < 2; sy++) {
                 for (int sx = 0; sx < 2; sx++) {
@@ -434,11 +476,11 @@ static void encode_block(tc_encoder_t *enc, tc_ctu_info_t *ctu,
                             sub[r * 4 + c] = dct_out[(sy * 4 + r) * 8 + (sx * 4 + c)];
                         }
                     }
-                    tc_tans_enc_coeffs(tans, sub, 16, TC_BLOCK_4x4_ID);
+                    enc_write_coeffs(bs, tans, rc, rc_ctx, sub, 16, TC_BLOCK_4x4_ID);
                 }
             }
         } else {
-            tc_tans_enc_coeffs(tans, dct_out, n_coeff, TC_BLOCK_8x8_ID);
+            enc_write_coeffs(bs, tans, rc, rc_ctx, dct_out, n_coeff, TC_BLOCK_8x8_ID);
         }
 
         /* ── Reconstruct (dequantize + IDCT + add prediction) ── */
@@ -569,7 +611,7 @@ static void encode_block(tc_encoder_t *enc, tc_ctu_info_t *ctu,
         /* DCT + quantize + encode (residual-mode) */
         tc_fwht4x4(c_res, 4, c_dct);
         tc_quantize(c_dct, 16, tc_clip(qp + 1, 0, 63), 0);
-        tc_tans_enc_coeffs(tans, c_dct, 16, TC_BLOCK_4x4_ID);
+        enc_write_coeffs(bs, tans, rc, rc_ctx, c_dct, 16, TC_BLOCK_4x4_ID);
 
         /* Reconstruct chroma */
         tc_dequantize(c_dct, 16, tc_clip(qp + 1, 0, 63), 0);
@@ -620,6 +662,8 @@ typedef struct {
 #if !defined(TCODEC_NO_THREADS)
     int use_wpp;       /* 1 = use per-row buffers, 0 = use main buffer */
 #endif
+    tc_rc_enc_t  *rc;        /* Range coder for this row (NULL if not entropy coded) */
+    tc_rc_ctx_t  *rc_ctx;    /* Contexts for this row */
 } enc_row_ctx_t;
 
 static void encode_row(void *ctx, int row)
@@ -638,6 +682,8 @@ static void encode_row(void *ctx, int row)
      * implemented (Phase 3) — each row re-initializes its probability tables. */
     tc_bs_writer_t *bs;
     tc_tans_enc_t  *tans;
+    tc_rc_enc_t    *rc     = rctx->rc;
+    tc_rc_ctx_t    *rc_ctx = rctx->rc_ctx;
 #if !defined(TCODEC_NO_THREADS)
     if (rctx->use_wpp) {
         bs   = &enc->row_bs[row];
@@ -646,6 +692,10 @@ static void encode_row(void *ctx, int row)
         memset(enc->row_buf[row], 0, enc->row_buf_size[row]);
         tc_bs_writer_init(bs, enc->row_buf[row], enc->row_buf_size[row]);
         tc_tans_enc_init(tans, bs);
+        /* Init range coder for this row if entropy coded */
+        if (rc && rc_ctx) {
+            tc_rc_enc_init(rc, bs);
+        }
     } else
 #endif
     {
@@ -674,7 +724,8 @@ static void encode_row(void *ctx, int row)
                      * (written only for non-skip blocks) */
                     encode_block(enc, ctu, blk_idx, bx, by,
                                  blk_x, blk_y,
-                                 qp, rctx->frame_type, bs, tans);
+                                 qp, rctx->frame_type, bs, tans,
+                                 rc, rc_ctx);
                 }
             }
         }
@@ -768,6 +819,9 @@ tc_encoder_t *tc_encoder_create(const tc_config_t *config)
     /* Init tANS encoder */
     tc_tans_enc_init(&enc->tans, &enc->bs);
 
+    /* Init entropy coding mode */
+    enc->use_entropy_coded = config->enable_entropy_coded ? 1 : 0;
+
     /* Init rate control */
     tc_ratectl_init(&enc->rc, config);
 
@@ -783,8 +837,10 @@ tc_encoder_t *tc_encoder_create(const tc_config_t *config)
     if (num_threads <= 0) num_threads = 4;  /* Default for ARM quad-core */
     enc->num_threads = num_threads;
 
-    /* Use WPP when there are multiple CTU rows and >1 thread */
-    enc->use_wpp = (enc->num_ctu_rows > 1 && num_threads > 1) ? 1 : 0;
+    /* Use WPP when there are multiple CTU rows and >1 thread.
+     * Entropy coding (range coder, Phase 3) is not yet compatible
+     * with WPP — disable WPP when it is active. */
+    enc->use_wpp = (enc->num_ctu_rows > 1 && num_threads > 1 && !enc->use_entropy_coded) ? 1 : 0;
 
     if (enc->use_wpp) {
         /* Create thread pool */
@@ -991,8 +1047,11 @@ tc_error_t tc_encoder_encode(tc_encoder_t *enc,
             profile >= TC_PROFILE_STREAMING_MAIN) {
             tools |= TC_TOOL_MULTI_REF;
         }
+        /* Context-modeled entropy coding (Phase 3): active when config says so */
+        if (enc->use_entropy_coded) {
+            tools |= TC_TOOL_ENTROPY_CODED;
+        }
         /* Future tools (not yet implemented):
-         * TC_TOOL_ENTROPY_CODED  — context-modeled entropy (Phase 3)
          * TC_TOOL_DERINGING      — directional deringing (Phase 7)
          * TC_TOOL_SAO            — sample adaptive offset (Phase 7)
          * TC_TOOL_GRAIN_SYNTHESIS — film grain synthesis (Phase 7)
@@ -1032,6 +1091,20 @@ tc_error_t tc_encoder_encode(tc_encoder_t *enc,
     rctx.enc = enc;
     rctx.qp = qp;
     rctx.frame_type = frame_type;
+
+    /* Set up range coder state if entropy coded is active.
+     * Contexts are initialized fresh per frame (not persisted). */
+    tc_rc_enc_t  rc_enc_local;
+    tc_rc_ctx_t *rc_ctx_ptr = NULL;
+    tc_rc_enc_t *rc_ptr     = NULL;
+    if (enc->use_entropy_coded) {
+        tc_rc_ctx_init(enc->rc_ctx, TC_NUM_CONTEXTS_RC);
+        tc_rc_enc_init(&rc_enc_local, &enc->bs);
+        rc_ctx_ptr = enc->rc_ctx;
+        rc_ptr     = &rc_enc_local;
+    }
+    rctx.rc     = rc_ptr;
+    rctx.rc_ctx = rc_ctx_ptr;
 
 #if !defined(TCODEC_NO_THREADS)
     rctx.use_wpp = enc->use_wpp;
@@ -1099,8 +1172,15 @@ tc_error_t tc_encoder_encode(tc_encoder_t *enc,
 
         /* Flush tANS (shared across all rows) */
         tc_tans_enc_flush(&enc->tans);
+        /* Flush range coder if active */
+        if (rc_ptr) tc_rc_enc_flush(rc_ptr);
         tc_bs_writer_byte_align(&enc->bs);
     }
+
+    /* WPP+RC not yet supported: flush per-row range coders before merge.
+     * When WPP+RC is implemented (Phase 9), per-row flush happens per-row
+     * and contexts are propagated between rows. */
+    (void)rc_ptr;
 
     /* Append CRC-16 if v1 with TC_FLAG_CRC set */
     if (hdr.version == TC_VERSION_V1 && hdr.has_crc) {

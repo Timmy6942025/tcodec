@@ -485,12 +485,27 @@ void tc_inter_predict(const tc_pixel_t *ref, int ref_stride,
     int dy = mv.y & 3;
 
     if (dx == 0 && dy == 0) {
-        /* Integer-pel: fast path, just copy */
-        for (int y = 0; y < blk_size; y++) {
-            memcpy(dst + y * dst_stride,
-                   ref + (fy + y) * ref_stride + fx,
-                   (size_t)blk_size);
+        /* Integer-pel: fast path, just copy — but only when the whole
+         * block is inside the frame. Otherwise fall through to the
+         * per-pixel safe path (get_interp_luma clamps to frame edges),
+         * keeping encoder recon and decoder output bit-identical for
+         * edge MVs (and OOB MVs from fuzzed bitstreams never read
+         * out of bounds). */
+        if (fx >= 0 && fy >= 0 &&
+            fx + blk_size <= ref_w && fy + blk_size <= ref_h) {
+            for (int y = 0; y < blk_size; y++) {
+                memcpy(dst + y * dst_stride,
+                       ref + (fy + y) * ref_stride + fx,
+                       (size_t)blk_size);
+            }
+            return;
         }
+        /* Fall through: safe per-pixel path for out-of-bounds MVs */
+        for (int y = 0; y < blk_size; y++)
+            for (int x = 0; x < blk_size; x++)
+                dst[y * dst_stride + x] =
+                    get_interp_luma(ref, ref_stride, ref_w, ref_h,
+                                    fx + x, fy + y, 0, 0);
         return;
     }
 

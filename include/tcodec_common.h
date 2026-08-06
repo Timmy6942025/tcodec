@@ -177,12 +177,88 @@ void tc_tans_enc_flush(tc_tans_enc_t *e);
 
 void tc_tans_dec_init(tc_tans_dec_t *d, tc_bs_reader_t *bs);
 
+/* ── Range coder (Phase 3: context-modeled arithmetic coding) ── */
+
+/* Context state: single uint8_t per context.
+ * Bits 0-5: state index (0-63)
+ * Bit 7:    most probable symbol (MPS) value (0 or 1) */
+typedef uint8_t tc_rc_ctx_t;
+
+/* Range coder encoder state.
+ * Writes bitstream via tc_bs_writer_t, normalizing when range < 2^24.
+ * Uses 32-bit low with cache_byte + outstanding for carry handling — the
+ * standard approach used by CABAC and other arithmetic coders. */
+typedef struct tc_rc_enc {
+    tc_bs_writer_t *bs;          /* Output bitstream */
+    uint32_t        low;         /* Lower bound of current interval */
+    uint32_t        range;       /* Width of current interval */
+    int             cache_byte;  /* Buffered byte (-1 if none) */
+    int             outstanding; /* Deferred 0xFF byte count */
+} tc_rc_enc_t;
+
+/* Range coder decoder state.
+ * Reads from tc_bs_reader_t, normalizing when range < 2^24. */
+typedef struct tc_rc_dec {
+    tc_bs_reader_t *bs;          /* Input bitstream */
+    uint32_t        low;         /* Offset within current interval */
+    uint32_t        range;       /* Width of current interval */
+} tc_rc_dec_t;
+
+/* Engine init/flush */
+void tc_rc_enc_init(tc_rc_enc_t *rc, tc_bs_writer_t *bs);
+void tc_rc_enc_flush(tc_rc_enc_t *rc);
+void tc_rc_dec_init(tc_rc_dec_t *rc, tc_bs_reader_t *bs);
+
+/* Context management */
+void tc_rc_ctx_init(tc_rc_ctx_t *ctx, int num_ctx);
+void tc_rc_ctx_copy(tc_rc_ctx_t *dst, const tc_rc_ctx_t *src, int num_ctx);
+
+/* Single bit encode/decode (context-modeled) */
+void tc_rc_enc_bit(tc_rc_enc_t *rc, tc_rc_ctx_t *ctx, int bit);
+int  tc_rc_dec_bit(tc_rc_dec_t *rc, tc_rc_ctx_t *ctx);
+
+/* Multi-bit encode/decode (context per bit position) */
+void     tc_rc_enc_bits(tc_rc_enc_t *rc, tc_rc_ctx_t *ctx, int base_ctx,
+                         uint32_t val, int nbits);
+uint32_t tc_rc_dec_bits(tc_rc_dec_t *rc, tc_rc_ctx_t *ctx,
+                         int base_ctx, int nbits);
+
+/* Context-modeled Exp-Golomb */
+uint32_t tc_rc_enc_ue(tc_rc_enc_t *rc, tc_rc_ctx_t *ctx,
+                       int base_ctx, uint32_t val);
+uint32_t tc_rc_dec_ue(tc_rc_dec_t *rc, tc_rc_ctx_t *ctx, int base_ctx);
+
+/* Context-modeled coefficient coding (replaces EG coeff coding) */
+void tc_rc_enc_coeffs(tc_rc_enc_t *rc, tc_rc_ctx_t *ctx,
+                       const tc_coeff_t *coeffs, int n,
+                       tc_block_size_t dct_size);
+void tc_rc_dec_coeffs(tc_rc_dec_t *rc, tc_rc_ctx_t *ctx,
+                       tc_coeff_t *coeffs, int n,
+                       tc_block_size_t dct_size);
+
+/* Context indices (see range_coder.c for full enum) */
+#define RC_CTX_BLOCK_MODE  0
+#define RC_CTX_SKIP_FLAG   4
+#define RC_CTX_INTRA_MODE  6
+#define RC_CTX_DCT_SIZE    11
+#define RC_CTX_REF_IDX     13
+#define RC_CTX_MVD_SIGN    15
+#define RC_CTX_MVD_MAG     17
+#define RC_CTX_CSBF        21
+#define RC_CTX_SIG         25
+#define RC_CTX_LAST        33
+#define RC_CTX_GT1         37
+#define RC_CTX_GT2         43
+#define RC_CTX_SIGN        45
+#define RC_CTX_LEVEL       46
+#define RC_CTX_MAX         52
+
 /* Frequency band classification for a zigzag position.
  * Reserved for future JND-weighted quantization per coefficient.
  * Currently quantize/dequantize always pass band=0. */
 int tc_freq_band(int pos, int blk_size);
 
-/* Coefficient coding helpers */
+/* Coefficient coding helpers (Exp-Golomb path) */
 void tc_tans_enc_coeffs(tc_tans_enc_t *e, const tc_coeff_t *coeffs, int n,
                          tc_block_size_t dct_size);
 void tc_tans_dec_coeffs(tc_tans_dec_t *d, tc_coeff_t *coeffs, int n,
@@ -308,6 +384,9 @@ typedef struct tc_encoder {
     tc_ref_entry_t    dpb[TC_REF_FRAMES]; /* Decoded picture buffer */
     tc_ratectl_t      rc;
     tc_tans_enc_t     tans;
+    tc_rc_enc_t       rc_enc;         /* Range coder encoder (Phase 3) */
+    tc_rc_ctx_t       rc_ctx[TC_NUM_CONTEXTS_RC]; /* Context model */
+    int               use_entropy_coded; /* 1 = use RC, 0 = use EG */
     tc_bs_writer_t    bs;
     tc_ctu_info_t    *ctu_data;        /* Per-CTU coding info array */
     int32_t           num_ctu_cols;
@@ -322,6 +401,8 @@ typedef struct tc_encoder {
      * then rows are merged into the main bitstream in order. */
     tc_bs_writer_t   *row_bs;
     tc_tans_enc_t    *row_tans;
+    tc_rc_enc_t      *row_rc;         /* Per-row range coder (Phase 3) */
+    tc_rc_ctx_t      *row_rc_ctx;     /* Flat: num_rows * TC_NUM_CONTEXTS_RC */
     uint8_t         **row_buf;         /* Per-row output buffer pointers */
     size_t           *row_buf_size;    /* Per-row output buffer sizes */
     int               num_threads;     /* Number of WPP worker threads */
@@ -344,6 +425,9 @@ typedef struct tc_decoder {
     tc_frame_buf_t   *cur;             /* Current reconstructed frame */
     tc_ref_entry_t    dpb[TC_REF_FRAMES];
     tc_tans_dec_t     tans;
+    tc_rc_dec_t       rc_dec;         /* Range coder decoder (Phase 3) */
+    tc_rc_ctx_t       rc_ctx[TC_NUM_CONTEXTS_RC]; /* Context model */
+    int               use_entropy_coded; /* 1 = use RC, 0 = use EG */
     tc_bs_reader_t    bs;
     tc_ctu_info_t    *ctu_data;
     int32_t           num_ctu_cols;

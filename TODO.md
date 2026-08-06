@@ -99,15 +99,16 @@
 
 ## 🔵 PHASE 3: Entropy Coding Overhaul
 
-- [ ] Implement range coder baseline (replace Exp-Golomb)
-- [ ] Add context modeling for:
-  - [ ] Block mode (intra vs inter, intra mode index)
-  - [ ] Significance maps (which positions are non-zero)
-  - [ ] Last-nonzero position (context by frequency band)
-  - [ ] Coefficient level classes (0, 1, 2-4, 5+)
-  - [ ] Motion vector components (separate x/y, spatial prediction)
-  - [ ] Skip/merge flags
-  - [ ] DCT size flag
+- [x] Implement range coder baseline (opt-in via TC_TOOL_ENTROPY_CODED; Exp-Golomb kept as legacy path, parity-tested) — ✅ 43/43 tests, bit-exact enc recon == dec output
+- [x] Context modeling — core set implemented:
+  - [x] Block mode (intra vs inter, intra mode index)
+  - [x] Significance maps (which positions are non-zero, band-scaled context)
+  - [x] Last-nonzero position (context by frequency band)
+  - [x] Coefficient level classes (0, 1, 2, 3+ via GT1/GT2 + EG remainder)
+  - [x] Motion vector components (MVD magnitude via signed EG, context-modeled)
+  - [x] Skip/merge flags
+  - [x] DCT size flag
+  - [ ] Separate MV x/y contexts; separate DC/low/high-frequency models; measured BD-rate vs Exp-Golomb
 - [ ] Evaluate rANS/tANS for throughput vs range coder
 - [ ] Separate DC/low/high-frequency probability models
 - [ ] Adaptive MV residual coding (spatial neighbor context)

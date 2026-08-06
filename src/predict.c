@@ -49,7 +49,9 @@ void tc_intra_get_ref(const tc_pixel_t *recon, int stride,
                 ref_above[i] = above_row[frame_w - 1];
             }
         }
-        /* Top-left */
+        /* Fill the last interpolation slot (angular modes clip idx+1 up to
+         * 2*blk_size). Repeat the last sample so no uninitialized reads. */
+        ref_above[2 * blk_size] = ref_above[2 * blk_size - 1];
         if (have_left) {
             ref_above[-1] = above_row[x - 1];
         } else {
@@ -59,6 +61,7 @@ void tc_intra_get_ref(const tc_pixel_t *recon, int stride,
         for (int i = 0; i < 2 * blk_size; i++) {
             ref_above[i] = default_val;
         }
+        ref_above[2 * blk_size] = default_val;
         ref_above[-1] = default_val;
     }
 
@@ -72,6 +75,9 @@ void tc_intra_get_ref(const tc_pixel_t *recon, int stride,
                 ref_left[i] = recon[(frame_h - 1) * stride + (x - 1)];
             }
         }
+        /* Fill the last interpolation slot (angular modes read idx+1 up to
+         * 2*blk_size). Repeat the last sample value. */
+        ref_left[2 * blk_size] = ref_left[2 * blk_size - 1];
         /* Above-left is shared with ref_above[-1] */
         if (have_above) {
             ref_left[-1] = recon[(y - 1) * stride + (x - 1)];
@@ -82,6 +88,7 @@ void tc_intra_get_ref(const tc_pixel_t *recon, int stride,
         for (int i = 0; i < 2 * blk_size; i++) {
             ref_left[i] = default_val;
         }
+        ref_left[2 * blk_size] = default_val;
         ref_left[-1] = default_val;
     }
 
@@ -91,6 +98,8 @@ void tc_intra_get_ref(const tc_pixel_t *recon, int stride,
             ref_above[i] = default_val;
             ref_left[i]  = default_val;
         }
+        ref_above[2 * blk_size] = default_val;
+        ref_left[2 * blk_size]  = default_val;
         ref_above[-1] = default_val;
         ref_left[-1]  = default_val;
     }
