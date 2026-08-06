@@ -307,8 +307,8 @@ static void decode_block(tc_decoder_t *dec, int ctu_idx, int blk_idx,
                 }
             }
 
-            int32_t mvd_x = dec_read_se(bs, rc, rc_ctx, RC_CTX_MVD_MAG);
-            int32_t mvd_y = dec_read_se(bs, rc, rc_ctx, RC_CTX_MVD_MAG);
+            int32_t mvd_x = dec_read_se(bs, rc, rc_ctx, RC_CTX_MVD_X);
+            int32_t mvd_y = dec_read_se(bs, rc, rc_ctx, RC_CTX_MVD_Y);
             mv = (tc_mv_s){ mvd_x + predictor_mv.x, mvd_y + predictor_mv.y };
             selected_ref = dec->dpb[ref_idx].frame;
         }

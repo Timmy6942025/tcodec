@@ -252,15 +252,15 @@ void tc_rc_dec_coeffs(tc_rc_dec_t *rc, tc_rc_ctx_t *ctx,
 #define RC_CTX_DCT_SIZE    11
 #define RC_CTX_REF_IDX     13
 #define RC_CTX_MVD_SIGN    15
-#define RC_CTX_MVD_MAG     17
-#define RC_CTX_CSBF        21
-#define RC_CTX_SIG         25
-#define RC_CTX_LAST        33
-#define RC_CTX_GT1         37
-#define RC_CTX_GT2         43
-#define RC_CTX_SIGN        45
-#define RC_CTX_LEVEL       46
-#define RC_CTX_MAX         52
+#define RC_CTX_MVD_X       17   /* separate x/y MVD magnitude contexts (D2) */
+#define RC_CTX_MVD_Y       19
+#define RC_CTX_SIG         21
+#define RC_CTX_LAST        29
+#define RC_CTX_GT1         33
+#define RC_CTX_GT2         39
+#define RC_CTX_SIGN        41
+#define RC_CTX_LEVEL       42
+#define RC_CTX_MAX         48
 
 /* Frequency band classification for a zigzag position.
  * Reserved for future JND-weighted quantization per coefficient.

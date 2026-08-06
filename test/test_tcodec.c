@@ -1197,6 +1197,78 @@ static void test_decoder_mismatch(void)
     PASS();
 }
 
+/* ── Test: WPP vs sequential pixel parity ──────────────────────
+ * WPP (multi-threaded rows) is framed differently at the container
+ * level (it carries an entry-point table so rows can be located for
+ * parallel decode), but the coding decisions and therefore the
+ * DECODED PIXELS must be byte-identical to a sequential encode
+ * (D1: "WPP byte-identical to sequential" is asserted on output). */
+static void test_wpp_sequential_parity(void)
+{
+    TEST(wpp_sequential_pixel_parity);
+    int w = 352, h = 288;  /* Multi-row clip */
+    tc_config_t cfg1, cfg4;
+    tc_config_defaults(&cfg1, w, h);
+    tc_config_defaults(&cfg4, w, h);
+    cfg1.qp = 30; cfg4.qp = 30;
+    cfg1.keyframe_interval = 20; cfg4.keyframe_interval = 20;
+    cfg1.threads = 1; cfg4.threads = 4;
+
+    tc_encoder_t *enc1 = tc_encoder_create(&cfg1);
+    tc_encoder_t *enc4 = tc_encoder_create(&cfg4);
+    ASSERT_NE(enc1, NULL, "enc1 NULL");
+    ASSERT_NE(enc4, NULL, "enc4 NULL");
+
+    tc_pixel_t *y  = (tc_pixel_t *)calloc((size_t)(w * h), 1);
+    tc_pixel_t *cb = (tc_pixel_t *)calloc((size_t)(w/2 * h/2), 1);
+    tc_pixel_t *cr = (tc_pixel_t *)calloc((size_t)(w/2 * h/2), 1);
+
+    int n_frames = 6;
+    int mismatch_count = 0;
+    long long bytes1 = 0, bytes4 = 0;
+
+    for (int f = 0; f < n_frames; f++) {
+        gen_noise(y, w, h, w, (unsigned)(f * 77 + 3));
+        memset(cb, 128, (size_t)(w/2 * h/2));
+        memset(cr, 128, (size_t)(w/2 * h/2));
+
+        tc_packet_t pkt1, pkt4;
+        tc_error_t err = tc_encoder_encode(enc1, y, w, cb, w/2, cr, w/2, &pkt1);
+        ASSERT_EQ(err, TC_OK, "encode t1 failed");
+        err = tc_encoder_encode(enc4, y, w, cb, w/2, cr, w/2, &pkt4);
+        ASSERT_EQ(err, TC_OK, "encode t4 failed");
+        bytes1 += pkt1.size; bytes4 += pkt4.size;
+
+        tc_decoder_t *d1 = tc_decoder_create(0, 0);
+        tc_decoder_t *d4 = tc_decoder_create(0, 0);
+        const tc_pixel_t *y1, *cb1, *cr1, *y4, *cb4, *cr4;
+        int s1y, s1c, s4y, s4c;
+        err = tc_decoder_decode(d1, pkt1.data, pkt1.size, &y1, &s1y, &cb1, &s1c, &cr1, &s1c);
+        ASSERT_EQ(err, TC_OK, "decode 1 failed");
+        err = tc_decoder_decode(d4, pkt4.data, pkt4.size, &y4, &s4y, &cb4, &s4c, &cr4, &s4c);
+        ASSERT_EQ(err, TC_OK, "decode 4 failed");
+
+        for (int row = 0; row < h; row++)
+            for (int col = 0; col < w; col++)
+                if (y1[row * s1y + col] != y4[row * s4y + col]) mismatch_count++;
+        for (int row = 0; row < h/2; row++)
+            for (int col = 0; col < w/2; col++)
+                if (cb1[row * s1c + col] != cb4[row * s4c + col]) mismatch_count++;
+
+        tc_decoder_destroy(d1);
+        tc_decoder_destroy(d4);
+    }
+
+    printf(" [%d pixel diffs, t1=%lldB t4=%lldB]", mismatch_count,
+           (long long)bytes1, (long long)bytes4);
+    ASSERT_EQ(mismatch_count, 0, "WPP(4 threads) and sequential(1) decode differ");
+
+    tc_encoder_destroy(enc1);
+    tc_encoder_destroy(enc4);
+    free(y); free(cb); free(cr);
+    PASS();
+}
+
 /* ── Test: Boundary conditions (1st/last row/col blocks) ── */
 
 static void test_boundary_conditions(void)
@@ -2587,6 +2659,7 @@ int main(void)
     test_long_run();
     test_all_intra();
     test_decoder_mismatch();
+    test_wpp_sequential_parity();
     test_boundary_conditions();
     test_rate_control_cbr();
     test_rate_control_vbr();

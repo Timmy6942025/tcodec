@@ -512,8 +512,8 @@ static void encode_block(tc_encoder_t *enc, tc_ctu_info_t *ctu,
          * matching the decoder's predictor_mv derivation exactly. */
         int32_t mvd_x = blk->mv.x - merge_mv.x;
         int32_t mvd_y = blk->mv.y - merge_mv.y;
-        enc_write_se(bs, rc, rc_ctx, RC_CTX_MVD_MAG, mvd_x);
-        enc_write_se(bs, rc, rc_ctx, RC_CTX_MVD_MAG, mvd_y);
+        enc_write_se(bs, rc, rc_ctx, RC_CTX_MVD_X, mvd_x);
+        enc_write_se(bs, rc, rc_ctx, RC_CTX_MVD_Y, mvd_y);
     }
 
     /* ── Reconstruct + encode coefficients ──────────────────── */
