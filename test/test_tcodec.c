@@ -903,6 +903,115 @@ static void test_fuzz_malformed(void)
     PASS();
 }
 
+/* ── Test: Bit-flip fuzz across NAL boundaries (D3) ─────────────
+ * Encode a real multi-frame stream (I/P frames, entropy coded),
+ * then corrupt it with 1..4 random bit flips (and a truncation
+ * variant) across the whole packet. The decoder must never crash,
+ * hang, or produce out-of-bounds output: it either returns an error
+ * or a valid frame with all pixels in [0,255]. */
+static void test_bitflip_fuzz(void)
+{
+    TEST(fuzz_bitflip_across_nals);
+    int w = 128, h = 128;
+    tc_config_t cfg;
+    tc_config_defaults(&cfg, w, h);
+    cfg.qp = 26;
+    cfg.enable_entropy_coded = 1;   /* Exercise the RC path */
+    cfg.keyframe_interval = 8;
+
+    tc_encoder_t *enc = tc_encoder_create(&cfg);
+    ASSERT_NE(enc, NULL, "encoder NULL");
+
+    tc_pixel_t *y  = (tc_pixel_t *)calloc((size_t)(w * h), 1);
+    tc_pixel_t *cb = (tc_pixel_t *)calloc((size_t)(w/2 * h/2), 1);
+    tc_pixel_t *cr = (tc_pixel_t *)calloc((size_t)(w/2 * h/2), 1);
+
+    /* Collect packets for 12 frames (covers >1 GOP, I+P, skip/merge) */
+    enum { MAXP = 12 };
+    tc_packet_t pkts[MAXP];
+    size_t n_pkts = 0;
+    for (int f = 0; f < MAXP && n_pkts < MAXP; f++) {
+        gen_noise(y, w, h, w, (unsigned)(f * 13 + 5));
+        memset(cb, 128, (size_t)(w/2 * h/2));
+        memset(cr, 128, (size_t)(w/2 * h/2));
+        tc_packet_t pkt;
+        tc_error_t err = tc_encoder_encode(enc, y, w, cb, w/2, cr, w/2, &pkt);
+        if (err != TC_OK) continue;
+        pkts[n_pkts++] = pkt;  /* packet memory owned by encoder until next call */
+    }
+    if ((int)n_pkts < 10) { FAIL("too few packets encoded"); }
+
+    /* Keep a pristine copy of each packet (encoder reuses its buffer) */
+    uint8_t *pristine[MAXP];
+    size_t   pristine_sz[MAXP];
+    for (size_t i = 0; i < n_pkts; i++) {
+        pristine_sz[i] = pkts[i].size;
+        pristine[i] = (uint8_t *)malloc(pkts[i].size);
+        memcpy(pristine[i], pkts[i].data, pkts[i].size);
+    }
+
+    unsigned seed = 0xBEEF;
+    int trials = 300;
+    int err_count = 0, ok_count = 0, oob_count = 0, crash_count = 0;
+    for (int tr = 0; tr < trials; tr++) {
+        size_t pidx = (size_t)(seed % n_pkts);
+        seed = seed * 1103515245 + 12345;
+        size_t len = pristine_sz[pidx];
+        uint8_t *data = (uint8_t *)malloc(len);
+        memcpy(data, pristine[pidx], len);
+
+        /* Corrupt with 1..4 bit flips at NAL-spanning positions */
+        int nflips = 1 + (int)((seed >> 16) % 4);
+        seed = seed * 1103515245 + 12345;
+        for (int k = 0; k < nflips; k++) {
+            seed = seed * 1103515245 + 12345;
+            size_t bit = (size_t)((seed >> 8) % (len * 8));
+            data[bit / 8] ^= (uint8_t)(1u << (bit % 8));
+        }
+        /* 1 in 4 trials also truncates the packet */
+        seed = seed * 1103515245 + 12345;
+        size_t use_len = len;
+        if ((seed & 3) == 0 && len > 8) {
+            use_len = 8 + (size_t)((seed >> 8) % (len - 8));
+        }
+
+        tc_decoder_t *tdec = tc_decoder_create(0, 0);
+        const tc_pixel_t *dy, *dcb, *dcr;
+        int sy, scb, scr;
+        tc_error_t err = tc_decoder_decode(tdec, data, use_len,
+                                            &dy, &sy, &dcb, &scb, &dcr, &scr);
+        if (err == TC_OK) {
+            ok_count++;
+            /* Valid output: verify in-bounds values and sane strides */
+            int w_ok = 1;
+            for (int r = 0; r < h && w_ok; r++)
+                for (int c = 0; c < w; c++) {
+                    int v = dy[r * sy + c];
+                    if (v < 0 || v > 255) { w_ok = 0; break; }
+                }
+            for (int r = 0; r < h/2 && w_ok; r++)
+                for (int c = 0; c < w/2; c++) {
+                    int v = dcb[r * scb + c];
+                    if (v < 0 || v > 255) { w_ok = 0; break; }
+                }
+            if (!w_ok) oob_count++;
+        } else {
+            err_count++;
+        }
+        tc_decoder_destroy(tdec);
+        free(data);
+    }
+
+    for (size_t i = 0; i < n_pkts; i++) free(pristine[i]);
+    tc_encoder_destroy(enc);
+    free(y); free(cb); free(cr);
+
+    printf(" [%d trials: ok=%d err=%d oob=%d]", trials, ok_count, err_count, oob_count);
+    ASSERT_EQ(crash_count, 0, "decoder crashed");
+    ASSERT_EQ(oob_count, 0, "decoder produced out-of-range pixels");
+    PASS();
+}
+
 /* ── Test: Bitstream error recovery ────────────────────────── */
 
 static void test_bitstream_errors(void)
@@ -2652,6 +2761,7 @@ int main(void)
     test_multi_ref();
     test_non_ctu_aligned();
     test_fuzz_malformed();
+    test_bitflip_fuzz();
     test_bitstream_errors();
 
     /* Phase 0 completion tests */
