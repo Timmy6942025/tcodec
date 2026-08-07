@@ -133,18 +133,28 @@ void tc_dequantize(tc_coeff_t *TCODEC_RESTRICT coeffs, int n,
 
 
 /* ════════════════════════════════════════════════════════════════
- * Lagrange multiplier (RDO-lite / D7)
+ * Lagrange multiplier (RDO)
  *
- * Integer-only approximation of the H.264-style lambda curve:
- *   lambda = 0.85 · 2^((qp-12)/3)
- * returned as a Q8 fixed-point value (<< 8). Used by the encoder
- * for mode/transform decisions: cost = SSE + lambda·rate.
- * Decoder never needs this — it is encoder-side only.
+ * Derived from the quantizer step actually used by this codec rather
+ * than from an H.264 QP number (TCodec's QP ladder is ~10 QP steps
+ * coarser than H.264's at the same index, so the classic
+ * 0.85·2^((qp-12)/3) curve under-estimated λ by ~18×, which made every
+ * RD decision far too distortion-biased).
+ *
+ * H.264 relation:  λ_mode = 0.85·2^((QP-12)/3)  and  Qstep = 2^((QP-4)/6)
+ *   ⇒ λ_mode = 0.85·2^(-8/3)·Qstep² ≈ 0.1336·Qstep²
+ *
+ * We evaluate that directly on tc_qscale(qp) (the unweighted step):
+ *   λ = (qscale² · 137) >> 10        (137/1024 = 0.1338)
+ *
+ * Cost model used by the encoder:  cost = SSE + λ·bits   (integer).
+ * Decoder never needs λ — it is encoder-side only and non-normative.
  * ════════════════════════════════════════════════════════════════ */
 int tc_lambda(int qp)
 {
-    int e = (qp - 12) / 3;
-    if (e < 0) e = 0;
-    if (e > 30) e = 30;
-    return (217 << e) >> 8;   /* 0.85 << 8, then 2^e */
+    int64_t s = tc_qscale(qp);
+    int64_t l = (s * s * 137) >> 10;
+    if (l < 1) l = 1;
+    if (l > (int64_t)1 << 30) l = (int64_t)1 << 30;
+    return (int)l;
 }

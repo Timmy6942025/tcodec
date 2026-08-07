@@ -20,17 +20,20 @@ Root causes found and fixed:
    to the OOB-safe per-pixel clamped path; decoder calls it unconditionally
    (it is OOB-safe for any MV). Encoder recon == decoder output bit-exact.
 
-## Verified
-- `make test`: **43/43 PASS**, entropy frame sizes + PSNR improved
-  (avgPSNR 28.7 → 30.7 dB; wpp cross_mismatch 8371 → 0).
+## Historical verification
+- Earlier milestone: the pre-v2 `make test` run reached **43/43 PASS**, with
+  entropy frame sizes + PSNR improved (avgPSNR 28.7 → 30.7 dB; WPP
+  cross_mismatch 8371 → 0). This is retained as milestone history, not the
+  current test count.
 - CLI `tcenc --entropy` twice → byte-identical output (deterministic).
 - valgrind memcheck: 0 errors on entropy-coded encode path.
 
 ## Remaining work (from DONE criteria)
-- D1: extend fuzz to bit-flips across NAL boundaries; 1080p long-run >=300
-  frames; WPP==sequential byte parity (test exists, extend to entropy flag?);
-  ASan/UBSan build blocked on this kernel (ASan runtime init fails) — use
-  valgrind.
+- D1: retain the reproducible `make soak-1080p` 300-frame 1080p check and
+  separately expose the full in-process run as `make test-full`; broader
+  cross-mode and Tier-1 evidence remains distinct from the bounded regression.
+  ASan/UBSan build is blocked on this kernel (ASan runtime init fails) — use
+  valgrind or another host.
 - D2: more context models per TODO Phase 3 (last-nz band contexts, level
   classes, MV components separate x/y, transform size flag already present;
   separate DC/low/high models; adaptive MV residual) — measured BD-rate vs
@@ -41,14 +44,13 @@ Root causes found and fixed:
 - D7: RDO-lite lambda cost mode decision.
 - D8: real corpus (>=10 clips, Xiph) vs x264/x265/SVT-AV1; negative BD-rate.
 - D9: ARM decode >=30fps@1080p, >=60fps@720p (NEON, 4 threads).
-- D10: tcmux MP4 container + streaming segments demo.
+- D10: packet-preserving `tcmux` transport and keyframe-aligned proprietary segments are implemented and tested; native `tcmux mp4mux/mp4demux` now preserves TCV packets in a private `tcv1` ISO-BMFF sample entry, while `tools/tcmux_mp4.sh` provides the separately tested playable H.264/fMP4 compatibility bridge. Stock-player native TCV playback remains future integration work.
 - D11: docs (SPEC/BITSTREAM/PROFILES/BENCHMARKS/TODO/README) + FINISH_TIER1.md.
 - D12: hygiene, final report.
 
 ## Notes
-- `TCODEC_NEON` deblock is weak-only + 8px boundaries vs scalar 4px — parity
-  gap exists (documented in TODO ACT-5); tests pass on this machine which
-  builds NEON by default.
+- The NEON deblock uses an ARM-specific weak-edge schedule; parity checks cover
+  the supported scalar/NEON configurations and active end-to-end paths.
 - ASan cannot start on this kernel (allocator CHECK failed) — valgrind is the
   sanitizer substitute until CI elsewhere.
 
@@ -78,10 +80,11 @@ Root causes found and fixed:
   mid-stream seeks. WPP decode of B streams is pixel-identical to
   sequential (verified in suite test + CLI).
 
-### Verified
-- `make test`: **47/47 PASS** (new `b_frames_hierarchical` test: 12-frame
-  B stream, display-order assertion via nearest-frame matching, NEED_MORE
-  buffering, tail drain, WPP-vs-sequential pixel parity).
+### Historical milestone verification
+- Earlier milestone: the pre-v2 `make test` run reached **47/47 PASS** after
+  adding `b_frames_hierarchical` (12-frame B stream, display-order assertion,
+  NEED_MORE buffering, tail drain, and WPP-vs-sequential pixel parity). This is
+  retained as milestone history, not the current test count.
 - `tools/parity_check.sh`: scalar/NEON bit-identical (incl. entropy mode).
 - valgrind on B-mode encode+decode (12 frames, WPP 1 vs 4 threads):
   0 errors, no leaks.
@@ -100,3 +103,101 @@ at the same QP — ref_sel signaling + dual-reference search — but return
 infrastructure (reorder, signaling, bi-prediction, WPP parity, tail drain)
 is complete; further gains are an entropy/mode-decision refinement task
 (D2-style contexts for ref_sel, direct-mode skip) rather than architecture.
+
+## Current validation checkpoint — August 2026
+
+### Implemented in this checkpoint
+
+- v2 luma SAO Band Offset is now normative and signaled per CTU when
+  `TC_TOOL_SAO` is present. The bounded syntax is `present:1`, `band:5`,
+  `offset_code:4`, with codes 0..14 mapping to offsets -7..+7; code 15 is
+  reserved. v0/v1 syntax is unchanged.
+- Scalar and ARM NEON SAO application kernels are present and included in
+  scalar/NEON parity testing. The implemented subset is BO only; EO, chroma
+  SAO, and restoration remain future work.
+- Permanent v2 SAO tests cover header tool signaling, raw and range-coded
+  round trips, non-CTU-aligned 96x80 input, and encoder/decoder reconstruction
+  parity.
+
+### Verified commands
+
+- Current checkpoint: the ARM64/NEON release build, bounded fast regression,
+  and standalone 1080p soak smoke pass. The full release unit binary remains
+  available as `make test-full`; the default `make test` intentionally avoids
+  duplicating the expensive 300-frame run and reports its one explicit skip.
+- `./tools/test_tcmux.sh`: passed.
+- `./tools/parity_check.sh`: scalar/NEON parity passed, including end-to-end
+  bitstream checks.
+- `make debug`: built successfully. `ASAN_OPTIONS=detect_leaks=0
+  UBSAN_OPTIONS=halt_on_error=1 ./build/test_tcodec` could not start: the
+  host ASan runtime aborts in `sanitizer_allocator_primary64.h:131` during
+  allocator initialization. This is an environment/runtime blocker, not a
+  passing sanitizer result.
+- `python3 -m py_compile tools/rd_bench.py`: passed; `rd_bench.py` now creates
+  the parent directory for `--out` automatically.
+- `tools/soak_1080p.sh` was added and previously smoke-tested at 1920×1080 with
+  exact source/decoded byte-count validation; the default is 300 frames. After
+  current staging changes it requires rerun. This is a correctness runner, not
+  evidence that D9 real-time throughput is met.
+- `git diff --check`: passed after removing generated Python caches.
+- A 10-frame 320x240 v2 profile run decoded all 10 frames with exact output
+  size 1,152,000 bytes. Profile totals were parse 2.20 ms, coefficients
+  14.98 ms, transforms 35.97 ms, motion 0.09 ms, chroma 16.97 ms, and
+  deblock 4.21 ms for the run (timing totals, not a Tier-1 target result).
+- A bounded 10-frame `bbb_nature` v2 QP32 benchmark produced finite metrics:
+  174,332 bytes, 3,347.2 kbps, PSNR-Y 27.606 dB, SSIM 0.66189, 12.91
+  decode fps. This is a smoke result, not a complete BD-rate curve.
+
+### Tier-1 status remains incomplete
+
+- D8: the required 10+ clip, multi-QP, baseline comparison does not show a
+  negative BD-rate win; the bounded real-content result remains behind mature
+  codecs and no win is claimed.
+- D9: measured v2 decoding remains below 60 fps at 720p and 30 fps at 1080p;
+  the actual profile data above is not ARM real-time evidence.
+- D10: `TCMX`/`TCMF` remains a tested proprietary transport; native
+  `tcmux mp4mux/mp4demux` also preserves TCV packets in a private `tcv1`
+  ISO-BMFF sample entry, while `tools/tcmux_mp4.sh` provides the separately
+  tested FFmpeg/ffplay-playable H.264/fMP4 compatibility bridge. Native `tcv1`
+  is intentionally not stock-player decodable.
+- D11: the core docs distinguish native private carriage from the playable
+  compatibility bridge and now document the bounded/full test targets. D12:
+  hygiene checks pass, but the implementation set is still uncommitted and the
+  final clean-status/organized-commit exit gate remains open.
+
+## Decoder optimization checkpoint — August 2026
+
+- Added stride-aware zero-residual copies for v2 luma/chroma reconstruction,
+  removing unnecessary inverse transforms and add/clip loops.
+- Added shared fixed-point DC-only inverse-DCT helpers and decoder fast paths;
+  permanent transform tests compare the shortcut against the full 4x4/8x8
+  inverse transforms for DC values -2000..2000, including negative rounding.
+- Added v2 odd-dimension rejection before quadtree allocation/reconstruction;
+  this protects the 4:2:0 row-copy invariants. The encoder CLI still accepts
+  such input, but the resulting stream is correctly rejected by the v2
+  decoder rather than being silently misinterpreted.
+- Profile buckets now include the new residual-copy operations.
+
+### Measured decoder profile
+
+Host: aarch64 Raspberry Pi-class Cortex-A72, 4 cores, NEON build, QP 32,
+thread count 1, generated fixed-point gradient/chroma input.
+
+| Resolution | Frames | Decode FPS | Output bytes | Result |
+|---|---:|---:|---:|---|
+| 1280x720 | 10 | 9.1 | 13,824,000 | exact frame-size validation |
+| 1920x1080 | 5 | 4.1 | 15,552,000 | exact frame-size validation |
+
+The results are reproducible profile measurements, but remain below the Tier-1
+60 fps@720p and 30 fps@1080p targets. The dominant reported bucket remains
+inverse transforms; no real-time claim is made.
+
+### Current D8 smoke evidence
+
+The actual corpus names `bbb_nature`, `sintel_action`, and `parkrun` produced
+9 finite tcodecv2 rows (30 frames each, QPs 22/32/42, one thread, preset 1).
+Example rows: bbb_nature QP32 = 3,398.8 kbps / 27.7300 dB PSNR-Y / 0.67982
+SSIM; sintel_action QP32 = 2,367.0 kbps / 32.4797 dB / 0.85349 SSIM;
+parkrun QP32 = 22,699.1 kbps / 23.9660 dB / 0.74997 SSIM. All metrics were
+finite and all rows decoded 30 frames. This is still not the required
+multi-codec BD-rate proof; no competitive win is claimed.

@@ -227,3 +227,84 @@ void tc_deblock_ctu(tc_pixel_t *y,  int stride_y,
     }
 }
 #endif /* TCODEC_NEON — scalar deblock fallback */
+
+/* ── v2 SAO: deterministic luma band-offset mode ───────────────
+ * The encoder chooses parameters from original vs. post-deblock
+ * reconstruction; the decoder applies the signaled parameters only.
+ * Chroma remains intentionally unchanged in this first normative mode. */
+
+static int sao_band_of(int sample)
+{
+    return tc_clip(sample, 0, 255) >> 3;
+}
+
+#if !TCODEC_NEON
+void tc_sao_ctu_luma(tc_pixel_t *y, int stride_y,
+                     int x, int y0, int width, int height,
+                     int band, int offset)
+{
+    int x1 = tc_min(x + TC_CTU_SIZE, width);
+    int y1 = tc_min(y0 + TC_CTU_SIZE, height);
+    band = tc_clip(band, 0, 31);
+    offset = tc_clip(offset, -7, 7);
+    for (int row = y0; row < y1; ++row) {
+        for (int col = x; col < x1; ++col) {
+            tc_pixel_t *p = &y[row * stride_y + col];
+            if (sao_band_of(*p) == band)
+                *p = (tc_pixel_t)tc_clip((int)*p + offset, 0, 255);
+        }
+    }
+}
+#endif /* !TCODEC_NEON: scalar SAO application */
+
+int tc_sao_choose_bo(const tc_pixel_t *orig, int orig_stride,
+                     const tc_pixel_t *recon, int recon_stride,
+                     int x, int y, int width, int height,
+                     int *band, int *offset)
+{
+    int64_t base_sse = 0;
+    int64_t best_sse = 0;
+    int best_band = 0, best_offset = 0;
+    int x1 = tc_min(x + TC_CTU_SIZE, width);
+    int y1 = tc_min(y + TC_CTU_SIZE, height);
+    int64_t sum[32] = {0};
+    int64_t count[32] = {0};
+
+    for (int row = y; row < y1; ++row) {
+        for (int col = x; col < x1; ++col) {
+            int o = orig[row * orig_stride + col];
+            int r = recon[row * recon_stride + col];
+            int d = o - r;
+            base_sse += (int64_t)d * d;
+            int b = sao_band_of(r);
+            sum[b] += d;
+            count[b]++;
+        }
+    }
+    best_sse = base_sse;
+    for (int b = 0; b < 32; ++b) {
+        if (!count[b]) continue;
+        int candidate = (int)((sum[b] + (sum[b] >= 0 ? count[b] / 2 : -count[b] / 2)) / count[b]);
+        candidate = tc_clip(candidate, -7, 7);
+        if (!candidate) continue;
+        int64_t sse = 0;
+        for (int row = y; row < y1; ++row) {
+            for (int col = x; col < x1; ++col) {
+                int o = orig[row * orig_stride + col];
+                int r = recon[row * recon_stride + col];
+                if (sao_band_of(r) == b) r = tc_clip(r + candidate, 0, 255);
+                int d = o - r;
+                sse += (int64_t)d * d;
+            }
+        }
+        if (sse < best_sse) {
+            best_sse = sse;
+            best_band = b;
+            best_offset = candidate;
+        }
+    }
+    if (best_sse >= base_sse) return 0;
+    *band = best_band;
+    *offset = best_offset;
+    return 1;
+}

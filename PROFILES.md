@@ -1,8 +1,8 @@
-# TCodec Profiles and Levels — Version 0 and Version 1
+# TCodec Profiles and Levels — Versions 0, 1, and 2
 
-**Status**: v1 profiles and levels implemented and enforced.  
-**Bitstream Versions**: 0 (no profile/level), 1 (profiles + levels + tool flags)  
-**Last Updated**: Phase 2 complete — v1 bitstream with profiles, levels, tool flags, RAP, CRC.
+**Status**: v1 profiles/levels and the explicit v2 quadtree payload are implemented and enforced where applicable.
+**Bitstream Versions**: 0 (no profile/level), 1 (profiles + levels + tool flags), 2 (explicit quadtree payload)
+**Last Updated**: v2 quadtree payload and luma SAO Band Offset are implemented; EO/restoration remain reserved.
 
 ---
 
@@ -13,10 +13,11 @@ Profiles define **which coding tools a decoder must support**. Levels define
 announce its capabilities and for encoders to produce bitstreams that will
 decode successfully on a given class of device.
 
-**Current state (v1)**: Profiles and levels are defined, signaled in the v1
+**Current state**: Profiles and levels are defined, signaled in the v1/v2
 frame header, and validated by the decoder. The encoder populates profile/level
 and tool flags based on the configured profile and actual tool usage. v0
-bitstreams have no profile/level fields and default to baseline-mobile.
+bitstreams have no profile/level fields and default to baseline-mobile. v2
+adds the explicit quadtree payload while retaining the v1 header layout.
 
 This document serves as:
 1. A record of the **current tool inventory** and its activation status
@@ -34,7 +35,7 @@ This document serves as:
 | 18-mode intra prediction | `predict.c` | Planar, DC, 7 vertical angular, 9 horizontal angular |
 | WHT 4×4 / 8×8 transform | `transform.c` / `transform_neon.c` | Self-inverse, NEON dispatched |
 | Variance-based transform size | `encoder.c` | Threshold = 512 |
-| tANS coefficient coding | `entropy.c` | Replaces Exp-Golomb in pipeline |
+| Entropy coding | `entropy.c` / `range_coder.c` | Legacy Exp-Golomb/tANS-reserved path and context-modeled range-coded path selected by tool flag |
 | Hierarchical hex motion search | `motion.c` | ±16/32/64 range by preset |
 | 6-tap luma interpolation | `motion.c` | H.264-style half-pel + bilinear quarter-pel |
 | Multi-reference inter prediction | `encoder.c` | 4 DPB slots; SLOW preset searches all |
@@ -52,23 +53,23 @@ This document serves as:
 
 | Tool | Code Location | Status | Reason |
 |------|--------------|--------|--------|
-| DCT-II 4×4 / 8×8 (pixel-mode) | `transform.c` / `transform_neon.c` | **Unused** | Requires position-dependent scaling that dequantizer doesn't provide |
-| Thread pool / WPP | `threadpool.c` | **Not dispatched** | Allocated but encode/decode loops are sequential `for` |
-| NEON inter predict | `motion_neon.c` | **Not wired** | Uses bilinear, not 6-tap; would reduce quality |
+| Pixel-mode DCT helpers | `transform.c` / `transform_neon.c` | **Reserved** | v2 uses the residual DCT-II path; pixel-mode syntax is not signaled |
+| Thread pool / WPP | `threadpool.c`, `encoder.c`, `decoder.c` | **Active for legacy v1** | Range-coded/v2 payloads are sequential; legacy WPP has entry points and parity coverage |
+| NEON inter predict | `motion_neon.c` | **Quality-gated** | Scalar six-tap path remains authoritative where the NEON kernel would diverge |
 
 ### 2.3 Coding Tools Not Implemented
 
 | Tool | Master Plan Phase | Priority |
 |------|------------------|----------|
-| Context modeling for entropy coding | Phase 3 | Critical |
-| Deringing / SAO / CDEF | Phase 7 | Medium |
+| Deeper context specialization for entropy coding | Phase 3 | Critical research gap |
+| Deringing / CDEF | Phase 7 | Medium |
 | Loop restoration | Phase 7 | Low |
 | Film grain synthesis | Phase 7 | Medium (film content) |
 | Real lookahead | Phase 8 | High |
 | VBV-validated rate control | Phase 8 | Medium |
-| Bi-prediction / B-frames | Phase 6 | Low (ARM cost) |
+| Bi-prediction / B-frames | Phase 6 | Implemented in the v1 extension path; broad RD benefit remains unestablished |
 | Affine / global motion | Phase 6+ | Low |
-| Quadtree + binary partition | Phase 5 | Medium |
+| QTBT/binary partition extension | Phase 5 | Medium; v2 quadtree 64/32/16/8 is implemented |
 | Extended chroma intra modes (DM, planar, angular) | Phase 5 | Medium |
 | Content-adaptive transform selection | Phase 4 | Medium |
 | Scaling matrices / freq-dependent quant | Phase 4 | Medium |
@@ -108,9 +109,9 @@ per-block decision logic or memory.
 | JND band weighting | ✅ |
 | Median MV predictor | ✅ |
 | Multi-reference | ❌ |
-| Bi-prediction | ❌ |
+| Bi-prediction | ❌ (profile-gated; archive-high/v1 extension path only) |
 | 8-tap interpolation | ❌ |
-| Deringing / SAO | ❌ |
+| v2 luma SAO Band Offset | ✅ (v2 only; EO/restoration planned) |
 | Loop restoration | ❌ |
 | Film grain synthesis | ❌ |
 | Affine motion | ❌ |
@@ -133,17 +134,17 @@ quality at modest decode cost.
 | Tool | Supported |
 |------|-----------|
 | All baseline-mobile tools | ✅ |
-| Context-adaptive entropy coding | ✅ (PLANNED — Phase 3) |
+| Context-adaptive entropy coding | ✅ (range-coded baseline; deeper specialization planned) |
 | CfL chroma prediction | ✅ |
 | Multiple reference frames (2–4) | ✅ |
 | 6-tap interpolation | ✅ |
 | Skip / merge modes | ✅ |
 | Deringing filter | ❌ (PLANNED — Phase 7) |
-| SAO | ❌ (PLANNED — Phase 7) |
+| v2 SAO Band Offset | ✅ (v2 only; EO/restoration planned) |
 | Rate control: CBR + capped VBR | ✅ |
 | Scene cut detection | ✅ |
 | Film grain synthesis | ❌ (PLANNED — Phase 7) |
-| Bi-prediction | ❌ |
+| Bi-prediction | ❌ (profile-gated; archive-high/v1 extension path only) |
 | Loop restoration | ❌ |
 | Affine motion | ❌ |
 
@@ -162,7 +163,7 @@ Used on workstations and servers.
 | Tool | Supported |
 |------|-----------|
 | All streaming-main tools | ✅ |
-| Bi-prediction (B-frames) | ❌ (PLANNED — Phase 6) |
+| Bi-prediction (B-frames) | ✅ baseline infrastructure; broad gain not established |
 | 8-tap interpolation | ❌ (PLANNED — Phase 6) |
 | Loop restoration | ❌ (PLANNED — Phase 7) |
 | Affine motion | ❌ (PLANNED — Phase 6+) |
@@ -340,17 +341,17 @@ Bit   Field                  Profile Required       Constant
 1     cfl_chroma              baseline-mobile+       TC_TOOL_CFL_CHROMA
 2     jnd_weighting           baseline-mobile+       TC_TOOL_JND_WEIGHTING
 3     median_mv_pred          baseline-mobile+       TC_TOOL_MEDIAN_MV_PRED
-4     six_tap_interp          baseline-mobile+       TC_TOOL_SIX_TAP_INTERP
-5     multi_ref               streaming-main+        TC_TOOL_MULTI_REF
-6     deringing               streaming-main+       (PLANNED Phase 7)
-7     sao                     streaming-main+       (PLANNED Phase 7)
-8     grain_synthesis         grain-cinema          (PLANNED Phase 7)
-9     bipred                  archive-high          (PLANNED Phase 6)
-10    loop_restoration        archive-high          (PLANNED Phase 7)
-11    affine_motion           archive-high          (PLANNED Phase 6+)
-12    extended_partition      archive-high          (PLANNED Phase 5)
-13    entropy_coded           streaming-main+       (PLANNED Phase 3)
-14    real_chroma_intra       streaming-main+       (PLANNED Phase 5)
+4     multi_ref               streaming-main+       TC_TOOL_MULTI_REF
+5     six_tap_interp          streaming-main+       TC_TOOL_SIX_TAP_INTERP
+6     entropy_coded           streaming-main+       TC_TOOL_ENTROPY_CODED
+7     deringing               streaming-main+       (PLANNED Phase 7)
+8     sao                     streaming-main+       TC_TOOL_SAO (v2 luma BO)
+9     grain_synthesis         grain-cinema           (PLANNED Phase 7)
+10    bipred                  archive-high          TC_TOOL_BIPRED
+11    loop_restoration        archive-high          (PLANNED Phase 7)
+12    affine_motion           archive-high          (PLANNED Phase 6+)
+13    extended_partition      archive-high          (PLANNED Phase 5)
+14    context_reset           —                     TC_TOOL_CONTEXT_RESET
 15    reserved                —                      Must be 0
 ```
 
@@ -375,11 +376,11 @@ Bit   Field     Description
 
 When new tools or profiles are introduced:
 
-1. **Bitstream version increments** — v0 decoders reject v1 bitstreams (version byte check); v1 decoders accept v0 and v1, reject v2+
+1. **Bitstream version increments** — v0 decoders reject v1+; v1-aware decoders accept v0/v1; v2-aware decoders explicitly dispatch v0, v1, or v2 and reject v3+
 2. **New profile values** — decoders that only know profile 0–3 reject unknown profiles
 3. **Tool flags** — decoders only parse tools their profile supports; unknown flag bits are ignored
 4. **Optional syntax sections** — guarded by flag bits; decoders that don't support a tool skip its syntax section entirely
-5. **v0 → v1 migration** — v0 frames (12-byte header, reserved=0) decode correctly on v1 decoders; v1 defaults (profile=baseline-mobile, level=auto) are backward-compatible
+5. **v0 → v1 → v2 migration** — v0 frames (12-byte header) decode correctly on v1/v2-aware decoders; v1 frames retain their 14-byte syntax; v2 requires the explicit v2 decoder path and is never silently treated as v1
 
 This ensures that:
 - A baseline-mobile decoder never needs to understand archive-high syntax

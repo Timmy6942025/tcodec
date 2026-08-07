@@ -552,3 +552,49 @@ void tc_inter_predict(const tc_pixel_t *ref, int ref_stride,
         }
     }
 }
+
+/* ── Chroma inter prediction (bitstream v2) ────────────────────
+ *
+ * 4:2:0 chroma MC at 1/8-pel precision.  The luma MV is an absolute
+ * quarter-luma-pel position; the chroma sample grid is half the luma
+ * resolution, so the same integer is an absolute 1/8-chroma-pel
+ * position:  int = mv >> 3, frac = mv & 7.
+ *
+ * Bilinear, integer-only, edge-clamped:
+ *   p = ((8-fx)(8-fy)A + fx(8-fy)B + (8-fx)fy·C + fx·fy·D + 32) >> 6
+ * ══════════════════════════════════════════════════════════════ */
+
+void tc_inter_predict_chroma(const tc_pixel_t *ref, int ref_stride,
+                             int ref_w, int ref_h,
+                             tc_mv_s mv,
+                             tc_pixel_t *TCODEC_RESTRICT dst, int dst_stride,
+                             int blk_size)
+{
+    int xi = mv.x >> 3, yi = mv.y >> 3;
+    int fx = mv.x & 7,  fy = mv.y & 7;
+
+    if (fx == 0 && fy == 0 &&
+        xi >= 0 && yi >= 0 &&
+        xi + blk_size <= ref_w && yi + blk_size <= ref_h) {
+        for (int r = 0; r < blk_size; r++)
+            memcpy(dst + r * dst_stride, ref + (yi + r) * ref_stride + xi,
+                   (size_t)blk_size);
+        return;
+    }
+
+    for (int r = 0; r < blk_size; r++) {
+        int y0 = tc_clip(yi + r,     0, ref_h - 1);
+        int y1 = tc_clip(yi + r + 1, 0, ref_h - 1);
+        const tc_pixel_t *row0 = ref + y0 * ref_stride;
+        const tc_pixel_t *row1 = ref + y1 * ref_stride;
+        for (int c = 0; c < blk_size; c++) {
+            int x0 = tc_clip(xi + c,     0, ref_w - 1);
+            int x1 = tc_clip(xi + c + 1, 0, ref_w - 1);
+            int A = row0[x0], B = row0[x1];
+            int C = row1[x0], D = row1[x1];
+            int v = ((8 - fx) * (8 - fy) * A + fx * (8 - fy) * B +
+                     (8 - fx) * fy * C + fx * fy * D + 32) >> 6;
+            dst[r * dst_stride + c] = (tc_pixel_t)v;
+        }
+    }
+}

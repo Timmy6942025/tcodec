@@ -97,6 +97,20 @@ void tc_bs_writer_write_ue(tc_bs_writer_t *w, uint32_t val)
     tc_bs_writer_write_bits(w, code, bits);           /* 1 + suffix */
 }
 
+int tc_bs_se_bits(int32_t val)
+{
+    /* Bit cost of the signed Exp-Golomb code written by
+     * tc_bs_writer_write_se(): map to unsigned then UE length. */
+    uint32_t mapped;
+    if (val > 0)       mapped = (uint32_t)(2 * val - 1);
+    else if (val < 0)  mapped = (uint32_t)(-2 * val);
+    else               mapped = 0;
+    uint32_t code = mapped + 1;
+    int bits = 0;
+    while (code > 0) { bits++; code >>= 1; }
+    return 2 * bits - 1;   /* leading_zeros + bits */
+}
+
 void tc_bs_writer_write_se(tc_bs_writer_t *w, int32_t val)
 {
     /* Signed Exp-Golomb: map 0→0, 1→1, -1→2, 2→3, -2→4, ... */
@@ -129,6 +143,7 @@ void tc_bs_reader_init(tc_bs_reader_t *r, const uint8_t *buf, size_t size)
     r->size     = size;
     r->byte_pos = 0;
     r->bit_pos  = 0;
+    r->error    = 0;
 }
 
 uint32_t tc_bs_reader_read_bits(tc_bs_reader_t *r, int nbits)
@@ -137,7 +152,10 @@ uint32_t tc_bs_reader_read_bits(tc_bs_reader_t *r, int nbits)
     uint32_t val = 0;
 
     while (nbits > 0) {
-        if (r->byte_pos >= r->size) return val;
+        if (r->byte_pos >= r->size) {
+            r->error = 1;
+            return val;
+        }
 
         int avail = 8 - r->bit_pos;
         int read  = tc_min(nbits, avail);
@@ -163,12 +181,14 @@ uint32_t tc_bs_reader_read_ue(tc_bs_reader_t *r)
 {
     /* Count leading zeros */
     int leading_zeros = 0;
+    int found_one = 0;
     while (r->byte_pos < r->size) {
         uint32_t bit = tc_bs_reader_read_bits(r, 1);
-        if (bit == 1) break;
+        if (bit == 1) { found_one = 1; break; }
         leading_zeros++;
-        if (leading_zeros > 31) return 0; /* error protection */
+        if (leading_zeros > 31) { r->error = 1; return 0; }
     }
+    if (!found_one) { r->error = 1; return 0; }
 
     /* Read suffix (leading_zeros bits after the 1) */
     uint32_t suffix = 0;

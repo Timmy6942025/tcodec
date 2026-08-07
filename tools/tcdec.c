@@ -12,6 +12,7 @@
  *   --rgb        Output packed RGB24 instead of YCbCr
  *   -n frames    Decode N frames (0=all)
  *   -v           Verbose: print per-frame stats
+ *   --profile   Print decoder component timing totals
  *   --check      Compare with reference YUV and compute PSNR
  */
 
@@ -31,10 +32,18 @@ static void print_usage(const char *prog)
         "  --rgb     Output RGB24\n"
         "  -n N      Decode N frames (0=all)\n"
         "  -v        Verbose\n"
+        "  --profile Print component timing totals\n"
         "  --check   Compute PSNR against reference\n",
         TCODEC_VERSION_STRING, prog);
 }
 
+
+static double tc_wall_seconds(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC_RAW, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec / 1000000000.0;
+}
 
 static void tc_write_yuv(FILE *fout,
                          const tc_pixel_t *y, int stride_y,
@@ -61,7 +70,7 @@ int main(int argc, char **argv)
     const char *input_path = NULL;
     const char *output_path = NULL;
     int width = 0, height = 0;
-    int is_rgb = 0, max_frames = 0, verbose = 0, check_psnr = 0;
+    int is_rgb = 0, max_frames = 0, verbose = 0, profile = 0, check_psnr = 0;
     const char *ref_path = NULL;
 
     for (int i = 1; i < argc; i++) {
@@ -75,6 +84,8 @@ int main(int argc, char **argv)
             max_frames = atoi(argv[++i]);
         } else if (strcmp(argv[i], "-v") == 0) {
             verbose = 1;
+        } else if (strcmp(argv[i], "--profile") == 0) {
+            profile = 1;
         } else if (strcmp(argv[i], "--check") == 0 && i + 1 < argc) {
             check_psnr = 1;
             ref_path = argv[++i];
@@ -99,6 +110,8 @@ int main(int argc, char **argv)
         fprintf(stderr, "Error: failed to create decoder\n");
         return 1;
     }
+    tc_decoder_set_profile(dec, profile);
+    tc_decoder_reset_profile(dec);
 
     /* Open files */
     FILE *fin = fopen(input_path, "rb");
@@ -148,22 +161,36 @@ int main(int argc, char **argv)
 
     /* Decode loop */
     int frame_count = 0;
+    int decode_failed = 0;
     double total_psnr = 0.0;
-    clock_t start = clock();
+    double start = tc_wall_seconds();
 
     while (!feof(fin)) {
         if (max_frames > 0 && frame_count >= max_frames) break;
 
         /* Read packet size */
         uint32_t pkt_size;
-        if (fread(&pkt_size, 4, 1, fin) != 1) break;
-        if (pkt_size == 0 || pkt_size > 100 * 1024 * 1024) break;
+        if (fread(&pkt_size, 4, 1, fin) != 1) {
+            if (ferror(fin)) decode_failed = 1;
+            break;
+        }
+        if (pkt_size == 0 || pkt_size > 100 * 1024 * 1024) {
+            fprintf(stderr, "Error: invalid packet size: %u\n", pkt_size);
+            decode_failed = 1;
+            break;
+        }
 
         /* Read packet data */
         uint8_t *pkt_data = (uint8_t *)malloc(pkt_size);
-        if (!pkt_data) break;
+        if (!pkt_data) {
+            fprintf(stderr, "Error: out of memory for packet\n");
+            decode_failed = 1;
+            break;
+        }
         if (fread(pkt_data, 1, pkt_size, fin) != pkt_size) {
+            fprintf(stderr, "Error: truncated packet\n");
             free(pkt_data);
+            decode_failed = 1;
             break;
         }
 
@@ -186,6 +213,7 @@ int main(int argc, char **argv)
         if (err != TC_OK) {
             fprintf(stderr, "Error: decode failed at frame %d: %s\n",
                     frame_count, tc_error_string(err));
+            decode_failed = 1;
             break;
         }
 
@@ -234,7 +262,14 @@ int main(int argc, char **argv)
         tc_error_t err = tc_decoder_flush_tail(dec, &y, &stride_y,
                                                &cb, &stride_cb,
                                                &cr, &stride_cr);
-        if (err != TC_OK) break;
+        if (err != TC_OK) {
+            if (err != TC_ERR_EOF) {
+                fprintf(stderr, "Error: decoder tail drain failed: %s\n",
+                        tc_error_string(err));
+                decode_failed = 1;
+            }
+            break;
+        }
         tc_write_yuv(fout, y, stride_y, cb, stride_cb, cr, stride_cr,
                      dec_w, dec_h, is_rgb, rgb_buf);
         frame_count++;
@@ -242,14 +277,30 @@ int main(int argc, char **argv)
         if (max_frames > 0 && frame_count >= max_frames) break;
     }
 
-    clock_t end = clock();
-    double elapsed = (double)(end - start) / CLOCKS_PER_SEC;
+    if (frame_count == 0 && !decode_failed) {
+        fprintf(stderr, "Error: no frames decoded\n");
+        decode_failed = 1;
+    }
+
+    double end = tc_wall_seconds();
+    double elapsed = end - start;
     double fps_actual = (elapsed > 0) ? (frame_count / elapsed) : 0;
 
     fprintf(stderr, "\n── Decoding Complete ──\n");
     fprintf(stderr, "  Frames:   %d\n", frame_count);
     fprintf(stderr, "  FPS:      %.1f\n", fps_actual);
     fprintf(stderr, "  Time:     %.2f sec\n", elapsed);
+    if (profile) {
+        uint64_t parse_ns, coeff_ns, transform_ns, motion_ns;
+        uint64_t chroma_ns, deblock_ns, copy_ns;
+        tc_decoder_get_profile(dec, &parse_ns, &coeff_ns, &transform_ns,
+                               &motion_ns, &chroma_ns, &deblock_ns, &copy_ns);
+        fprintf(stderr, "  Profile ns: parse=%llu coeff=%llu transform=%llu motion=%llu chroma=%llu deblock=%llu copy=%llu\n",
+                (unsigned long long)parse_ns, (unsigned long long)coeff_ns,
+                (unsigned long long)transform_ns, (unsigned long long)motion_ns,
+                (unsigned long long)chroma_ns, (unsigned long long)deblock_ns,
+                (unsigned long long)copy_ns);
+    }
     if (check_psnr && frame_count > 0) {
         fprintf(stderr, "  Avg PSNR: %.2f dB\n", total_psnr / frame_count);
     }
@@ -262,5 +313,5 @@ int main(int argc, char **argv)
     free(rgb_buf);
     free(ref_y); free(ref_cb); free(ref_cr);
 
-    return 0;
+    return decode_failed ? 1 : 0;
 }

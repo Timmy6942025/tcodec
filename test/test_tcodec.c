@@ -806,6 +806,173 @@ static void test_multi_ref(void)
     PASS();
 }
 
+/* ── Test: explicit v2 quadtree round-trip ───────────────── */
+
+static void test_v2_roundtrip(void)
+{
+    TEST(v2_quadtree_roundtrip);
+    const int dims[][2] = {{8,8}, {96,80}, {128,128}};
+    for (int ent = 0; ent <= 1; ent++) {
+        for (size_t di = 0; di < sizeof(dims)/sizeof(dims[0]); di++) {
+            int w = dims[di][0], h = dims[di][1];
+            tc_config_t cfg;
+            tc_config_defaults(&cfg, w, h);
+            cfg.qp = 22;
+            cfg.use_v2 = 1;
+            cfg.enable_entropy_coded = ent;
+            cfg.threads = 1;
+            cfg.keyframe_interval = 100;
+
+            tc_encoder_t *enc = tc_encoder_create(&cfg);
+            tc_encoder_t *enc_repeat = tc_encoder_create(&cfg);
+            tc_decoder_t *dec = tc_decoder_create(0, 0);
+            ASSERT_NE(enc, NULL, "v2 encoder NULL");
+            ASSERT_NE(enc_repeat, NULL, "v2 repeat encoder NULL");
+            ASSERT_NE(dec, NULL, "v2 decoder NULL");
+            tc_pixel_t *y = malloc((size_t)w * h);
+            tc_pixel_t *cb = malloc((size_t)(w/2) * (h/2));
+            tc_pixel_t *cr = malloc((size_t)(w/2) * (h/2));
+            ASSERT_NE(y, NULL, "v2 luma allocation failed");
+            ASSERT_NE(cb, NULL, "v2 Cb allocation failed");
+            ASSERT_NE(cr, NULL, "v2 Cr allocation failed");
+
+            for (int f = 0; f < 2; f++) {
+                for (int r = 0; r < h; r++)
+                    for (int c = 0; c < w; c++)
+                        y[r*w+c] = (tc_pixel_t)((r*3 + c*5 + f*17) & 255);
+                for (int i = 0; i < (w/2)*(h/2); i++) {
+                    cb[i] = (tc_pixel_t)(96 + ((i + f*3) & 31));
+                    cr[i] = (tc_pixel_t)(144 + ((i + f*5) & 31));
+                }
+            tc_packet_t pkt;
+            tc_error_t err = tc_encoder_encode(enc, y, w, cb, w/2, cr, w/2, &pkt);
+            ASSERT_EQ(err, TC_OK, "v2 encode failed");
+            if (f == 0) {
+                tc_packet_t pkt_again;
+                err = tc_encoder_encode(enc_repeat, y, w, cb, w/2, cr, w/2, &pkt_again);
+                ASSERT_EQ(err, TC_OK, "v2 repeat encode failed");
+                ASSERT_EQ(pkt.size, pkt_again.size, "v2 packet size is nondeterministic");
+                ASSERT_EQ(memcmp(pkt.data, pkt_again.data, pkt.size), 0,
+                          "v2 packet bytes are nondeterministic");
+            }
+            const tc_pixel_t *dy, *dcb, *dcr;
+            int sy, scb, scr;
+            err = tc_decoder_decode(dec, pkt.data, pkt.size,
+                                     &dy, &sy, &dcb, &scb, &dcr, &scr);
+            ASSERT_EQ(err, TC_OK, "v2 decode failed");
+            for (int r = 0; r < h; r++)
+                for (int c = 0; c < w; c++)
+                    ASSERT_EQ(enc->recon->y[r*enc->recon->stride_y+c],
+                              dy[r*sy+c], "v2 luma reconstruction mismatch");                for (int r = 0; r < h/2; r++)
+                for (int c = 0; c < w/2; c++) {
+                    ASSERT_EQ(enc->recon->cb[r*enc->recon->stride_c+c],
+                              dcb[r*scb+c], "v2 Cb reconstruction mismatch");
+                    ASSERT_EQ(enc->recon->cr[r*enc->recon->stride_c+c],
+                              dcr[r*scr+c], "v2 Cr reconstruction mismatch");
+                }
+                if (f == 1) {
+                    size_t trunc_size = 1; /* truncated header */
+                    uint8_t *trunc = malloc(trunc_size);
+                    ASSERT_NE(trunc, NULL, "v2 truncation allocation failed");
+                    memcpy(trunc, pkt.data, trunc_size);
+                    tc_error_t trunc_err = tc_decoder_decode(dec, trunc, trunc_size,
+                                                             NULL, NULL, NULL, NULL, NULL, NULL);
+                    ASSERT_NE(trunc_err, TC_OK, "truncated v2 packet was accepted");
+                    free(trunc);
+                }
+            }
+            tc_encoder_destroy(enc);
+            tc_encoder_destroy(enc_repeat);
+            tc_decoder_destroy(dec);
+            free(y); free(cb); free(cr);
+        }
+    }
+    PASS();
+}
+
+/* ── Test: v2 fast preset replay parity ───────────────────── */
+
+static void test_v2_fast_presets(void)
+{
+    TEST(v2_fast_medium_replay_parity);
+    const int dims[][2] = {{16,16}, {96,80}, {128,128}};
+    for (int preset = TC_PRESET_ULTRAFAST; preset <= TC_PRESET_MEDIUM; preset++) {
+        for (int ent = 0; ent <= 1; ent++) {
+            for (size_t di = 0; di < sizeof(dims)/sizeof(dims[0]); di++) {
+                int w = dims[di][0], h = dims[di][1];
+                tc_config_t cfg;
+                tc_config_defaults(&cfg, w, h);
+                cfg.qp = 32;
+                cfg.preset = (tc_preset_t)preset;
+                cfg.use_v2 = 1;
+                cfg.enable_entropy_coded = ent;
+                cfg.threads = 1;
+                cfg.keyframe_interval = 100;
+
+                tc_encoder_t *enc = tc_encoder_create(&cfg);
+                tc_encoder_t *repeat = tc_encoder_create(&cfg);
+                tc_decoder_t *dec = tc_decoder_create(0, 0);
+                ASSERT_NE(enc, NULL, "fast v2 encoder NULL");
+                ASSERT_NE(repeat, NULL, "fast v2 repeat encoder NULL");
+                ASSERT_NE(dec, NULL, "fast v2 decoder NULL");
+
+                tc_pixel_t *y = malloc((size_t)w * h);
+                tc_pixel_t *cb = malloc((size_t)(w/2) * (h/2));
+                tc_pixel_t *cr = malloc((size_t)(w/2) * (h/2));
+                ASSERT_NE(y, NULL, "fast v2 luma allocation failed");
+                ASSERT_NE(cb, NULL, "fast v2 Cb allocation failed");
+                ASSERT_NE(cr, NULL, "fast v2 Cr allocation failed");
+
+                for (int f = 0; f < 3; f++) {
+                    for (int r = 0; r < h; r++)
+                        for (int c = 0; c < w; c++)
+                            y[r*w+c] = (tc_pixel_t)((r*7 + c*11 + f*19) & 255);
+                    for (int r = 0; r < h/2; r++)
+                        for (int c = 0; c < w/2; c++) {
+                            cb[r*(w/2)+c] = (tc_pixel_t)(96 + ((r + c + f) & 31));
+                            cr[r*(w/2)+c] = (tc_pixel_t)(144 + ((r*2 + c + f) & 31));
+                        }
+
+                    tc_packet_t pkt;
+                    tc_error_t err = tc_encoder_encode(enc, y, w, cb, w/2, cr, w/2, &pkt);
+                    ASSERT_EQ(err, TC_OK, "fast v2 encode failed");
+                    if (f == 0) {
+                        tc_packet_t pkt_repeat;
+                        err = tc_encoder_encode(repeat, y, w, cb, w/2, cr, w/2, &pkt_repeat);
+                        ASSERT_EQ(err, TC_OK, "fast v2 repeat encode failed");
+                        ASSERT_EQ(pkt.size, pkt_repeat.size, "fast v2 packet size nondeterministic");
+                        ASSERT_EQ(memcmp(pkt.data, pkt_repeat.data, pkt.size), 0,
+                                  "fast v2 packet bytes nondeterministic");
+                    }
+
+                    const tc_pixel_t *dy, *dcb, *dcr;
+                    int sy, scb, scr;
+                    err = tc_decoder_decode(dec, pkt.data, pkt.size,
+                                            &dy, &sy, &dcb, &scb, &dcr, &scr);
+                    ASSERT_EQ(err, TC_OK, "fast v2 decode failed");
+                    for (int r = 0; r < h; r++)
+                        for (int c = 0; c < w; c++)
+                            ASSERT_EQ(enc->recon->y[r*enc->recon->stride_y+c],
+                                      dy[r*sy+c], "fast v2 luma replay mismatch");
+                    for (int r = 0; r < h/2; r++)
+                        for (int c = 0; c < w/2; c++) {
+                            ASSERT_EQ(enc->recon->cb[r*enc->recon->stride_c+c],
+                                      dcb[r*scb+c], "fast v2 Cb replay mismatch");
+                            ASSERT_EQ(enc->recon->cr[r*enc->recon->stride_c+c],
+                                      dcr[r*scr+c], "fast v2 Cr replay mismatch");
+                        }
+                }
+
+                tc_encoder_destroy(enc);
+                tc_encoder_destroy(repeat);
+                tc_decoder_destroy(dec);
+                free(y); free(cb); free(cr);
+            }
+        }
+    }
+    PASS();
+}
+
 /* ── Test: Non-multiple-of-CTU resolution ─────────────────── */
 
 static void test_non_ctu_aligned(void)
@@ -900,6 +1067,7 @@ static void test_fuzz_malformed(void)
     printf(" [ok=%d err=%d of 50]", ok_count, err_count);
     /* Most random data should fail — only accidentally valid magic+version
      * combinations would succeed. We just need to verify no crashes. */
+    tc_decoder_destroy(dec);
     PASS();
 }
 
@@ -1090,13 +1258,218 @@ static void test_bitstream_errors(void)
         ASSERT_EQ(err != TC_OK, 1, "empty packet should fail");
     }
 
+    /* Test 5: v2 rejects odd 4:2:0 geometry at both endpoints. */
+    {
+        tc_config_t invalid_v2;
+        tc_config_defaults(&invalid_v2, 97, 80);
+        invalid_v2.use_v2 = 1;
+        ASSERT_EQ(tc_encoder_create(&invalid_v2), NULL,
+                  "v2 odd dimensions were accepted by encoder");
+
+        tc_config_t v2cfg;
+        tc_config_defaults(&v2cfg, 96, 80);
+        v2cfg.use_v2 = 1;
+        tc_encoder_t *v2enc = tc_encoder_create(&v2cfg);
+        ASSERT_NE(v2enc, NULL, "v2 encoder NULL");
+        tc_pixel_t *v2y = calloc(96u * 80u, 1);
+        tc_pixel_t *v2cb = calloc(48u * 40u, 1);
+        tc_pixel_t *v2cr = calloc(48u * 40u, 1);
+        ASSERT_NE(v2y, NULL, "v2 Y allocation failed");
+        ASSERT_NE(v2cb, NULL, "v2 Cb allocation failed");
+        ASSERT_NE(v2cr, NULL, "v2 Cr allocation failed");
+        tc_packet_t v2pkt;
+        err = tc_encoder_encode(v2enc, v2y, 96, v2cb, 48, v2cr, 48, &v2pkt);
+        ASSERT_EQ(err, TC_OK, "v2 encode for malformed test failed");
+        uint8_t *odd = malloc(v2pkt.size);
+        ASSERT_NE(odd, NULL, "odd-header allocation failed");
+        memcpy(odd, v2pkt.data, v2pkt.size);
+        odd[4] = 0;
+        odd[5] = 97;
+        err = tc_decoder_decode(dec, odd, v2pkt.size,
+                                NULL, NULL, NULL, NULL, NULL, NULL);
+        ASSERT_EQ(err, TC_ERR_BITSTREAM, "v2 odd dimensions were accepted");
+        free(odd);
+        tc_encoder_destroy(v2enc);
+        free(v2y); free(v2cb); free(v2cr);
+    }
+
     tc_encoder_destroy(enc);
     tc_decoder_destroy(dec);
     free(y); free(cb); free(cr);
     PASS();
 }
 
-/* ── Test: Large resolution (1920×1080) ─────────────────── */
+/* ── Test: v2 malformed stream hardening (D3) ───────────────────
+ * Systematic corruption of real v2 packets (raw and range-coded):
+ * every-byte truncation, deterministic bit flips, tool-flag
+ * corruption (forced SAO / WPP), and header version tampering.
+ * The decoder must return a defined error or a full-size valid
+ * frame; it must never crash, hang, or hand out an empty frame. */
+static void test_fuzz_malformed_v2(void)
+{
+    TEST(fuzz_malformed_v2_systematic);
+    const int w = 128, h = 128;
+    const int n_frames = 3;
+    tc_pixel_t *y  = (tc_pixel_t *)calloc((size_t)w * h, 1);
+    tc_pixel_t *cb = (tc_pixel_t *)calloc((size_t)(w/2) * (h/2), 1);
+    tc_pixel_t *cr = (tc_pixel_t *)calloc((size_t)(w/2) * (h/2), 1);
+    ASSERT_NE(y, NULL, "v2 fuzz Y alloc failed");
+    ASSERT_NE(cb, NULL, "v2 fuzz Cb alloc failed");
+    ASSERT_NE(cr, NULL, "v2 fuzz Cr alloc failed");
+
+    enum { MAXP = 8 };
+    size_t n_pkts = 0;
+    uint8_t *pristine[MAXP];
+    size_t   pristine_sz[MAXP];
+
+    /* Encode both entropy paths: raw syntax and context range coder. */
+    for (int entropy = 0; entropy <= 1; entropy++) {
+        tc_config_t cfg;
+        tc_config_defaults(&cfg, w, h);
+        cfg.use_v2 = 1;
+        cfg.enable_entropy_coded = entropy;
+        cfg.qp = 30;
+        cfg.keyframe_interval = 2;
+        tc_encoder_t *enc = tc_encoder_create(&cfg);
+        ASSERT_NE(enc, NULL, "v2 fuzz encoder alloc failed");
+
+        for (int f = 0; f < n_frames; f++) {
+            if (f == 0) {
+                gen_gradient(y, w, h, w);
+            } else {
+                gen_noise(y, w, h, w, (unsigned)(f * 4241 + entropy * 777));
+            }
+            memset(cb, 128, (size_t)(w/2) * (h/2));
+            memset(cr, 128, (size_t)(w/2) * (h/2));
+            tc_packet_t pkt;
+            tc_error_t err = tc_encoder_encode(enc, y, w, cb, w/2, cr, w/2, &pkt);
+            ASSERT_EQ(err, TC_OK, "v2 fuzz encode failed");
+            if (n_pkts < MAXP) {
+                pristine_sz[n_pkts] = pkt.size;
+                pristine[n_pkts] = (uint8_t *)malloc(pkt.size);
+                ASSERT_NE(pristine[n_pkts], NULL, "v2 fuzz copy alloc failed");
+                memcpy(pristine[n_pkts], pkt.data, pkt.size);
+                n_pkts++;
+            }
+        }
+        tc_encoder_destroy(enc);
+    }
+    if (n_pkts < 2) { FAIL("v2 fuzz: too few packets"); return; }
+    int trials = 0;
+
+    /* Helper lambda-style check via macros is impractical; use a
+     * local function pointer-free block via a macro: */
+    #define V2FUZZ_TRY(len, data) do { \
+        tc_decoder_t *td = tc_decoder_create(0, 0); \
+        ASSERT_NE(td, NULL, "v2 fuzz decoder alloc failed"); \
+        const tc_pixel_t *dy, *dcb, *dcr; \
+        int sy, scb, scr; \
+        tc_error_t terr = tc_decoder_decode(td, (data), (len), \
+                                            &dy, &sy, &dcb, &scb, &dcr, &scr); \
+        if (terr == TC_OK) { \
+            if (!dy || !dcb || !dcr || sy < w || scb < w/2 || scr < w/2) { \
+                FAIL("v2 fuzz: OK decode produced empty/short frame"); \
+                tc_decoder_destroy(td); return; \
+            } \
+            for (int r = 0; r < h; r += 7) \
+                for (int c = 0; c < w; c += 7) { \
+                    int pv = dy[r * sy + c]; \
+                    if (pv < 0 || pv > 255) { \
+                        FAIL("v2 fuzz: OK decode produced OOB pixel"); \
+                        tc_decoder_destroy(td); return; \
+                    } \
+                } \
+        } \
+        tc_decoder_destroy(td); \
+        trials++; \
+    } while (0)
+
+    /* 1) Truncation sweep: every prefix length of every packet. */
+    for (size_t p = 0; p < n_pkts; p++) {
+        for (size_t len = 0; len <= pristine_sz[p]; len++) {
+            V2FUZZ_TRY(len, pristine[p]);
+        }
+    }
+
+    /* 2) Deterministic bit-flip sweep (1..4 flips, fixed seed). */
+    unsigned seed = 0xF00D;
+    for (int tr = 0; tr < 400; tr++) {
+        size_t pidx = (size_t)(seed % n_pkts);
+        seed = seed * 1103515245 + 12345;
+        size_t len = pristine_sz[pidx];
+        uint8_t *data = (uint8_t *)malloc(len);
+        ASSERT_NE(data, NULL, "v2 fuzz flip alloc failed");
+        memcpy(data, pristine[pidx], len);
+        int nflips = 1 + (int)((seed >> 16) % 4);
+        for (int f = 0; f < nflips; f++) {
+            seed = seed * 1103515245 + 12345;
+            size_t pos = (size_t)((seed >> 8) % len);
+            int bit = (int)(seed % 8);
+            data[pos] ^= (uint8_t)(1u << bit);
+        }
+        V2FUZZ_TRY(len, data);
+        free(data);
+    }
+
+    /* 3) Tool-flag corruption: force TC_TOOL_SAO on a packet that
+     *    does not signal it (decoder must parse bounded SAO syntax
+     *    safely), force TC_FLAG_WPP on a v2 packet (must be rejected),
+     *    and flip the entropy flag both ways. */
+    {
+        uint8_t *data = (uint8_t *)malloc(pristine_sz[0]);
+        ASSERT_NE(data, NULL, "v2 fuzz flag alloc failed");
+
+        memcpy(data, pristine[0], pristine_sz[0]);
+        uint16_t flags = (uint16_t)((data[12] << 8) | data[13]);
+        flags &= (uint16_t)~TC_TOOL_SAO;
+        data[12] = (uint8_t)(flags >> 8);
+        data[13] = (uint8_t)(flags & 0xFF);
+        V2FUZZ_TRY(pristine_sz[0], data);
+
+        memcpy(data, pristine[0], pristine_sz[0]);
+        flags = (uint16_t)((data[12] << 8) | data[13]);
+        flags |= TC_TOOL_SAO;
+        data[12] = (uint8_t)(flags >> 8);
+        data[13] = (uint8_t)(flags & 0xFF);
+        V2FUZZ_TRY(pristine_sz[0], data);
+
+        memcpy(data, pristine[0], pristine_sz[0]);
+        data[8] |= TC_FLAG_WPP;
+        V2FUZZ_TRY(pristine_sz[0], data);
+
+        memcpy(data, pristine[0], pristine_sz[0]);
+        data[8] &= (uint8_t)~TC_FLAG_WPP;
+        V2FUZZ_TRY(pristine_sz[0], data);
+
+        memcpy(data, pristine[0], pristine_sz[0]);
+        flags = (uint16_t)((data[12] << 8) | data[13]);
+        flags ^= TC_TOOL_ENTROPY_CODED;
+        data[12] = (uint8_t)(flags >> 8);
+        data[13] = (uint8_t)(flags & 0xFF);
+        V2FUZZ_TRY(pristine_sz[0], data);
+
+        memcpy(data, pristine[0], pristine_sz[0]);
+        data[3] = 3;   /* unsupported future version */
+        V2FUZZ_TRY(pristine_sz[0], data);
+
+        memcpy(data, pristine[0], pristine_sz[0]);
+        data[3] = 2; data[4] = 0; data[5] = 97;  /* odd v2 width */
+        V2FUZZ_TRY(pristine_sz[0], data);
+
+        memcpy(data, pristine[0], pristine_sz[0]);
+        data[4] = 0xFF; data[5] = 0xFF;          /* oversized dims */
+        V2FUZZ_TRY(pristine_sz[0], data);
+
+        free(data);
+    }
+
+    printf(" [%d malformed trials, no crash/hang/OOB/empty-frame]", trials);
+
+    for (size_t i = 0; i < n_pkts; i++) free(pristine[i]);
+    free(y); free(cb); free(cr);
+    PASS();
+    #undef V2FUZZ_TRY
+}
 
 static void test_large_resolution(void)
 {
@@ -1140,16 +1513,20 @@ static void test_large_resolution(void)
     PASS();
 }
 
-/* ── Test: Long-run soak (100 frames) ──────────────────── */
+/* ── Test: Long-run soak (300 frames at 1080p) ───────────── */
 
 static void test_long_run(void)
 {
-    TEST(long_run_100_frames);
-    int w = 128, h = 128;
+    TEST(long_run_300_frames_1080p);
+    int w = 1920, h = 1080;
     tc_config_t cfg;
     tc_config_defaults(&cfg, w, h);
-    cfg.qp = 32;
+    cfg.qp = 42;
     cfg.keyframe_interval = 30;
+    cfg.use_v2 = 1;
+    cfg.enable_entropy_coded = 1;
+    cfg.threads = 1;
+    cfg.preset = TC_PRESET_ULTRAFAST;
 
     tc_encoder_t *enc = tc_encoder_create(&cfg);
     tc_decoder_t *dec = tc_decoder_create(0, 0);
@@ -1159,13 +1536,16 @@ static void test_long_run(void)
     tc_pixel_t *y  = (tc_pixel_t *)calloc((size_t)(w * h), 1);
     tc_pixel_t *cb = (tc_pixel_t *)calloc((size_t)(w/2 * h/2), 1);
     tc_pixel_t *cr = (tc_pixel_t *)calloc((size_t)(w/2 * h/2), 1);
+    ASSERT_NE(y, NULL, "long-run luma allocation failed");
+    ASSERT_NE(cb, NULL, "long-run Cb allocation failed");
+    ASSERT_NE(cr, NULL, "long-run Cr allocation failed");
 
     double total_psnr = 0;
-    int n_frames = 100;
+    int n_frames = 300;
     int decode_errors = 0;
 
     for (int f = 0; f < n_frames; f++) {
-        gen_noise(y, w, h, w, (unsigned)(f * 7));
+        gen_gradient(y, w, h, w);
         memset(cb, 128, (size_t)(w/2 * h/2));
         memset(cr, 128, (size_t)(w/2 * h/2));
 
@@ -1723,10 +2103,10 @@ static void test_version_check(void)
     tc_error_t err = tc_encoder_encode(enc, y, w, cb, w/2, cr, w/2, &pkt);
     ASSERT_EQ(err, TC_OK, "encode failed");
 
-    /* Tamper with version byte (offset 3 in bitstream) to make it > TC_VERSION */
+    /* Tamper with version byte (offset 3) to make it newer than v2. */
     uint8_t *tampered = (uint8_t *)malloc(pkt.size);
     memcpy(tampered, pkt.data, pkt.size);
-    tampered[3] = TC_VERSION + 1;  /* Future version */
+    tampered[3] = TC_VERSION_V2 + 1;  /* Future version */
 
     const tc_pixel_t *dy, *dcb, *dcr;
     int sy, scb, scr;
@@ -1980,12 +2360,13 @@ static void test_v1_bitstream_version(void)
     err = tc_decoder_decode(dec, pkt.data, pkt.size, &dy, &sy, &dcb, &scb, &dcr, &scr);
     ASSERT_EQ(err, TC_OK, "v1 decode failed");
 
-    /* Verify v2 is rejected */
+    /* Versions newer than v2 remain rejected; v2 itself has an
+     * explicit decoder path and is tested separately. */
     uint8_t *tampered = (uint8_t *)malloc(pkt.size);
     memcpy(tampered, pkt.data, pkt.size);
-    tampered[3] = 2;  /* version 2 — not supported */
+    tampered[3] = TC_VERSION_V2 + 1;
     err = tc_decoder_decode(dec, tampered, pkt.size, &dy, &sy, &dcb, &scb, &dcr, &scr);
-    ASSERT_EQ(err, TC_ERR_BITSTREAM, "v2 should be rejected");
+    ASSERT_EQ(err, TC_ERR_BITSTREAM, "future version should be rejected");
     free(tampered);
 
     tc_encoder_destroy(enc);
@@ -2493,6 +2874,23 @@ static void test_transform_roundtrip(void)
     }
     ASSERT_EQ(fail, 0, "DCT random roundtrip bound");
 
+    /* DC-only inverse shortcuts must remain exactly equivalent to the
+     * full fixed-point inverse transforms, including negative rounding. */
+    fail = 0;
+    for (int dc = -2000; dc <= 2000; dc++) {
+        memset(in, 0, sizeof(in));
+        in[0] = (tc_coeff_t)dc;
+        tc_idct4x4_res(in, rec, 4);
+        for (int i = 0; i < 16; i++)
+            if (rec[i] != tc_idct_dc4_res(dc)) { fail++; break; }
+        memset(in, 0, sizeof(in));
+        in[0] = (tc_coeff_t)dc;
+        tc_idct8x8_res(in, rec, 8);
+        for (int i = 0; i < 64; i++)
+            if (rec[i] != tc_idct_dc8_res(dc)) { fail++; break; }
+    }
+    ASSERT_EQ(fail, 0, "DC-only inverse shortcut parity");
+
     PASS();
 }
 
@@ -2890,10 +3288,108 @@ static void test_rc_full_roundtrip(void)
     PASS();
 }
 
+/* ── Test: v2 SAO scalar/NEON-safe kernel and round-trip ─────── */
+
+static void test_v2_sao(void)
+{
+    TEST(v2_sao_band_offset);
+    const int w = 96, h = 80;
+    tc_pixel_t *orig = (tc_pixel_t *)malloc((size_t)w * h);
+    tc_pixel_t *recon = (tc_pixel_t *)malloc((size_t)w * h);
+    tc_pixel_t *expected = (tc_pixel_t *)malloc((size_t)w * h);
+    ASSERT_NE(orig, NULL, "SAO orig allocation failed");
+    ASSERT_NE(recon, NULL, "SAO recon allocation failed");
+    ASSERT_NE(expected, NULL, "SAO expected allocation failed");
+    for (int r = 0; r < h; ++r) for (int c = 0; c < w; ++c) {
+        orig[r*w+c] = (tc_pixel_t)((r * 3 + c * 7) & 255);
+        recon[r*w+c] = (tc_pixel_t)test_clip((int)orig[r*w+c] - 3, 0, 255);
+    }
+    memcpy(expected, recon, (size_t)w * h);
+    int band = 0, offset = 0;
+    ASSERT_EQ(tc_sao_choose_bo(orig, w, recon, w, 64, 16, w, h,
+                               &band, &offset), 1, "SAO candidate not selected");
+    ASSERT_RANGE(band, 0, 31, "SAO band out of range");
+    ASSERT_RANGE(offset, -7, 7, "SAO offset out of range");
+    tc_sao_ctu_luma(expected, w, 64, 16, w, h, band, offset);
+    tc_sao_ctu_luma(recon, w, 64, 16, w, h, band, offset);
+    ASSERT_EQ(memcmp(expected, recon, (size_t)w * h), 0,
+              "SAO application is not deterministic");
+    free(orig); free(recon); free(expected);
+
+    tc_config_t cfg;
+    tc_config_defaults(&cfg, w, h);
+    cfg.use_v2 = 1;
+    cfg.enable_entropy_coded = 1;
+    cfg.qp = 32;
+    tc_encoder_t *enc = tc_encoder_create(&cfg);
+    tc_decoder_t *dec = tc_decoder_create(0, 0);
+    ASSERT_NE(enc, NULL, "SAO encoder allocation failed");
+    ASSERT_NE(dec, NULL, "SAO decoder allocation failed");
+    tc_pixel_t *y = (tc_pixel_t *)malloc((size_t)w * h);
+    tc_pixel_t *cb = (tc_pixel_t *)malloc((size_t)(w/2) * (h/2));
+    tc_pixel_t *cr = (tc_pixel_t *)malloc((size_t)(w/2) * (h/2));
+    ASSERT_NE(y, NULL, "SAO luma allocation failed");
+    ASSERT_NE(cb, NULL, "SAO Cb allocation failed");
+    ASSERT_NE(cr, NULL, "SAO Cr allocation failed");
+    gen_gradient(y, w, h, w);
+    memset(cb, 128, (size_t)(w/2) * (h/2));
+    memset(cr, 128, (size_t)(w/2) * (h/2));
+    tc_packet_t pkt;
+    ASSERT_EQ(tc_encoder_encode(enc, y, w, cb, w/2, cr, w/2, &pkt), TC_OK,
+              "SAO v2 encode failed");
+    ASSERT_EQ(pkt.data[3], TC_VERSION_V2, "SAO packet is not v2");
+    ASSERT_EQ((pkt.data[12] | ((uint16_t)pkt.data[13] << 8)) & TC_TOOL_SAO,
+              TC_TOOL_SAO, "v2 packet does not signal SAO");
+    const tc_pixel_t *dy, *dcb, *dcr;
+    int sy, scb, scr;
+    ASSERT_EQ(tc_decoder_decode(dec, pkt.data, pkt.size,
+                                &dy, &sy, &dcb, &scb, &dcr, &scr), TC_OK,
+              "SAO v2 decode failed");
+    int mismatch = 0;
+    for (int r = 0; r < h; ++r) for (int c = 0; c < w; ++c)
+        mismatch += enc->recon->y[r*enc->recon->stride_y+c] != dy[r*sy+c];
+    ASSERT_EQ(mismatch, 0, "SAO encoder/decoder reconstruction mismatch");
+
+    /* Repeat through the raw v2 syntax path; this catches accidental
+     * dependence on range-coder-only SAO signaling. */
+    tc_config_t raw_cfg;
+    tc_config_defaults(&raw_cfg, w, h);
+    raw_cfg.use_v2 = 1;
+    raw_cfg.enable_entropy_coded = 0;
+    raw_cfg.qp = 32;
+    tc_encoder_t *raw_enc = tc_encoder_create(&raw_cfg);
+    tc_decoder_t *raw_dec = tc_decoder_create(0, 0);
+    ASSERT_NE(raw_enc, NULL, "raw SAO encoder allocation failed");
+    ASSERT_NE(raw_dec, NULL, "raw SAO decoder allocation failed");
+    tc_packet_t raw_pkt;
+    ASSERT_EQ(tc_encoder_encode(raw_enc, y, w, cb, w/2, cr, w/2, &raw_pkt), TC_OK,
+              "raw SAO v2 encode failed");
+    ASSERT_EQ(raw_pkt.data[3], TC_VERSION_V2, "raw SAO packet is not v2");
+    ASSERT_EQ((raw_pkt.data[12] | ((uint16_t)raw_pkt.data[13] << 8)) & TC_TOOL_SAO,
+              TC_TOOL_SAO, "raw v2 packet does not signal SAO");
+    const tc_pixel_t *raw_y, *raw_cb, *raw_cr;
+    int raw_sy, raw_scb, raw_scr;
+    ASSERT_EQ(tc_decoder_decode(raw_dec, raw_pkt.data, raw_pkt.size,
+                                &raw_y, &raw_sy, &raw_cb, &raw_scb,
+                                &raw_cr, &raw_scr), TC_OK,
+              "raw SAO v2 decode failed");
+    for (int r = 0; r < h; ++r) for (int c = 0; c < w; ++c)
+        ASSERT_EQ(raw_enc->recon->y[r*raw_enc->recon->stride_y+c], raw_y[r*raw_sy+c],
+                  "raw SAO encoder/decoder mismatch");
+    tc_encoder_destroy(raw_enc);
+    tc_decoder_destroy(raw_dec);
+    tc_encoder_destroy(enc); tc_decoder_destroy(dec);
+    free(y); free(cb); free(cr);
+    PASS();
+}
+
 /* ── Main ──────────────────────────────────────────────────────── */
 
 int main(void)
 {
+    const char *fast_env = getenv("TCODEC_TEST_FAST");
+    int fast_mode = fast_env && fast_env[0] != '\0' && strcmp(fast_env, "0") != 0;
+
     printf("════════════════════════════════════════════════════════\n");
     printf("  TCodec v%s — Test Suite\n", TCODEC_VERSION_STRING);
     printf("════════════════════════════════════════════════════════\n\n");
@@ -2922,13 +3418,21 @@ int main(void)
     test_motion_quality();
     test_multi_ref();
     test_non_ctu_aligned();
+    test_v2_roundtrip();
+    test_v2_fast_presets();
+    test_v2_sao();
     test_fuzz_malformed();
     test_bitflip_fuzz();
     test_bitstream_errors();
+    test_fuzz_malformed_v2();
 
     /* Phase 0 completion tests */
     test_large_resolution();
-    test_long_run();
+    if (!fast_mode) {
+        test_long_run();
+    } else {
+        printf("  SKIP: long_run_300_frames_1080p (run test-full or make soak-1080p)\n");
+    }
     test_all_intra();
     test_decoder_mismatch();
     test_b_frames();
@@ -2959,6 +3463,9 @@ int main(void)
 
     /* Summary */
     printf("\n════════════════════════════════════════════════════════\n");
+    if (fast_mode) {
+        printf("  Fast regression mode: 1 test skipped (300-frame long-run)\n");
+    }
     printf("  Results: %d/%d passed", g_tests_passed, g_tests_run);
     if (g_tests_failed > 0) {
         printf(", %d FAILED", g_tests_failed);

@@ -19,6 +19,7 @@
 #include "tcodec_common.h"
 
 #if TCODEC_NEON
+#include <arm_neon.h>
 
 /* ════════════════════════════════════════════════════════════════
  * Bit-exact mirror of src/filter.c (scalar) — see that file for the
@@ -129,6 +130,33 @@ static void n_filter_horiz_edge(tc_pixel_t *y, int stride,
         } else {
             y[(row - 1) * stride + px] = n_weak_filter(p1, p0, q0, q1, tc);
             y[(row + 0) * stride + px] = n_weak_filter(q1, q0, p0, p1, tc);
+        }
+    }
+}
+
+void tc_sao_ctu_luma(tc_pixel_t *y, int stride_y,
+                     int x, int y0, int width, int height,
+                     int band, int offset)
+{
+    int x1 = tc_min(x + TC_CTU_SIZE, width);
+    int y1 = tc_min(y0 + TC_CTU_SIZE, height);
+    band = tc_clip(band, 0, 31);
+    offset = tc_clip(offset, -7, 7);
+    uint8x16_t band_v = vdupq_n_u8((uint8_t)band);
+    uint8x16_t off_v = vdupq_n_u8((uint8_t)(offset < 0 ? -offset : offset));
+    for (int row = y0; row < y1; ++row) {
+        int col = x;
+        for (; col + 16 <= x1; col += 16) {
+            uint8x16_t src = vld1q_u8(y + row * stride_y + col);
+            uint8x16_t classes = vshrq_n_u8(src, 3);
+            uint8x16_t mask = vceqq_u8(classes, band_v);
+            uint8x16_t adjusted = offset < 0 ? vqsubq_u8(src, off_v) : vqaddq_u8(src, off_v);
+            vst1q_u8(y + row * stride_y + col, vbslq_u8(mask, adjusted, src));
+        }
+        for (; col < x1; ++col) {
+            tc_pixel_t *p = &y[row * stride_y + col];
+            if ((*p >> 3) == band)
+                *p = (tc_pixel_t)tc_clip((int)*p + offset, 0, 255);
         }
     }
 }

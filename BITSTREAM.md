@@ -1,7 +1,7 @@
-# TCodec Bitstream Syntax — Version 0 and Version 1
+# TCodec Bitstream Syntax — Versions 0, 1, and 2
 
-**Status**: Working prototype. v0 and v1 supported.  
-**Bitstream Versions**: 0 (legacy), 1 (current)  
+**Status**: Working prototype. v0, v1, and v2 supported.
+**Bitstream Versions**: 0 (legacy), 1 (default), 2 (quadtree)
 **Magic**: `0x54 0x43 0x56` ("TCV")
 
 ---
@@ -35,7 +35,7 @@ Each frame packet contains:
 
 ```
 ┌──────────────────────┐
-│ Frame Header         │  12 bytes (v0) or 14 bytes (v1)
+│ Frame Header         │  12 bytes (v0) or 14 bytes (v1/v2)
 ├──────────────────────┤
 │ [WPP entry points]   │  Present when TC_FLAG_WPP is set
 ├──────────────────────┤
@@ -49,7 +49,7 @@ Each frame packet contains:
 ├──────────────────────┤
 │ ...                  │
 ├──────────────────────┤
-│ [CRC-16]             │  2 bytes (v1 only, when TC_FLAG_CRC is set)
+│ [CRC-16]             │  2 bytes (v1/v2, when TC_FLAG_CRC is set)
 └──────────────────────┘
 ```
 
@@ -97,7 +97,7 @@ next byte boundary).
 
 ### 3.3 Flags Byte
 
-| Bit | Mask | Field | v0 | v1 | Description |
+| Bit | Mask | Field | v0 | v1/v2 | Description |
 |-----|------|-------|----|----|-------------|
 | 7 | `0x80` | `key_frame` | ✅ | ✅ | 1 = I-frame (intra-only), 0 = P-frame |
 | 6 | `0x40` | `wpp` | ✅ | ✅ | 1 = WPP row entry points present |
@@ -115,7 +115,7 @@ decoder never reads these bits, and a v1 decoder knows the version.
 encoder or decoder. The entire frame is processed as a single tile.
 These bits are reserved for future tile-based parallelism.
 
-### 3.4 Tool Flags (16 bits, v1 only)
+### 3.4 Tool Flags (16 bits, v1/v2 header)
 
 | Bit | Mask | Field | Profile Required | Description |
 |-----|------|-------|-----------------|-------------|
@@ -125,11 +125,11 @@ These bits are reserved for future tile-based parallelism.
 | 3 | `0x0008` | `median_mv_pred` | baseline-mobile | Median MV predictor + MVD coding |
 | 4 | `0x0010` | `multi_ref` | streaming-main | Multiple reference frames |
 | 5 | `0x0020` | `six_tap_interp` | streaming-main | 6-tap luma interpolation filter |
-| 6 | `0x0040` | `entropy_coded` | streaming-main | Context-modeled entropy (future) |
+| 6 | `0x0040` | `entropy_coded` | streaming-main | Context-modeled range-coded entropy |
 | 7 | `0x0080` | `dering` | streaming-main | Directional deringing (future) |
-| 8 | `0x0100` | `sao` | streaming-main | Sample Adaptive Offset (future) |
+| 8 | `0x0100` | `sao` | streaming-main | v2 luma Band Offset; EO/restoration are reserved |
 | 9 | `0x0200` | `grain_synthesis` | grain-cinema | Film grain synthesis (future) |
-| 10 | `0x0400` | `bipred` | archive-high | Bi-prediction (future) |
+| 10 | `0x0400` | `bipred` | archive-high | Hierarchical B-frame bi-prediction |
 | 11 | `0x0800` | `loop_restoration` | archive-high | Wiener-like restoration (future) |
 | 12 | `0x1000` | `affine_motion` | archive-high | Affine motion model (future) |
 | 13 | `0x2000` | `extended_part` | archive-high | Extended partition types (future) |
@@ -182,7 +182,7 @@ Decoders derive these from the header:
 - `profile` = `(profile_level >> 4) & 0x0F` (v1 only, defaults to 0 for v0)
 - `level_idx` = `profile_level & 0x0F` (v1 only, defaults to 0 for v0)
 
-### 3.7 CRC-16 (v1 only)
+### 3.7 CRC-16 (v1/v2)
 
 When `TC_FLAG_CRC` is set, a CRC-16 (CCITT, polynomial 0x1021) is
 appended after the CTU data. The CRC covers all bytes from the start
@@ -373,11 +373,10 @@ via `tc_tans_enc_coeffs()` / `tc_tans_dec_coeffs()`. tANS provides better
 compression than universal codes (Exp-Golomb) by adapting to the actual
 coefficient distribution.
 
-**Current status**: tANS is used for all coefficient coding in the
-pipeline, but context modeling is not yet implemented. The encoder and
-decoder allocate context structures but use default/fixed probability
-tables. This means tANS is functioning but not yet reaching its full
-compression potential — context modeling is planned for Phase 3.
+**Current status**: the legacy path uses the reserved tANS/Exp-Golomb
+compatibility helpers, while the v1/v2 range-coded path uses context-modeled
+binary coding for modes, motion, significance, levels, and selected syntax.
+Further context specialization and measured compression gains remain planned.
 
 ### 5.2 Motion Vector Coding (Exp-Golomb)
 
@@ -609,6 +608,51 @@ coeff_block(n) {
 
 ---
 
+## 7.6 Version 2 Quadtree Payload
+
+Version 2 keeps the 14-byte v1 header layout but changes only the payload
+syntax. It is selected explicitly with `tc_config_t.use_v2 = 1` or the CLI
+`--v2`; v1 remains the default. A v2 payload is sequential and must not set
+`TC_FLAG_WPP`. Range-coded v2 resets its range state and all contexts at each
+frame, then codes CTUs in raster order (left-to-right, top-to-bottom).
+
+Each in-frame 64×64 CTU is a quadtree of 64, 32, 16, or 8 pixel CUs. A node
+at depth 0..2 starts with one split flag. Split children are emitted in
+raster order `(top-left, top-right, bottom-left, bottom-right)`; depth 3 is
+always a leaf. Nodes wholly outside a partial frame have no syntax.
+
+A leaf carries one intra flag. Intra leaves carry a 5-bit luma mode, a chroma
+intra flag, optional 3-bit chroma mode, luma transform syntax, and two chroma
+4×4 residual planes. Inter leaves carry skip or merge signaling; explicit
+inter leaves carry a transform-size flag and signed Exp-Golomb MVD x/y. The
+reference is `dpb[0]` for v2 P frames. The MV predictor is the median of the
+available left, above, and above-right 8×8 MV-grid cells; intra cells are
+unavailable. Merge and skip use the predictor directly; explicit inter adds
+MVD to it. v2 B-frame emission is disabled by the encoder.
+
+Luma residuals use either 8×8 or four 4×4 residual transforms, with the shared
+JND-weighted quantizer (`tc_quant_coeff`/`tc_dequant_coeff`). Chroma uses
+4:2:0 collocated motion compensation or neighbour-DC intra prediction and
+4×4 residual transforms. Coefficients use the selected entropy path: the
+range coder when `TC_TOOL_ENTROPY_CODED` is set, otherwise the legacy
+Exp-Golomb/tANS-reserved path. Encoder and decoder use the same integer
+transform, dequantization, clipping, and chroma helpers.
+
+The encoder first performs integer RDO on a private reconstruction and then
+replays the selected tree. Leaf snapshots are the pre-leaf reconstruction;
+the MV grid is rebuilt incrementally during replay. The decoder mirrors this
+raster traversal. Each complete in-frame CTU is deblocked before the next CTU
+is decoded. When `TC_TOOL_SAO` is set, each CTU then carries `sao_present`
+(1 bit). If present, it carries `sao_band` (5 bits, 0..31) and
+`sao_offset_code` (4 bits, 0..14), where `offset = sao_offset_code - 7`.
+Code 15 is reserved and invalid. The selected luma Band Offset is applied
+after deblocking and is clipped to [0,255]; chroma is unchanged. The encoder
+sets `TC_TOOL_SAO` for every v2 frame, including frames whose per-CTU flag is
+zero. v0/v1 never consume this syntax. The frame payload is byte-aligned
+after entropy flush, followed by CRC-16 when enabled. A v2 decoder rejects
+WPP-marked packets, unsupported versions, underflow, and invalid v2 syntax
+rather than routing it through the legacy block decoder.
+
 ## 8. Bitstream Compliance
 
 ### 8.1 Version Handling
@@ -617,7 +661,8 @@ coeff_block(n) {
 |---------|----------|
 | 0 | Accepted by all decoders (12-byte header) |
 | 1 | Accepted by v1-aware decoders (14-byte header) |
-| 2+ | Rejected with `TC_ERR_BITSTREAM` |
+| 2 | Accepted only by the explicit v2 quadtree decoder; sequential, WPP-disabled payload |
+| 3+ | Rejected with `TC_ERR_BITSTREAM` |
 
 ### 8.2 Decoder Error Handling
 
@@ -626,20 +671,21 @@ Current decoder behavior on malformed bitstreams:
 | Condition | Behavior |
 |-----------|----------|
 | Invalid magic | Return `TC_ERR_BITSTREAM` |
-| Invalid version (>1) | Return `TC_ERR_BITSTREAM` |
+| Invalid version (>2) | Return `TC_ERR_BITSTREAM` |
 | Unknown profile (>3) | Return `TC_ERR_BITSTREAM` |
 | Level constraint exceeded | Return `TC_ERR_BITSTREAM` |
 | EOF mid-header | Return `TC_ERR_EOF` |
-| Invalid intra mode (≥18) | Clamp to DC (mode 1) |
+| Invalid intra mode (≥18) | Legacy path clamps to DC; v2 path rejects/clamps only as a defensive fallback |
+
 | `last_nz_plus1 > n` | Clamp to `n - 1` |
 | Out-of-bounds MV | Fallback to DC(128) prediction — safe degradation |
 | Invalid ref_idx (≥4) | Clamp to 0 |
 | CRC mismatch | Set `last_crc_valid = 0`, continue decoding (graceful) |
-| Truncated coefficient data | Reads past buffer — **no safety check** |
+| Truncated coefficient data | Returns a bitstream/EOF error through the bounded reader |
 
 ### 8.3 Known Bitstream Deficiencies
 
-1. ~~No version negotiation~~ ✅ v1: versions >1 are rejected
+1. ~~No version negotiation~~ ✅ explicit v0/v1/v2 dispatch; versions >2 are rejected
 2. ~~No CRC or checksum~~ ✅ v1: CRC-16 (CCITT) when TC_FLAG_CRC set
 3. ~~No random access points~~ ✅ v1: TC_FLAG_RAP marks independent frames
 4. **No error resilience**: A single bit error corrupts all subsequent data
@@ -647,9 +693,9 @@ Current decoder behavior on malformed bitstreams:
 6. **WPP entry points**: When TC_FLAG_WPP is set, an entry point table follows the header
 7. **Reference frame signaling**: 4 DPB slots, ref_idx coded per block (2 bits)
 8. ~~No bit-rate signaling~~ v1: level constraints imply max bitrate
-9. **NEON/scalar output divergence**: NEON deblock uses different filter strength than scalar
+9. ~~NEON/scalar output divergence~~ ✅ deblock and v2 SAO paths have scalar/NEON parity coverage
 10. **WPP/sequential bitstream divergence**: WPP bitstreams byte-align per row (sequential do not)
-11. **Tool flags informational only**: Decoder does not yet skip syntax based on tool flags
+11. ~~Tool flags informational only~~ ✅ v2 SAO syntax is consumed only when `TC_TOOL_SAO` is set
 12. **Extension header not yet emitted**: TC_FLAG_EXT_HEADER is defined but encoder doesn't write extensions
 
 ---
@@ -696,12 +742,12 @@ CRC-16 (2 bytes):
 - Set `cfg.bitstream_version = TC_VERSION_V1` to encode v1 (default)
 - Set `cfg.bitstream_version = TC_VERSION_V0` for legacy compatibility
 
-### 10.2 Adding Future v2 Features
+### 10.2 Adding Future v3 Features
 
 When a new bitstream version is needed:
-1. Increment `TC_VERSION_V2` constant
+1. Increment the bitstream version constant beyond `TC_VERSION_V2`
 2. Add new header fields after tool_flags (or use ext_header)
 3. Update decoder's version dispatch in `read_frame_header()`
-4. Update `TC_FRAME_HEADER_SIZE_V2` constant
+4. Update the applicable frame-header constant
 5. Add v2-specific tests
 6. Update this document

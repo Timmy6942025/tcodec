@@ -54,6 +54,8 @@ void tc_frame_free(tc_frame_buf_t *frame)
 
 void tc_frame_copy(tc_frame_buf_t *dst, const tc_frame_buf_t *src)
 {
+    if (dst == src) return;   /* self-copy: avoid overlapping memcpy (UB) */
+
     int w  = tc_min(dst->width,  src->width);
     int h  = tc_min(dst->height, src->height);
     int cw = w / 2;

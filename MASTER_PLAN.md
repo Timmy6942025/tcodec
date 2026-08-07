@@ -171,12 +171,20 @@ All work should be judged by hard metrics.
 
 Current repository status, at a high level:
 
-- Working prototype with custom bitstream, intra/inter modes, transforms, quantization, and deblocking
-- NEON-oriented implementation direction
-- Basic tests pass
-- Entropy path is currently simple Exp-Golomb-based coefficient coding, not a production-grade entropy coder
-- Threading/WPP infrastructure exists but is not yet a production execution model
-- Motion estimation, mode decision, transform selection, rate control, and filtering are still prototype-grade
+- Working research prototype with versioned v0/v1/v2 bitstreams, intra/inter modes,
+  v2 quadtree coding, transforms, quantization, deblocking, and luma BO SAO
+- NEON-oriented implementation direction with scalar/NEON parity coverage
+- 51 codec regression tests plus native TCMX/TCMF and playable MP4/fMP4 bridge tests
+- Range-coded entropy is implemented and selected by tool flag; deeper compression
+  gains and broad competitive measurements remain open
+- WPP infrastructure and B-frame reorder exist, but real-time ARM decode targets
+  are not met by the current measured implementation
+- Motion estimation, mode decision, rate control, and filtering remain
+  research/prototype-grade despite the implemented baseline features
+- The MP4 integration currently has two explicit paths: packet-preserving private
+  TCMX/TCMF transport plus native private `tcv1` ISO-BMFF carriage, and a separate
+  H.264-in-ISO-BMFF compatibility bridge. Native `tcv1` carriage round-trips
+  byte-exactly; stock-player decoder registration remains future work.
 
 This means the project needs both:
 
@@ -675,9 +683,10 @@ Make TCodec usable outside the lab.
 
 ### Required Deliverables
 
-- Container format or mapping into existing container
-- Streaming segment format
-- FFmpeg integration path
+- Packet-preserving TCMX/TCMF transport plus tested H.264-in-MP4 compatibility bridge
+- Keyframe-aligned TCMF segments and a tested HLS/fMP4 compatibility playlist bridge
+- FFmpeg integration path through the compatibility bridge; native TCV sample-entry
+  and libavcodec wrapper remain future work
 - Reference encoder/decoder CLI
 - Decoder library API
 - Player integration demo

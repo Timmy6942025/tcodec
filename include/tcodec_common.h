@@ -61,12 +61,14 @@ typedef struct tc_bs_reader {
     size_t         size;
     size_t         byte_pos;
     int            bit_pos;
+    int            error;       /* Set when a read runs past the buffer. */
 } tc_bs_reader_t;
 
 void tc_bs_writer_init(tc_bs_writer_t *w, uint8_t *buf, size_t capacity);
 void tc_bs_writer_write_bits(tc_bs_writer_t *w, uint32_t val, int nbits);
 void tc_bs_writer_write_ue(tc_bs_writer_t *w, uint32_t val);  /* Exp-Golomb */
 void tc_bs_writer_write_se(tc_bs_writer_t *w, int32_t val);   /* Signed EG */
+int tc_bs_se_bits(int32_t val);                              /* Signed EG bit count */
 void tc_bs_writer_byte_align(tc_bs_writer_t *w);
 size_t tc_bs_writer_bytes(tc_bs_writer_t *w);
 
@@ -137,6 +139,21 @@ void tc_fdct8x8_res(const tc_coeff_t *TCODEC_RESTRICT in, int stride,
 void tc_idct8x8_res(const tc_coeff_t *TCODEC_RESTRICT in,
                     tc_coeff_t *TCODEC_RESTRICT out, int stride);
 
+/* Exact DC-only inverse-DCT values used by the v2 decoder fast path.
+ * These are the same fixed-point two-pass operations as the full
+ * residual transforms when every coefficient except DC is zero. */
+TCODEC_INLINE int tc_idct_dc4_res(int dc)
+{
+    int v = (dc * 8192 + 8192) >> 14;
+    return (v * 8192 + 8192) >> 14;
+}
+
+TCODEC_INLINE int tc_idct_dc8_res(int dc)
+{
+    int v = (dc * 5793 + 8192) >> 14;
+    return (v * 5793 + 8192) >> 14;
+}
+
 /* Residual-mode Walsh-Hadamard Transform — self-inverting (H*H=n*I),
  * operates on signed residuals without ±128 level shift.
  * These are the primary functions used by the encoder/decoder pipeline.
@@ -166,6 +183,88 @@ int tc_lambda(int qp);
 
 /* JND-based weight for a coefficient position in a band. */
 int tc_jnd_weight(int band, int pos);
+
+/* ── Shared quantizer primitives (encoder + decoder must agree) ──
+ *
+ * eff = JND-weighted quantizer step for a coefficient position.
+ * Quantize uses a dead-zone offset of eff/3; reconstruction places the
+ * level at the centroid of that bin (q·eff + eff/6) instead of the old
+ * q·eff + eff/2, which overshot every level by eff/3 (≈2.3× the MSE of
+ * a centred reconstruction).  Both sides use these helpers so the
+ * rounding can never drift apart again.
+ * ══════════════════════════════════════════════════════════════ */
+
+TCODEC_INLINE int tc_eff_scale(int qp, int band, int pos)
+{
+    int eff = (tc_qscale(qp) * tc_jnd_weight(band, pos) + 4) >> 3;
+    return eff < 1 ? 1 : eff;
+}
+
+TCODEC_INLINE int tc_quant_coeff(int c, int eff)
+{
+    int offset = eff / 3;
+    if (c > 0) return  (c + offset) / eff;
+    if (c < 0) return -((-c + offset) / eff);
+    return 0;
+}
+
+TCODEC_INLINE int tc_dequant_coeff(int q, int eff)
+{
+    int bias = eff / 6;
+    if (q > 0) return  q * eff + bias;
+    if (q < 0) return  q * eff - bias;
+    return 0;
+}
+
+/* ── Bitstream v2 quadtree geometry (shared enc/dec) ─────────────
+ *
+ * A CTU (64×64) is coded as a quadtree of coding units with sizes
+ * 64/32/16/8.  Node bookkeeping is a flat array of 85 entries:
+ *   depth 0 →  1 node  (base  0)
+ *   depth 1 →  4 nodes (base  1)
+ *   depth 2 → 16 nodes (base  5)
+ *   depth 3 → 64 nodes (base 21)
+ * (cx, cy) are 8×8-cell coordinates inside the CTU (0..7).
+ * ══════════════════════════════════════════════════════════════ */
+
+#define TC_QT_MAX_DEPTH 3
+#define TC_QT_NODES     85
+#define TC_QT_MIN_CU    8
+
+/* 8×8 MV-grid cells per 64×64 CTU (encoder + decoder MV prediction). */
+#define TC_MVGRID_STRIDE 8
+
+TCODEC_INLINE int tc_qt_index(int depth, int cx, int cy)
+{
+    static const int base[4] = { 0, 1, 5, 21 };
+    int shift = 3 - depth;                 /* cells per CU side = 1<<shift */
+    return base[depth] + ((cy >> shift) << depth) + (cx >> shift);
+}
+
+/* Per-CU decision record produced by the v2 encoder RDO pass and
+ * replayed by its write pass.  The decoder reads the same syntax
+ * directly and needs no node array, but the type lives here so the
+ * encoder can keep its quadtree scratch inside tc_encoder_t (no
+ * static/shared buffers — safe for concurrent encoder instances).
+ * Snapshots are the per-CU reconstruction; copies are row-wise
+ * (frame strides are wider than a CU, so raw memcpy would read
+ * garbage beyond the first row). */
+typedef struct { int16_t dx, dy; uint8_t intra; } qt_mvcell_t;
+
+typedef struct {
+    uint8_t  split;
+    uint8_t  skip;
+    uint8_t  merge;
+    uint8_t  intra;
+    uint8_t  bi;
+    uint8_t  dct_size;
+    uint8_t  intra_mode;
+    uint8_t  intra_cmode;
+    uint8_t  ref_sel;
+    int16_t  mvd_x;
+    int16_t  mvd_y;
+    uint8_t  ch_intra;
+} qt_node_t;
 
 /* ── Entropy coding (Exp-Golomb, tANS reserved) ─────────────── */
 
@@ -255,13 +354,24 @@ void tc_rc_dec_coeffs(tc_rc_dec_t *rc, tc_rc_ctx_t *ctx,
 #define RC_CTX_MVD_X       17   /* separate x/y MVD magnitude contexts (D2) */
 #define RC_CTX_MVD_Y       19
 #define RC_CTX_SIG         21
-#define RC_CTX_LAST        29
-#define RC_CTX_GT1         33
-#define RC_CTX_GT2         39
-#define RC_CTX_SIGN        41
-#define RC_CTX_LEVEL       42
-#define RC_CTX_REF_SEL     48   /* B-frame ref selection (0=fwd,1=bwd,2=bi) */
-#define RC_CTX_MAX         49
+#define RC_CTX_SIG_DC      29   /* DC coefficient significance (D2) */
+#define RC_CTX_LAST        30
+#define RC_CTX_LAST_DC     34   /* DC last-nz position (D2) */
+#define RC_CTX_GT1         35
+#define RC_CTX_GT1_DC      41   /* DC GT1 flag (D2) */
+#define RC_CTX_GT2         42
+#define RC_CTX_GT2_DC      44   /* DC GT2 flag (D2) */
+#define RC_CTX_SIGN        45
+#define RC_CTX_SIGN_DC     46   /* DC sign (D2) */
+#define RC_CTX_LEVEL       47
+#define RC_CTX_LEVEL_DC    53   /* DC level (D2) */
+#define RC_CTX_REF_SEL     59   /* B-frame ref selection (0=fwd,1=bwd,2=bi) */
+#define RC_CTX_MERGE_FLAG  61   /* merge (no MVD) vs explicit MVD */
+#define RC_CTX_QT_SPLIT    62   /* quadtree split flag (v2, depth in sub-ctx) */
+#define RC_CTX_SAO_TYPE    65   /* v2 SAO off/band flag */
+#define RC_CTX_SAO_BAND    66   /* v2 SAO band position (5 bits) */
+#define RC_CTX_SAO_OFFSET  71   /* v2 SAO signed offset */
+#define RC_CTX_MAX         76
 
 /* Frequency band classification for a zigzag position.
  * Reserved for future JND-weighted quantization per coefficient.
@@ -326,6 +436,29 @@ void tc_inter_predict(const tc_pixel_t *ref, int ref_stride,
                       tc_pixel_t *TCODEC_RESTRICT dst, int dst_stride,
                       int blk_size);
 
+/* Chroma inter predict (bitstream v2).
+ * The luma MV is expressed in quarter-luma-pel; on the 4:2:0 chroma
+ * grid the same number is 1/8-chroma-pel, so the fractional part is
+ * mv & 7 and the integer part mv >> 3 (H.264 chroma MC).  Bilinear,
+ * integer-only, edge-clamped — identical on encoder and decoder.
+ * ref_w/ref_h are the *chroma* plane dimensions. */
+void tc_inter_predict_chroma(const tc_pixel_t *ref, int ref_stride,
+                             int ref_w, int ref_h,
+                             tc_mv_s mv,
+                             tc_pixel_t *TCODEC_RESTRICT dst, int dst_stride,
+                             int blk_size);
+
+/* Reference samples for bitstream v2 (above-right / below-left are
+ * replicated instead of read — see predict.c for the rationale). */
+void tc_intra_get_ref_v2(const tc_pixel_t *recon, int stride,
+                         int x, int y, int blk_size, int frame_w, int frame_h,
+                         tc_pixel_t *ref_above, tc_pixel_t *ref_left);
+
+/* Chroma intra DC prediction from reconstructed neighbours (v2). */
+void tc_intra_chroma_dc(const tc_pixel_t *recon_c, int stride,
+                        int cx, int cy, int csize,
+                        tc_pixel_t *TCODEC_RESTRICT dst, int dst_stride);
+
 /* ── Deblocking filter ───────────────────────────────────────── */
 
 /* Filter one CTU's edges. Strength based on QP and boundary strength. */
@@ -333,6 +466,20 @@ void tc_deblock_ctu(tc_pixel_t *y,  int stride_y,
                     tc_pixel_t *cb, int stride_cb,
                     tc_pixel_t *cr, int stride_cr,
                     int ctu_x, int ctu_y, int qp);
+
+/* v2 Sample Adaptive Offset (band-offset mode, luma). The application
+ * kernel is shared by encoder and decoder and is bit-exact across scalar
+ * and NEON builds. `band` is 0..31 and `offset` is -7..7. */
+void tc_sao_ctu_luma(tc_pixel_t *y, int stride_y,
+                     int x, int y0, int width, int height,
+                     int band, int offset);
+
+/* Select a single BO band/offset from the original and post-deblock
+ * reconstruction. Returns 1 when the candidate reduces SSE, otherwise 0. */
+int tc_sao_choose_bo(const tc_pixel_t *orig, int orig_stride,
+                     const tc_pixel_t *recon, int recon_stride,
+                     int x, int y, int width, int height,
+                     int *band, int *offset);
 
 /* ── Rate control ────────────────────────────────────────────── */
 
@@ -403,6 +550,9 @@ typedef struct tc_encoder {
     int32_t           num_ctu_rows;
     int32_t           frame_count;
     int32_t           force_keyframe;
+    /* Bitstream v2 quadtree scratch (per-encoder, not static) */
+    qt_node_t        *v2_node;         /* TC_QT_NODES decision records */
+    qt_mvcell_t      *v2_grid;         /* TC_MVGRID_STRIDE² MV grid */
     /* Thread pool for WPP (only when threading enabled) */
 #if !defined(TCODEC_NO_THREADS)
     tc_threadpool_t  *pool;
@@ -449,6 +599,23 @@ typedef struct tc_decoder {
     tc_rc_dec_t       rc_dec;         /* Range coder decoder (Phase 3) */
     tc_rc_ctx_t       rc_ctx[TC_NUM_CONTEXTS_RC]; /* Context model */
     int               use_entropy_coded; /* 1 = use RC, 0 = use EG */
+    int               use_v2;           /* 1 = bitstream v2 quadtree path */
+    int               cur_qp;           /* current frame QP (v2 decode) */
+    int               profile_enabled;  /* component timing enabled */
+    /* Reused v2 decode scratch. A decoder instance is single-consumer;
+     * callers must not invoke decode concurrently. Keeping these outside
+     * qt_dec_leaf avoids repeated large stack frames. */
+    tc_pixel_t        v2_pred[TC_CTU_SIZE * TC_CTU_SIZE];
+    tc_pixel_t        v2_cbuf[2][(TC_CTU_SIZE/2) * (TC_CTU_SIZE/2)];
+    tc_pixel_t        v2_bipred_a[TC_CTU_SIZE * TC_CTU_SIZE];
+    tc_pixel_t        v2_bipred_b[TC_CTU_SIZE * TC_CTU_SIZE];
+    uint64_t          profile_parse_ns;
+    uint64_t          profile_coeff_ns;
+    uint64_t          profile_transform_ns;
+    uint64_t          profile_motion_ns;
+    uint64_t          profile_chroma_ns;
+    uint64_t          profile_deblock_ns;
+    uint64_t          profile_copy_ns;
     tc_bs_reader_t    bs;
     tc_ctu_info_t    *ctu_data;
     int32_t           num_ctu_cols;

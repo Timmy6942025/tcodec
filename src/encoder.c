@@ -14,6 +14,7 @@
  */
 
 #include "tcodec_common.h"
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -32,7 +33,7 @@ static TCODEC_FORCEINLINE void enc_write_bits(
     int base_ctx, uint32_t val, int nbits)
 {
     if (rc) tc_rc_enc_bits(rc, ctx, base_ctx, val, nbits);
-    else    tc_bs_writer_write_bits(bs, val, nbits);
+    else if (bs) tc_bs_writer_write_bits(bs, val, nbits);
 }
 
 static TCODEC_FORCEINLINE void enc_write_se(
@@ -46,7 +47,7 @@ static TCODEC_FORCEINLINE void enc_write_se(
         else if (val < 0)  mapped = (uint32_t)(-2 * val);
         else               mapped = 0;
         tc_rc_enc_ue(rc, ctx, base_ctx, mapped);
-    } else {
+    } else if (bs) {
         tc_bs_writer_write_se(bs, val);
     }
 }
@@ -57,7 +58,7 @@ static TCODEC_FORCEINLINE void enc_write_coeffs(
     const tc_coeff_t *coeffs, int n, tc_block_size_t dct_size)
 {
     if (rc) tc_rc_enc_coeffs(rc, rc_ctx, coeffs, n, dct_size);
-    else    tc_tans_enc_coeffs(tans, coeffs, n, dct_size);
+    else if (tans) tc_tans_enc_coeffs(tans, coeffs, n, dct_size);
     (void)bs;
 }
 
@@ -162,6 +163,662 @@ static const tc_frame_buf_t *dpb_find_poc_gt(const tc_ref_entry_t *dpb, int poc)
     return best;
 }
 
+/* ════════════════════════════════════════════════════════════════
+ * Bitstream v2 quadtree coding path (D5/D7)
+ * ────────────────────────────────────────────────────────────────
+ * A CTU (64×64) is coded as a quadtree of CUs with sizes 64/32/16/8.
+ * Every CU is RD-selected among {skip, merge, inter, intra, bi}; each
+ * luma residual transform unit is RD-selected between 4×4 and 8×8;
+ * chroma uses 4×4 transforms with neighbor-DC intra or collocated
+ * chroma motion compensation.  See docs/BITSTREAM.md §v2.
+ *
+ * The encoder runs two passes:
+ *   1. qt_split (decide)  — recursive RD search, fills the decision
+ *      tree and the reconstructed frame, writing nothing.
+ *   2. qt_write (write)   — replays the decision tree and emits the
+ *      exact same syntax, reconstructing identically for in-loop
+ *      filters and subsequent CUs.
+ *
+ * Both passes share tc_encode_cu_*, so they cannot drift.
+ * ══════════════════════════════════════════════════════════════ */
+
+enum { QT_DECIDE = 0, QT_WRITE = 1, QT_REPLAY = 2 };
+
+typedef struct {
+    tc_encoder_t    *enc;
+    int              ctu_x, ctu_y;
+    int              qp, qp_c;
+    int64_t          lambda;
+    tc_frame_type_t  frame_type;
+    int              poc;
+    tc_bs_writer_t  *bs;
+    tc_tans_enc_t   *tans;
+    tc_rc_enc_t     *rc;
+    tc_rc_ctx_t     *rc_ctx;
+    qt_node_t       *node;
+    qt_mvcell_t     *grid;
+    /* Reused only by QT_DECIDE full-RDO leaves; fast leaves do not copy
+     * these buffers. Keeping them in the CTU context avoids a large stack
+     * allocation in every recursive leaf invocation. */
+    uint8_t          pre_luma[TC_CTU_SIZE * TC_CTU_SIZE];
+    uint8_t          pre_cb[(TC_CTU_SIZE / 2) * (TC_CTU_SIZE / 2)];
+    uint8_t          pre_cr[(TC_CTU_SIZE / 2) * (TC_CTU_SIZE / 2)];
+    qt_mvcell_t      pre_grid[TC_MVGRID_STRIDE * TC_MVGRID_STRIDE];
+} qt_enc_t;
+
+/* Row-wise copy helpers for the v2 quadtree path.  Frame strides are
+ * wider than a CU (e.g. 320 for a 320-wide frame), so a raw memcpy of
+ * cu*cu bytes from recon + py*stride + px would read one row plus
+ * garbage from the neighbouring columns.  All snapshot save/restore
+ * and split save/restore goes through these. */
+static void qt_copy_rows(uint8_t *dst_row_major, const uint8_t *src, int src_stride,
+                         int x, int y, int size)
+{
+    for (int r = 0; r < size; r++)
+        memcpy(dst_row_major + (size_t)r * size,
+               src + (size_t)(y + r) * src_stride + x, (size_t)size);
+}
+
+static void qt_paste_rows(uint8_t *dst, int dst_stride, int x, int y,
+                          const uint8_t *src_row_major, int size)
+{
+    for (int r = 0; r < size; r++)
+        memcpy(dst + (size_t)(y + r) * dst_stride + x,
+               src_row_major + (size_t)r * size, (size_t)size);
+}
+
+/* Save/restore the in-frame portion of a CTU. Partial CTUs cannot use a
+ * raw 64×64 copy because the frame allocation ends at width/height. */
+static void qt_copy_rect(uint8_t *dst, int dst_stride,
+                         const uint8_t *src, int src_stride,
+                         int x, int y, int width, int height, int max_size)
+{
+    int w = tc_clip(width - x, 0, max_size);
+    int h = tc_clip(height - y, 0, max_size);
+    for (int r = 0; r < h; r++)
+        memcpy(dst + (size_t)r * dst_stride,
+               src + (size_t)(y + r) * src_stride + x, (size_t)w);
+}
+
+static void qt_paste_rect(uint8_t *dst, int dst_stride, int x, int y,
+                          const uint8_t *src, int src_stride,
+                          int width, int height, int max_size)
+{
+    int w = tc_clip(width - x, 0, max_size);
+    int h = tc_clip(height - y, 0, max_size);
+    for (int r = 0; r < h; r++)
+        memcpy(dst + (size_t)(y + r) * dst_stride + x,
+               src + (size_t)r * src_stride, (size_t)w);
+}
+
+static int count_coeff_bits(const tc_coeff_t *c, int n)
+{
+    int bits = 0;
+    for (int i = 0; i < n; i++) {
+        int v = c[i];
+        if (v == 0) { bits += 1; continue; }
+        int a = v < 0 ? -v : v;
+        bits += 1 + 2 * (32 - __builtin_clz(a)) + 1;
+    }
+    return bits;
+}
+
+static tc_mv_s qt_mvp(qt_enc_t *e, int cx, int cy, const qt_mvcell_t *grid)
+{
+    tc_mv_s a={0,0}, b={0,0}, c={0,0};
+    int ha=0, hb=0, hc=0;
+    if (cx > 0)     { const qt_mvcell_t *m=&grid[cy*TC_MVGRID_STRIDE+(cx-1)]; if(!m->intra){a.x=m->dx;a.y=m->dy;ha=1;} }
+    if (cy > 0)     { const qt_mvcell_t *m=&grid[(cy-1)*TC_MVGRID_STRIDE+cx]; if(!m->intra){b.x=m->dx;b.y=m->dy;hb=1;} }
+    if (cy > 0 && cx < 7) { const qt_mvcell_t *m=&grid[(cy-1)*TC_MVGRID_STRIDE+(cx+1)]; if(!m->intra){c.x=m->dx;c.y=m->dy;hc=1;} }
+    if (!ha && !hb && !hc) return (tc_mv_s){0,0};
+    if (!ha) a = hb ? b : c;
+    if (!hb) b = ha ? a : c;
+    if (!hc) c = ha ? a : b;
+    int px,py;
+    { int t,x[3]={a.x,b.x,c.x}; if(x[0]>x[1]){t=x[0];x[0]=x[1];x[1]=t;} if(x[1]>x[2]){t=x[1];x[1]=x[2];x[2]=t;} if(x[0]>x[1]){t=x[0];x[0]=x[1];x[1]=t;} px=x[1]; }
+    { int t,y[3]={a.y,b.y,c.y}; if(y[0]>y[1]){t=y[0];y[0]=y[1];y[1]=t;} if(y[1]>y[2]){t=y[1];y[1]=y[2];y[2]=t;} if(y[0]>y[1]){t=y[0];y[0]=y[1];y[1]=t;} py=y[1]; }
+    return (tc_mv_s){px,py};
+}
+
+static int64_t qt_code_chroma(qt_enc_t *e, int px, int py, int cu,
+                              uint8_t intra, const tc_pixel_t *pred[2],
+                              int *bits_out, int write)
+{
+    tc_encoder_t *enc = e->enc;
+    int qp = e->qp_c, cs = cu/2;
+    int64_t distortion = 0;
+    int bits = 0;
+    const tc_pixel_t *orig[2] = { enc->cur->cb, enc->cur->cr };
+    tc_pixel_t *rec[2]  = { enc->recon->cb, enc->recon->cr };
+    int rs = enc->recon->stride_c;
+    for (int comp = 0; comp < 2; comp++) {
+        for (int ty = 0; ty < cs/4; ty++)
+            for (int tx = 0; tx < cs/4; tx++) {
+                int ox=tx*4, oy=ty*4;
+                tc_coeff_t res[16];
+                for (int y=0;y<4;y++) for (int x=0;x<4;x++)
+                    res[y*4+x]=(tc_coeff_t)tc_clip(
+                        (int)orig[comp][(py/2+oy+y)*rs+(px/2+ox+x)]-(int)pred[comp][(oy+y)*cs+(ox+x)],-512,511);
+                 tc_coeff_t c4[16];
+                 tc_fdct4x4_res(res,4,c4);
+                 int eff4_band[4];
+                 for (int band = 0; band < 4; band++) eff4_band[band] = tc_eff_scale(qp, band, 0);
+                 int nz=0;
+                 for (int i=0;i<16;i++){ int band=tc_freq_band(i,4); c4[i]=(tc_coeff_t)tc_quant_coeff(c4[i],eff4_band[band]); if(c4[i]) nz++; }
+                 /* Coeffs follow the same entropy path as every other
+                  * v2 syntax element (range coder when rc!=NULL, EG
+                  * otherwise) so encoder and decoder can never drift. */
+                 if (write) enc_write_coeffs(e->bs,e->tans,e->rc,e->rc_ctx, c4, 16, TC_BLOCK_4x4_ID);
+                 else bits += 1 + 2*nz + count_coeff_bits(c4,16);
+                 tc_coeff_t iq[16];
+                 for (int i=0;i<16;i++){ int band=tc_freq_band(i,4); iq[i]=(tc_coeff_t)tc_dequant_coeff(c4[i],eff4_band[band]); }
+                tc_coeff_t recs[16];
+                tc_idct4x4_res(iq,recs,4);
+                for (int y=0;y<4;y++) for (int x=0;x<4;x++){
+                    int v=(int)pred[comp][(oy+y)*cs+(ox+x)]+recs[y*4+x];
+                    tc_pixel_t rv=(tc_pixel_t)tc_clip(v,0,255);
+                    rec[comp][(py/2+oy+y)*rs+(px/2+ox+x)]=rv;
+                    int d=(int)orig[comp][(py/2+oy+y)*rs+(px/2+ox+x)]-rv; distortion += d*d;
+                }
+            }
+    }
+    *bits_out = bits;
+    return distortion;
+}
+
+static int64_t qt_code_luma(qt_enc_t *e, int px, int py, int cu,
+                            uint8_t dct_size, const tc_pixel_t *pred,
+                            int *bits_out, int write)
+{
+    tc_encoder_t *enc = e->enc;
+    int qp = e->qp, ntu = cu/8;
+    int64_t distortion = 0;
+    int bits = 0;
+    const tc_pixel_t *orig = enc->cur->y + py*enc->cur->stride_y + px;
+    int os = enc->cur->stride_y, rs = enc->recon->stride_y;
+    tc_coeff_t coeffs[64*64];
+    for (int ty=0;ty<ntu;ty++) for (int tx=0;tx<ntu;tx++){
+        int ox=tx*8, oy=ty*8;
+        tc_coeff_t res8[64];
+        for (int y=0;y<8;y++) for (int x=0;x<8;x++)
+            res8[y*8+x]=(tc_coeff_t)tc_clip((int)orig[(oy+y)*os+ox+x]-(int)pred[(oy+y)*cu+ox+x],-512,511);
+        if (dct_size == TC_BLOCK_8x8_ID) {
+            tc_coeff_t tu[64]; tc_fdct8x8_res(res8,8,tu);
+            int eff8_band[4];
+            for (int band = 0; band < 4; band++) eff8_band[band] = tc_eff_scale(qp, band, 0);
+            int nz=0;
+            for (int i=0;i<64;i++){ int band=tc_freq_band(i,8); tu[i]=(tc_coeff_t)tc_quant_coeff(tu[i],eff8_band[band]); coeffs[(ty*ntu+tx)*64+i]=tu[i]; if(tu[i]) nz++; }
+            if (write) { enc_write_bits(e->bs,e->rc,e->rc_ctx,RC_CTX_DCT_SIZE,TC_BLOCK_8x8_ID,1); enc_write_coeffs(e->bs,e->tans,e->rc,e->rc_ctx,coeffs+(ty*ntu+tx)*64,64,TC_BLOCK_8x8_ID); }
+            else bits += 1 + 2*nz + count_coeff_bits(coeffs+(ty*ntu+tx)*64,64);
+            tc_coeff_t iq[64];
+            for (int i=0;i<64;i++){ int band=tc_freq_band(i,8); iq[i]=(tc_coeff_t)tc_dequant_coeff(coeffs[(ty*ntu+tx)*64+i],eff8_band[band]); }
+            tc_idct8x8_res(iq,res8,8);
+            for (int y=0;y<8;y++) for (int x=0;x<8;x++){ int v=(int)pred[(oy+y)*cu+ox+x]+res8[y*8+x]; tc_pixel_t rv=(tc_pixel_t)tc_clip(v,0,255); enc->recon->y[(py+oy+y)*rs+(px+ox+x)]=rv; int d=(int)orig[(oy+y)*os+ox+x]-rv; distortion+=d*d; }
+        } else {
+            int base=(ty*ntu+tx)*64;
+            for (int q=0;q<4;q++){
+                int sx=(q&1)*4, sy=(q&2)*2;
+                tc_coeff_t res4[16];
+                for (int y=0;y<4;y++) for (int x=0;x<4;x++) res4[y*4+x]=(tc_coeff_t)tc_clip((int)res8[(sy+y)*8+(sx+x)],-512,511);
+                tc_coeff_t c4[16]; tc_fdct4x4_res(res4,4,c4);
+                int eff4_band[4];
+                for (int band = 0; band < 4; band++) eff4_band[band] = tc_eff_scale(qp, band, 0);
+                int nz=0;
+                for (int i=0;i<16;i++){ int band=tc_freq_band(i,4); c4[i]=(tc_coeff_t)tc_quant_coeff(c4[i],eff4_band[band]); coeffs[base+q*16+i]=c4[i]; if(c4[i]) nz++; }
+                if (write) { enc_write_bits(e->bs,e->rc,e->rc_ctx,RC_CTX_DCT_SIZE,TC_BLOCK_4x4_ID,1); enc_write_coeffs(e->bs,e->tans,e->rc,e->rc_ctx,coeffs+base+q*16,16,TC_BLOCK_4x4_ID); }
+                else bits += 1 + 2*nz + count_coeff_bits(coeffs+base+q*16,16);
+                tc_coeff_t iq4[16];
+                for (int i=0;i<16;i++){ int band=tc_freq_band(i,4); iq4[i]=(tc_coeff_t)tc_dequant_coeff(c4[i],eff4_band[band]); }
+                tc_coeff_t rec4[16];
+                tc_idct4x4_res(iq4,rec4,4);
+                for (int y=0;y<4;y++) for (int x=0;x<4;x++){ int v=(int)pred[(oy+sy+y)*cu+(ox+sx+x)]+rec4[y*4+x]; tc_pixel_t rv=(tc_pixel_t)tc_clip(v,0,255); enc->recon->y[(py+oy+sy+y)*rs+(px+ox+sx+x)]=rv; int d=(int)orig[(oy+sy+y)*os+(ox+sx+x)]-rv; distortion+=d*d; }
+            }
+        }
+    }
+    *bits_out = bits;
+    return distortion;
+}
+
+static uint8_t qt_choose_dct(const tc_pixel_t *pred, int cu)
+{
+    int32_t sum=0,sumsq=0,n=cu*cu;
+    for (int i=0;i<n;i++){ int v=pred[i]; sum+=v; sumsq+=v*v; }
+    int var = sumsq/n - (sum/n)*(sum/n);
+    return (var > VARIANCE_THRESHOLD) ? TC_BLOCK_4x4_ID : TC_BLOCK_8x8_ID;
+}
+
+static int64_t qt_leaf(qt_enc_t *e, int depth, int cx, int cy, int write)
+{
+    qt_node_t *nd = &e->node[tc_qt_index(depth,cx,cy)];
+    int cu = 8 << (TC_QT_MAX_DEPTH-depth);
+    int px = e->ctu_x + cx*8, py = e->ctu_y + cy*8;
+    tc_encoder_t *enc = e->enc;
+    tc_pixel_t pred[64*64];
+    const tc_pixel_t *cpred[2]; tc_pixel_t cbuf[2][32*32];
+    int fast_mode = (enc->cfg.preset <= TC_PRESET_FAST);
+    if (!write && !fast_mode) {
+        qt_copy_rect(e->pre_luma, TC_CTU_SIZE, enc->recon->y, enc->recon->stride_y,
+                     px, py, enc->cfg.width, enc->cfg.height, cu);
+        qt_copy_rect(e->pre_cb, TC_CTU_SIZE / 2, enc->recon->cb, enc->recon->stride_c,
+                     px / 2, py / 2, enc->cfg.width / 2, enc->cfg.height / 2, cu / 2);
+        qt_copy_rect(e->pre_cr, TC_CTU_SIZE / 2, enc->recon->cr, enc->recon->stride_c,
+                     px / 2, py / 2, enc->cfg.width / 2, enc->cfg.height / 2, cu / 2);
+        int cs0 = cu / 8;
+        for (int gy = 0; gy < cs0; gy++)
+            memcpy(e->pre_grid + gy * cs0,
+                   e->grid + (cy + gy) * TC_MVGRID_STRIDE + cx,
+                   (size_t)cs0 * sizeof(qt_mvcell_t));
+    }
+    cpred[0]=cbuf[0]; cpred[1]=cbuf[1];
+    int bits_dummy;
+
+    if (write != QT_DECIDE) {
+        if (write == QT_WRITE)
+            enc_write_bits(e->bs,e->rc,e->rc_ctx,RC_CTX_QT_SPLIT+depth,nd->split,1);
+        if (nd->split) return 0;
+        uint8_t intra = nd->intra;
+        if (write == QT_WRITE)
+            enc_write_bits(e->bs,e->rc,e->rc_ctx,RC_CTX_BLOCK_MODE,intra,1);
+        if (intra) {
+            if (write == QT_WRITE) {
+                enc_write_bits(e->bs,e->rc,e->rc_ctx,RC_CTX_INTRA_MODE,nd->intra_mode,5);
+                enc_write_bits(e->bs,e->rc,e->rc_ctx,RC_CTX_BLOCK_MODE,nd->ch_intra,1);
+                if (nd->ch_intra) enc_write_bits(e->bs,e->rc,e->rc_ctx,RC_CTX_INTRA_MODE,nd->intra_cmode,3);
+            }
+            /* Replay starts from the CTU state restored once by qt_split;
+             * per-leaf snapshots are unnecessary because leaves are emitted
+             * in the same raster order the decoder consumes them. */
+            tc_pixel_t ra[2*64+1], rl[2*64+1];
+            tc_intra_get_ref_v2(enc->recon->y, enc->recon->stride_y, px,py,cu, enc->cfg.width, enc->cfg.height, ra+1, rl+1);
+            tc_intra_predict(pred, cu, ra+1, rl+1, cu, (tc_intra_mode_t)nd->intra_mode);
+            qt_code_luma(e,px,py,cu,nd->dct_size,pred,&bits_dummy,write == QT_WRITE);
+            if (nd->ch_intra) {
+                tc_intra_chroma_dc(enc->recon->cb,enc->recon->stride_c,px/2,py/2,cu/2,cbuf[0],cu/2);
+                tc_intra_chroma_dc(enc->recon->cr,enc->recon->stride_c,px/2,py/2,cu/2,cbuf[1],cu/2);
+            } else {
+                tc_mv_s mv = qt_mvp(e,cx,cy,e->grid); mv.x+=px*4; mv.y+=py*4;
+                if (enc->dpb[0].frame) {
+                    tc_inter_predict_chroma(enc->dpb[0].frame->cb,enc->dpb[0].frame->stride_c, enc->cfg.width/2,enc->cfg.height/2,mv,cbuf[0],cu/2,cu/2);
+                    tc_inter_predict_chroma(enc->dpb[0].frame->cr,enc->dpb[0].frame->stride_c, enc->cfg.width/2,enc->cfg.height/2,mv,cbuf[1],cu/2,cu/2);
+                } else {
+                    tc_intra_chroma_dc(enc->recon->cb,enc->recon->stride_c,px/2,py/2,cu/2,cbuf[0],cu/2);
+                    tc_intra_chroma_dc(enc->recon->cr,enc->recon->stride_c,px/2,py/2,cu/2,cbuf[1],cu/2);
+                }
+            }
+            qt_code_chroma(e,px,py,cu,1,cpred,&bits_dummy,write == QT_WRITE);
+        } else {
+            if (write == QT_WRITE) {
+                if (e->frame_type==TC_FRAME_BIDIR) { enc_write_bits(e->bs,e->rc,e->rc_ctx,RC_CTX_REF_SEL,nd->ref_sel,1); enc_write_bits(e->bs,e->rc,e->rc_ctx,RC_CTX_BLOCK_MODE,nd->bi,1); }
+                if (nd->skip) { enc_write_bits(e->bs,e->rc,e->rc_ctx,RC_CTX_SKIP_FLAG,1,1); }
+                else if (nd->merge) { enc_write_bits(e->bs,e->rc,e->rc_ctx,RC_CTX_SKIP_FLAG,0,1); enc_write_bits(e->bs,e->rc,e->rc_ctx,RC_CTX_MERGE_FLAG,1,1); }
+                else { enc_write_bits(e->bs,e->rc,e->rc_ctx,RC_CTX_SKIP_FLAG,0,1); enc_write_bits(e->bs,e->rc,e->rc_ctx,RC_CTX_MERGE_FLAG,0,1); enc_write_bits(e->bs,e->rc,e->rc_ctx,RC_CTX_DCT_SIZE,nd->dct_size,1); enc_write_se(e->bs,e->rc,e->rc_ctx,RC_CTX_MVD_X,nd->mvd_x); enc_write_se(e->bs,e->rc,e->rc_ctx,RC_CTX_MVD_Y,nd->mvd_y); }
+            }
+            tc_mv_s mvp = qt_mvp(e,cx,cy,e->grid);
+            tc_mv_s mv = { mvp.x+px*4+nd->mvd_x, mvp.y+py*4+nd->mvd_y };
+            if (nd->merge || nd->skip) { mv=mvp; mv.x+=px*4; mv.y+=py*4; }
+            if (!nd->skip) {
+                if (e->frame_type==TC_FRAME_BIDIR) {
+                    const tc_frame_buf_t *r1 = nd->ref_sel?enc->dpb[1].frame:enc->dpb[0].frame;
+                    const tc_frame_buf_t *r2 = nd->ref_sel?enc->dpb[0].frame:enc->dpb[1].frame;
+                    tc_pixel_t t1[64*64],t2[64*64];
+                    tc_inter_predict(r1->y,r1->stride_y,enc->cfg.width,enc->cfg.height,mv,t1,cu,cu);
+                    tc_mv_s mv2={-mv.x,-mv.y}; tc_inter_predict(r2->y,r2->stride_y,enc->cfg.width,enc->cfg.height,mv2,t2,cu,cu);
+                    for (int i=0;i<cu*cu;i++) pred[i]=(tc_pixel_t)((t1[i]+t2[i]+1)>>1);
+                } else { tc_inter_predict(enc->dpb[0].frame->y,enc->dpb[0].frame->stride_y, enc->cfg.width,enc->cfg.height,mv,pred,cu,cu); }
+                qt_code_luma(e,px,py,cu,nd->dct_size,pred,&bits_dummy,write == QT_WRITE);
+                if (nd->ch_intra) {
+                    tc_intra_chroma_dc(enc->recon->cb,enc->recon->stride_c,px/2,py/2,cu/2,cbuf[0],cu/2);
+                    tc_intra_chroma_dc(enc->recon->cr,enc->recon->stride_c,px/2,py/2,cu/2,cbuf[1],cu/2);
+                } else {
+                    tc_inter_predict_chroma(enc->dpb[0].frame->cb,enc->dpb[0].frame->stride_c, enc->cfg.width/2,enc->cfg.height/2,mv,cbuf[0],cu/2,cu/2);
+                    tc_inter_predict_chroma(enc->dpb[0].frame->cr,enc->dpb[0].frame->stride_c, enc->cfg.width/2,enc->cfg.height/2,mv,cbuf[1],cu/2,cu/2);
+                }
+                qt_code_chroma(e,px,py,cu,0,cpred,&bits_dummy,write == QT_WRITE);
+            } else {
+                tc_inter_predict(enc->dpb[0].frame->y,enc->dpb[0].frame->stride_y, enc->cfg.width,enc->cfg.height,mv,pred,cu,cu);
+                for (int i=0;i<cu*cu;i++) enc->recon->y[(py+i/cu)*enc->recon->stride_y+(px+i%cu)]=pred[i];
+            }
+        }
+
+        /* Rebuild the MV predictor grid incrementally during the write
+         * pass.  The decision pass leaves e->grid containing the final
+         * state of the whole CTU; using that state directly would make
+         * later written leaves derive a different MVP from the decoder,
+         * which consumes the tree in raster order. */
+        {
+            int cs = cu / 8;
+            if (nd->intra) {
+                for (int gy = 0; gy < cs; gy++)
+                    for (int gx = 0; gx < cs; gx++)
+                        e->grid[(cy + gy) * TC_MVGRID_STRIDE + (cx + gx)].intra = 1;
+            } else {
+                tc_mv_s gmvp = qt_mvp(e, cx, cy, e->grid);
+                int base_x = gmvp.x + px * 4 + ((nd->merge || nd->skip) ? 0 : nd->mvd_x);
+                int base_y = gmvp.y + py * 4 + ((nd->merge || nd->skip) ? 0 : nd->mvd_y);
+                for (int gy = 0; gy < cs; gy++)
+                    for (int gx = 0; gx < cs; gx++) {
+                        qt_mvcell_t *g = &e->grid[(cy + gy) * TC_MVGRID_STRIDE + (cx + gx)];
+                        g->intra = 0;
+                        g->dx = (int16_t)(base_x - (px + gx * 8) * 4);
+                        g->dy = (int16_t)(base_y - (py + gy * 8) * 4);
+                    }
+            }
+        }
+        return 0;
+    }
+
+    tc_pixel_t ra[2*64+1], rl[2*64+1];
+    tc_intra_get_ref_v2(enc->recon->y, enc->recon->stride_y, px,py,cu, enc->cfg.width, enc->cfg.height, ra+1, rl+1);
+    int best_cost = 0x7FFFFFFF;
+    uint8_t b_intra=0,b_bi=0,b_refsel=0,b_dct=TC_BLOCK_8x8_ID,b_skip=0,b_merge=0,b_ch=0;
+    int b_imode=1,b_cmode=0,b_mvdx=0,b_mvdy=0;
+
+    b_skip=0; b_merge=0;  /* keyframes are intra-only */
+    if (e->frame_type != TC_FRAME_KEY) {
+        tc_mv_s mvp = qt_mvp(e,cx,cy,e->grid);
+        /* v2 presets deliberately trade RDO breadth for predictable ARM
+         * encode time. Fast uses a compact search; medium retains the
+         * broader search used by the original v2 path. */
+        int sr = (enc->cfg.preset <= TC_PRESET_FAST) ? 16 : 32;
+        tc_mv_s center = { mvp.x+px*4, mvp.y+py*4 };
+        tc_sad_t sad; tc_mv_s bm = tc_motion_est(enc->dpb[0].frame->y, enc->dpb[0].frame->stride_y, enc->cfg.width,enc->cfg.height, enc->cur->y+py*enc->cur->stride_y+px, enc->cur->stride_y, center.x>>2, center.y>>2, cu, sr, &sad);
+        tc_mv_s disp = { bm.x-(mvp.x+px*4), bm.y-(mvp.y+py*4) };
+        tc_inter_predict(enc->dpb[0].frame->y,enc->dpb[0].frame->stride_y, enc->cfg.width,enc->cfg.height,bm,pred,cu,cu);
+        int lb = 0;
+        int64_t dl;
+        if (fast_mode) {
+            /* Fast presets screen the single ME candidate without
+             * reconstructing it.  The selected leaf is reconstructed
+             * exactly once by QT_REPLAY below. */
+            int64_t sad_proxy = tc_sad(enc->cur->y + py * enc->cur->stride_y + px,
+                                       enc->cur->stride_y, pred, cu, cu);
+            dl = (sad_proxy * sad_proxy) / (int64_t)(cu * cu);
+            lb = 1 + 2;
+        } else {
+            dl = qt_code_luma(e,px,py,cu,TC_BLOCK_8x8_ID,pred,&lb,0);
+        }
+        int bits_inter = 1 + 1 + 1 + 1 + 2 + (tc_bs_se_bits(disp.x)+tc_bs_se_bits(disp.y)) + lb;
+        int cost = (int)(((dl + e->lambda*bits_inter)>>16)&0x7FFFFFFF);
+        if (cost < best_cost) { best_cost=cost; b_intra=0;b_skip=0;b_merge=0;b_dct=TC_BLOCK_8x8_ID; b_mvdx=disp.x;b_mvdy=disp.y;b_refsel=0;b_bi=0;b_ch=0; b_cmode=0;b_imode=1; }
+        if (enc->cfg.preset >= TC_PRESET_MEDIUM) {
+            tc_mv_s mm={mvp.x+px*4,mvp.y+py*4}; tc_inter_predict(enc->dpb[0].frame->y,enc->dpb[0].frame->stride_y, enc->cfg.width,enc->cfg.height,mm,pred,cu,cu);
+            int64_t dl2 = qt_code_luma(e,px,py,cu,TC_BLOCK_8x8_ID,pred,&lb,0);
+            int bits_merge = 1+1+1+1+1+1+lb;
+            int cost2=(int)(((dl2+e->lambda*bits_merge)>>16)&0x7FFFFFFF);
+            if (cost2<best_cost) { best_cost=cost2;b_intra=0;b_merge=1;b_skip=0;b_mvdx=disp.x;b_mvdy=disp.y; b_dct=TC_BLOCK_8x8_ID;b_ch=0;b_cmode=0;b_imode=1;b_refsel=0;b_bi=0; }
+        }
+    }
+
+    /* Keyframes have no reference frame; always provide an intra
+     * candidate, including the root 64x64 CU on ultrafast. */
+    int try_intra = (e->frame_type == TC_FRAME_KEY) ||
+                    (cu <= 16) || (enc->cfg.preset >= TC_PRESET_MEDIUM);
+    if (try_intra) {
+        /* Fast/medium v2 presets use a cheap SAD screen for intra modes;
+         * only the winning predictor is transformed and reconstructed.
+         * Medium/slow retain full residual RDO for every mode. */
+        int fast_intra = enc->cfg.preset <= TC_PRESET_FAST;
+        int mode_step = enc->cfg.preset == TC_PRESET_ULTRAFAST ? 6 :
+                        (enc->cfg.preset == TC_PRESET_FAST ? 3 : 1);
+        const tc_pixel_t *orig_luma = enc->cur->y + py * enc->cur->stride_y + px;
+        int best_imode = b_imode;
+        for (int m=0;m<TC_INTRA_MODES;m += mode_step){
+            tc_intra_predict(pred,cu,ra+1,rl+1,cu,(tc_intra_mode_t)m);
+            int lb = 0;
+            int64_t dl;
+            if (fast_intra) {
+                int64_t sad = tc_sad(orig_luma, enc->cur->stride_y, pred, cu, cu);
+                dl = (sad * sad) / (int64_t)(cu * cu);
+                lb = 1 + 5 + 1 + 1;
+            } else {
+                dl = qt_code_luma(e,px,py,cu,TC_BLOCK_8x8_ID,pred,&lb,0);
+            }
+            int bits = 1 + 5 + 1 + 1 + lb;
+            int cost=(int)(((dl+e->lambda*bits)>>16)&0x7FFFFFFF);
+            if (cost<best_cost){ best_cost=cost;b_intra=1;best_imode=m;b_dct=TC_BLOCK_8x8_ID; b_skip=0;b_merge=0;b_mvdx=0;b_mvdy=0;b_ch=0;b_cmode=0;b_refsel=0;b_bi=0; }
+        }
+        if (b_intra)
+            b_imode = best_imode;
+    }
+
+    nd->intra=b_intra; nd->skip=b_skip; nd->merge=b_merge; nd->bi=b_bi;
+    nd->intra_mode=(uint8_t)b_imode; nd->intra_cmode=(uint8_t)b_cmode;
+    nd->ch_intra=b_ch; nd->ref_sel=(uint8_t)b_refsel; nd->dct_size=b_dct;
+    nd->mvd_x=(int16_t)b_mvdx; nd->mvd_y=(int16_t)b_mvdy;
+
+    /* Candidate coding mutates recon while estimating distortion. Restore
+     * the pre-leaf state and replay only the winning candidate so later
+     * leaves see the same pixels as the decoder. Fast screening does not
+     * mutate reconstruction, but still needs the same selected replay. */
+    if (!write) {
+        if (!fast_mode) {
+            qt_paste_rect(enc->recon->y, enc->recon->stride_y, px, py,
+                          e->pre_luma, TC_CTU_SIZE, enc->cfg.width, enc->cfg.height, cu);
+            qt_paste_rect(enc->recon->cb, enc->recon->stride_c, px / 2, py / 2,
+                          e->pre_cb, TC_CTU_SIZE / 2, enc->cfg.width / 2, enc->cfg.height / 2, cu / 2);
+            qt_paste_rect(enc->recon->cr, enc->recon->stride_c, px / 2, py / 2,
+                          e->pre_cr, TC_CTU_SIZE / 2, enc->cfg.width / 2, enc->cfg.height / 2, cu / 2);
+            int cs0 = cu / 8;
+            for (int gy = 0; gy < cs0; gy++)
+                memcpy(e->grid + (cy + gy) * TC_MVGRID_STRIDE + cx,
+                       e->pre_grid + gy * cs0,
+                       (size_t)cs0 * sizeof(qt_mvcell_t));
+        }
+        /* QT_REPLAY reconstructs only: all syntax helpers receive
+         * write == QT_WRITE (false), so the real coder state remains
+         * untouched and replay cannot silently discard syntax. */
+        nd->split = 0;
+        qt_leaf(e, depth, cx, cy, QT_REPLAY);
+    }
+
+    int cs = cu/8;
+
+    for (int y=0;y<cs;y++) for (int x=0;x<cs;x++){
+        qt_mvcell_t *g=e->grid + (cy+y)*TC_MVGRID_STRIDE + (cx+x);
+        if (b_intra) { g->intra=1; }
+        else { g->intra=0; tc_mv_s mvp = qt_mvp(e,cx,cy,e->grid);
+            g->dx = (int16_t)((mvp.x+px*4+ (b_merge||b_skip?0:b_mvdx)) - ((px+x*8)*4));
+            g->dy = (int16_t)((mvp.y+py*4+ (b_merge||b_skip?0:b_mvdy)) - ((py+y*8)*4)); }
+    }
+    return best_cost;
+}
+
+static void qt_split(qt_enc_t *e, int depth, int cx, int cy, int write)
+{
+    qt_node_t *nd = &e->node[tc_qt_index(depth,cx,cy)];
+    int cu = 8 << (TC_QT_MAX_DEPTH-depth);
+    int px = e->ctu_x + cx*8, py = e->ctu_y + cy*8;
+    int in_frame = (px+cu <= e->enc->cfg.width && py+cu <= e->enc->cfg.height);
+
+    /* Child offset in 8×8 cells is half the parent side: 2^(2-depth).
+     * (The old (q&2)<<(1-depth) form was UB at depth 2 and silently
+     * dropped the bottom half of every 16×16 CU.) */
+    if (!in_frame && cu > TC_QT_MIN_CU) {
+        for (int q=0;q<4;q++) qt_split(e,depth+1,cx+((q&1)<<(2-depth)),cy+((q>>1)<<(2-depth)),write);
+        return;
+    }
+    if (!in_frame) return;
+    if (write == QT_WRITE) {
+        qt_leaf(e, depth, cx, cy, QT_WRITE);
+        /* A split flag was written: the leaf's syntax stops there and
+         * the four children follow in raster order.  (Earlier versions
+         * returned unconditionally here, silently dropping every
+         * descendant's syntax and producing streams that decoded to
+         * flat mid-gray.) */
+        if (nd->split) {
+            for (int q = 0; q < 4; q++)
+                qt_split(e, depth + 1, cx + ((q & 1) << (2 - depth)),
+                         cy + ((q >> 1) << (2 - depth)), QT_WRITE);
+        }
+        return;
+    }
+
+    if (cu > TC_QT_MIN_CU) {
+        /* Fast v2 presets use a bounded partition structure instead of
+         * evaluating both the parent and all children. This avoids the
+         * recursive RDO multiplier on ARM while preserving normative
+         * quadtree syntax and exact decoder replay. p0 uses 8x8 leaves;
+         * p1 uses 16x16 leaves. */
+        int fast_leaf_depth = (e->enc->cfg.preset == TC_PRESET_ULTRAFAST) ? 3 : 2;
+        if (e->enc->cfg.preset <= TC_PRESET_FAST && depth < fast_leaf_depth) {
+            nd->split = 1;
+            for (int q = 0; q < 4; q++)
+                qt_split(e, depth + 1,
+                         cx + ((q & 1) << (2 - depth)),
+                         cy + ((q >> 1) << (2 - depth)), 0);
+            return;
+        }
+
+        uint8_t pre_l[64*64], pre_cb[32*32], pre_cr[32*32];
+        uint8_t parent_l[64*64], parent_cb[32*32], parent_cr[32*32];
+        int cs = cu / 8;
+        qt_mvcell_t pre_grid[8*8], parent_grid[8*8];
+
+        /* Save the state before either candidate.  Child RDO must not
+         * inherit the parent's reconstruction, and a rejected split must
+         * restore the parent's chosen reconstruction rather than the last
+         * speculative child. */
+        qt_copy_rows(pre_l, e->enc->recon->y, e->enc->recon->stride_y, px, py, cu);
+        qt_copy_rows(pre_cb, e->enc->recon->cb, e->enc->recon->stride_c, px/2, py/2, cu/2);
+        qt_copy_rows(pre_cr, e->enc->recon->cr, e->enc->recon->stride_c, px/2, py/2, cu/2);
+        for (int gy = 0; gy < cs; gy++)
+            memcpy(pre_grid + gy*cs, e->grid + (cy+gy)*TC_MVGRID_STRIDE + cx,
+                   (size_t)cs * sizeof(qt_mvcell_t));
+
+        int64_t parent = qt_leaf(e, depth, cx, cy, 0);
+        qt_copy_rows(parent_l, e->enc->recon->y, e->enc->recon->stride_y, px, py, cu);
+        qt_copy_rows(parent_cb, e->enc->recon->cb, e->enc->recon->stride_c, px/2, py/2, cu/2);
+        qt_copy_rows(parent_cr, e->enc->recon->cr, e->enc->recon->stride_c, px/2, py/2, cu/2);
+        for (int gy = 0; gy < cs; gy++)
+            memcpy(parent_grid + gy*cs, e->grid + (cy+gy)*TC_MVGRID_STRIDE + cx,
+                   (size_t)cs * sizeof(qt_mvcell_t));
+
+        qt_paste_rows(e->enc->recon->y, e->enc->recon->stride_y, px, py, pre_l, cu);
+        qt_paste_rows(e->enc->recon->cb, e->enc->recon->stride_c, px/2, py/2, pre_cb, cu/2);
+        qt_paste_rows(e->enc->recon->cr, e->enc->recon->stride_c, px/2, py/2, pre_cr, cu/2);
+        for (int gy = 0; gy < cs; gy++)
+            memcpy(e->grid + (cy+gy)*TC_MVGRID_STRIDE + cx, pre_grid + gy*cs,
+                   (size_t)cs * sizeof(qt_mvcell_t));
+
+        int64_t child = 0;
+        for (int q = 0; q < 4; q++)
+            child += qt_leaf(e, depth + 1,
+                             cx + ((q & 1) << (2 - depth)),
+                             cy + ((q >> 1) << (2 - depth)), 0);
+
+        if (child <= parent) {
+            nd->split = 1;
+            qt_paste_rows(e->enc->recon->y, e->enc->recon->stride_y, px, py, pre_l, cu);
+            qt_paste_rows(e->enc->recon->cb, e->enc->recon->stride_c, px/2, py/2, pre_cb, cu/2);
+            qt_paste_rows(e->enc->recon->cr, e->enc->recon->stride_c, px/2, py/2, pre_cr, cu/2);
+            for (int gy = 0; gy < cs; gy++)
+                memcpy(e->grid + (cy+gy)*TC_MVGRID_STRIDE + cx, pre_grid + gy*cs,
+                       (size_t)cs * sizeof(qt_mvcell_t));
+            for (int q = 0; q < 4; q++)
+                qt_split(e, depth + 1,
+                         cx + ((q & 1) << (2 - depth)),
+                         cy + ((q >> 1) << (2 - depth)), 0);
+        } else {
+            nd->split = 0;
+            qt_paste_rows(e->enc->recon->y, e->enc->recon->stride_y, px, py, parent_l, cu);
+            qt_paste_rows(e->enc->recon->cb, e->enc->recon->stride_c, px/2, py/2, parent_cb, cu/2);
+            qt_paste_rows(e->enc->recon->cr, e->enc->recon->stride_c, px/2, py/2, parent_cr, cu/2);
+            for (int gy = 0; gy < cs; gy++)
+                memcpy(e->grid + (cy+gy)*TC_MVGRID_STRIDE + cx, parent_grid + gy*cs,
+                       (size_t)cs * sizeof(qt_mvcell_t));
+        }
+    } else { qt_leaf(e,depth,cx,cy,0); nd->split=0; }
+}
+
+static void encode_ctu_v2(tc_encoder_t *enc, int row, int col, int qp,
+                          tc_frame_type_t frame_type, int poc,
+                          tc_bs_writer_t *bs, tc_tans_enc_t *tans,
+                          tc_rc_enc_t *rc, tc_rc_ctx_t *rc_ctx)
+{
+    qt_enc_t e; memset(&e,0,sizeof(e));
+    e.enc=enc; e.ctu_x=col*TC_CTU_SIZE; e.ctu_y=row*TC_CTU_SIZE;
+    e.qp=qp; e.qp_c=tc_clip(qp+1,0,63); e.lambda=(int64_t)tc_lambda(qp)<<16;
+    e.frame_type=frame_type; e.poc=poc; e.bs=bs; e.tans=tans; e.rc=rc; e.rc_ctx=rc_ctx;
+    e.node=enc->v2_node; e.grid=enc->v2_grid;
+    memset(e.node, 0, (size_t)TC_QT_NODES * sizeof(qt_node_t));
+    memset(e.grid, 0, (size_t)TC_MVGRID_STRIDE*TC_MVGRID_STRIDE * sizeof(qt_mvcell_t));
+    for (int i=0;i<TC_MVGRID_STRIDE*TC_MVGRID_STRIDE;i++) e.grid[i].intra=1;
+
+    /* Keep the CTU input state once for replay. This replaces the old
+     * per-leaf reconstruction snapshots; the decision pass may mutate the
+     * CTU many times, but the write pass needs the exact pre-CTU state. */
+    uint8_t pre_luma[TC_CTU_SIZE * TC_CTU_SIZE];
+    uint8_t pre_cb[(TC_CTU_SIZE/2) * (TC_CTU_SIZE/2)];
+    uint8_t pre_cr[(TC_CTU_SIZE/2) * (TC_CTU_SIZE/2)];
+    qt_copy_rect(pre_luma, TC_CTU_SIZE, enc->recon->y, enc->recon->stride_y,
+                 e.ctu_x, e.ctu_y, enc->cfg.width, enc->cfg.height, TC_CTU_SIZE);
+    qt_copy_rect(pre_cb, TC_CTU_SIZE / 2, enc->recon->cb, enc->recon->stride_c,
+                 e.ctu_x / 2, e.ctu_y / 2, enc->cfg.width / 2, enc->cfg.height / 2, TC_CTU_SIZE / 2);
+    qt_copy_rect(pre_cr, TC_CTU_SIZE / 2, enc->recon->cr, enc->recon->stride_c,
+                 e.ctu_x / 2, e.ctu_y / 2, enc->cfg.width / 2, enc->cfg.height / 2, TC_CTU_SIZE / 2);
+
+    qt_split(&e,0,0,0,0);
+    qt_paste_rect(enc->recon->y, enc->recon->stride_y, e.ctu_x, e.ctu_y,
+                  pre_luma, TC_CTU_SIZE, enc->cfg.width, enc->cfg.height, TC_CTU_SIZE);
+    qt_paste_rect(enc->recon->cb, enc->recon->stride_c, e.ctu_x / 2, e.ctu_y / 2,
+                  pre_cb, TC_CTU_SIZE / 2, enc->cfg.width / 2, enc->cfg.height / 2, TC_CTU_SIZE / 2);
+    qt_paste_rect(enc->recon->cr, enc->recon->stride_c, e.ctu_x / 2, e.ctu_y / 2,
+                  pre_cr, TC_CTU_SIZE / 2, enc->cfg.width / 2, enc->cfg.height / 2, TC_CTU_SIZE / 2);
+    /* The write pass must start with the same empty predictor grid that
+     * the decoder has before consuming this CTU.  The decision pass
+     * leaves e.grid in its final state, which is not valid for replay. */
+    memset(e.grid, 0, (size_t)TC_MVGRID_STRIDE * TC_MVGRID_STRIDE * sizeof(qt_mvcell_t));
+    for (int i = 0; i < TC_MVGRID_STRIDE * TC_MVGRID_STRIDE; i++)
+        e.grid[i].intra = 1;
+    qt_split(&e,0,0,0,QT_WRITE);
+    if (e.ctu_x+TC_CTU_SIZE <= enc->cfg.width && e.ctu_y+TC_CTU_SIZE <= enc->cfg.height)
+        tc_deblock_ctu(enc->recon->y, enc->recon->stride_y, enc->recon->cb, enc->recon->stride_c, enc->recon->cr, enc->recon->stride_c, e.ctu_x, e.ctu_y, qp);
+
+    /* v2 SAO syntax is emitted after deblocking, so the encoder and
+     * decoder apply the identical post-deblock operation.  The decision
+     * is deliberately a bounded one-band BO search; v0/v1 never carry it. */
+    {
+        int sao_band = 0, sao_offset = 0;
+        int has_sao = tc_sao_choose_bo(enc->cur->y, enc->cur->stride_y,
+                                       enc->recon->y, enc->recon->stride_y,
+                                       e.ctu_x, e.ctu_y,
+                                       enc->cfg.width, enc->cfg.height,
+                                       &sao_band, &sao_offset);
+        /* Account for the one-bit present flag, 5-bit band, and signed
+         * offset syntax in the selection cost. The helper already ensures
+         * the unfiltered SSE is strictly better before returning true. */
+        if (has_sao) {
+            int64_t no_sao_cost = 0;
+            int64_t sao_cost = 0;
+            int x1 = tc_min(e.ctu_x + TC_CTU_SIZE, enc->cfg.width);
+            int y1 = tc_min(e.ctu_y + TC_CTU_SIZE, enc->cfg.height);
+            for (int sy = e.ctu_y; sy < y1; ++sy) for (int sx = e.ctu_x; sx < x1; ++sx) {
+                int o = enc->cur->y[sy * enc->cur->stride_y + sx];
+                int r = enc->recon->y[sy * enc->recon->stride_y + sx];
+                int d0 = o - r;
+                int r1 = (tc_clip(r, 0, 255) >> 3) == sao_band ? tc_clip(r + sao_offset, 0, 255) : r;
+                int d1 = o - r1;
+                no_sao_cost += (int64_t)d0 * d0;
+                sao_cost += (int64_t)d1 * d1;
+            }
+            if (sao_cost + ((int64_t)tc_lambda(qp) * 10 >> 16) >= no_sao_cost)
+                has_sao = 0;
+        }
+        enc_write_bits(bs, rc, rc_ctx, RC_CTX_SAO_TYPE, (uint32_t)has_sao, 1);
+        if (has_sao) {
+            enc_write_bits(bs, rc, rc_ctx, RC_CTX_SAO_BAND, (uint32_t)sao_band, 5);
+            /* Offset is a bounded mapped nibble: 0..14 maps to -7..+7;
+             * 15 is reserved. Keeping this fixed-width avoids range-context
+             * aliasing at the end of the 64-entry context bank. */
+            enc_write_bits(bs, rc, rc_ctx, RC_CTX_SAO_OFFSET,
+                           (uint32_t)(sao_offset + 7), 4);
+            tc_sao_ctu_luma(enc->recon->y, enc->recon->stride_y,
+                            e.ctu_x, e.ctu_y, enc->cfg.width, enc->cfg.height,
+                            sao_band, sao_offset);
+        }
+    }
+}
+
 /* ── Encode one 8×8 block ───────────────────────────────────── */
 
 static void encode_block(tc_encoder_t *enc, tc_ctu_info_t *ctu,
@@ -201,8 +858,11 @@ static void encode_block(tc_encoder_t *enc, tc_ctu_info_t *ctu,
     tc_intra_mode_t best_intra = TC_INTRA_DC;
     tc_sad_t best_intra_sad = 0x7FFFFFFF;
 
-    /* Try all 18 intra modes */
-    for (int m = 0; m < TC_INTRA_MODES; m++) {
+    static const tc_intra_mode_t fast_modes[] = {
+        0, 1, 2, 5, 8, 9, 13, 17
+    };
+    for (int mi = 0; mi < 8; mi++) {
+        int m = fast_modes[mi];
         tc_pixel_t tmp_pred[64];
         tc_intra_predict(tmp_pred, blk_size,
                          ref_above + 1, ref_left + 1,
@@ -211,6 +871,23 @@ static void encode_block(tc_encoder_t *enc, tc_ctu_info_t *ctu,
         if (sad < best_intra_sad) {
             best_intra_sad = sad;
             best_intra = (tc_intra_mode_t)m;
+        }
+    }
+    if (best_intra_sad > 256) {
+        for (int m = 0; m < TC_INTRA_MODES; m++) {
+            int skip = 0;
+            for (int k = 0; k < 8; k++)
+                if (m == fast_modes[k]) { skip = 1; break; }
+            if (skip) continue;
+            tc_pixel_t tmp_pred[64];
+            tc_intra_predict(tmp_pred, blk_size,
+                             ref_above + 1, ref_left + 1,
+                             blk_size, (tc_intra_mode_t)m);
+            tc_sad_t sad = tc_intra_cost(orig_block, blk_size, tmp_pred, blk_size);
+            if (sad < best_intra_sad) {
+                best_intra_sad = sad;
+                best_intra = (tc_intra_mode_t)m;
+            }
         }
     }
 
@@ -231,18 +908,17 @@ static void encode_block(tc_encoder_t *enc, tc_ctu_info_t *ctu,
     tc_pixel_t inter_pred[64];
     int best_ref_idx = 0;
 
-    /* Merge MV: median of spatial neighbors (used for merge mode
-     * and as ME search center). Computed once, reused for all refs. */
-    tc_mv_s  merge_mv = {frame_x * 4, frame_y * 4};  /* Default: collocated */
+    tc_mv_s  merge_mv = {frame_x * 4, frame_y * 4};
     tc_sad_t merge_sad = 0x7FFFFFFF;
-    int merge_ref_sel = 0;      /* For B-frames: 0=fwd, 1=bwd */
+    int merge_ref_sel = 0;
     int merge_available = 0;
 
-    if (frame_type != TC_FRAME_KEY) {
-        /* Compute median MV predictor from spatial neighbors.
-         * Used as ME search center AND as merge mode candidate MV. */
-        if (blk_idx > 0) {
-            tc_mv_s mv_a = {0,0}, mv_b = {0,0}, mv_c = {0,0};
+     if (frame_type != TC_FRAME_KEY && best_intra_sad > 32) {
+
+         /* Compute median MV predictor from spatial neighbors.
+          * Used as ME search center AND as merge mode candidate MV. */
+         if (blk_idx > 0) {
+             tc_mv_s mv_a = {0,0}, mv_b = {0,0}, mv_c = {0,0};
             int have_a = 0, have_b = 0, have_c = 0;
             if (bx > 0) {
                 tc_block_info_t *left = &ctu->blocks[blk_idx - 1];
@@ -952,6 +1628,11 @@ static void encode_row(void *ctx, int row)
         ctu->col = col;
 
         /* For each 8×8 block in CTU */
+        if (enc->cfg.use_v2) {
+            encode_ctu_v2(enc, row, col, qp, rctx->frame_type, rctx->poc,
+                          bs, tans, rc, rc_ctx);
+            continue;
+        }
         for (int by = 0; by < TC_CTU_SIZE / 8; by++) {
             for (int bx = 0; bx < TC_CTU_SIZE / 8; bx++) {
                 int blk_x = ctu_x + bx * 8;
@@ -1037,6 +1718,11 @@ static void write_frame_header(tc_bs_writer_t *bs, tc_frame_header_t *hdr)
 
 tc_encoder_t *tc_encoder_create(const tc_config_t *config)
 {
+    if (!config) return NULL;
+    if (config->use_v2 &&
+        (config->width <= 0 || config->height <= 0 ||
+         (config->width & 1) || (config->height & 1)))
+        return NULL; /* v2 4:2:0 geometry must be positive and even */
     tc_encoder_t *enc = (tc_encoder_t *)calloc(1, sizeof(tc_encoder_t));
     if (!enc) return NULL;
 
@@ -1072,8 +1758,23 @@ tc_encoder_t *tc_encoder_create(const tc_config_t *config)
     /* Init entropy coding mode */
     enc->use_entropy_coded = config->enable_entropy_coded ? 1 : 0;
 
-    /* B-frame reorder state */
-    enc->bf.b_mode = config->enable_b_frames ? 1 : 0;
+    /* B-frame reorder state.  The v2 quadtree path does not implement
+     * B-frame reference selection (its RDO only searches dpb[0] and the
+     * BIDIR write path would dereference dpb[1] unconditionally), so
+     * B-frames are disabled for v2 streams.  This is a documented
+     * limitation; v2 syntax still reserves the ref_sel/bi bits. */
+    enc->bf.b_mode = (config->enable_b_frames && !config->use_v2) ? 1 : 0;
+
+    /* Bitstream v2 quadtree scratch (per-encoder, no shared statics) */
+    if (config->use_v2) {
+        enc->v2_node = (qt_node_t *)calloc((size_t)TC_QT_NODES, sizeof(qt_node_t));
+        enc->v2_grid = (qt_mvcell_t *)calloc(
+            (size_t)TC_MVGRID_STRIDE * TC_MVGRID_STRIDE, sizeof(qt_mvcell_t));
+        if (!enc->v2_node || !enc->v2_grid) {
+            tc_encoder_destroy(enc);
+            return NULL;
+        }
+    }
 
     /* Init rate control */
     tc_ratectl_init(&enc->rc, config);
@@ -1092,8 +1793,10 @@ tc_encoder_t *tc_encoder_create(const tc_config_t *config)
 
     /* Use WPP when there are multiple CTU rows and >1 thread.
      * Entropy coding (range coder, Phase 3) is not yet compatible
-     * with WPP — disable WPP when it is active. */
-    enc->use_wpp = (enc->num_ctu_rows > 1 && num_threads > 1 && !enc->use_entropy_coded) ? 1 : 0;
+     * with WPP — disable WPP when it is active.  v2 is also never
+     * WPP-coded (sequential by design, like all range-coded streams). */
+    enc->use_wpp = (enc->num_ctu_rows > 1 && num_threads > 1 &&
+                    !enc->use_entropy_coded && !config->use_v2) ? 1 : 0;
 
     if (enc->use_wpp) {
         /* Create thread pool */
@@ -1154,6 +1857,8 @@ void tc_encoder_destroy(tc_encoder_t *enc)
         tc_frame_free(enc->bf.frame[i]);
     }
     free(enc->ctu_data);
+    free(enc->v2_node);
+    free(enc->v2_grid);
     free(enc->out_buf);
 #if !defined(TCODEC_NO_THREADS)
     /* Free per-row bitstream buffers */
@@ -1268,6 +1973,7 @@ static tc_error_t encode_poc_frame(tc_encoder_t *enc,
     hdr.magic[1] = TC_MAGIC_1;
     hdr.magic[2] = TC_MAGIC_2;
     hdr.version  = enc->cfg.bitstream_version;
+    if (enc->cfg.use_v2) hdr.version = TC_VERSION_V2;
     hdr.width    = (uint16_t)enc->cfg.width;
     hdr.height   = (uint16_t)enc->cfg.height;
     hdr.flags    = is_key ? TC_FLAG_KEY_FRAME : 0;
@@ -1275,8 +1981,8 @@ static tc_error_t encode_poc_frame(tc_encoder_t *enc,
     if (enc->use_wpp) hdr.flags |= TC_FLAG_WPP;
 #endif
 
-    /* v1-specific header fields */
-    if (hdr.version == TC_VERSION_V1) {
+    /* v1/v2 header fields (v0 keeps its 12-byte legacy header) */
+    if (hdr.version != TC_VERSION_V0) {
         /* Random Access Point: all key frames are RAPs.
          * RAP frames can be decoded independently — no reference
          * to prior frames is needed. Essential for seek/seeking. */
@@ -1321,6 +2027,10 @@ static tc_error_t encode_poc_frame(tc_encoder_t *enc,
          * block syntax carries the ref_sel bit. */
         if (frame_type == TC_FRAME_BIDIR) {
             tools |= TC_TOOL_BIPRED;
+        }
+        /* v2 always carries one bounded SAO-present flag per CTU. */
+        if (enc->cfg.use_v2) {
+            tools |= TC_TOOL_SAO;
         }
         /* Future tools (not yet implemented):
          * TC_TOOL_DERINGING      — directional deringing (Phase 7)
@@ -1458,8 +2168,8 @@ static tc_error_t encode_poc_frame(tc_encoder_t *enc,
      * and contexts are propagated between rows. */
     (void)rc_ptr;
 
-    /* Append CRC-16 if v1 with TC_FLAG_CRC set */
-    if (hdr.version == TC_VERSION_V1 && hdr.has_crc) {
+    /* Append CRC-16 if the header carries TC_FLAG_CRC (v1/v2) */
+    if (hdr.version != TC_VERSION_V0 && hdr.has_crc) {
         /* CRC covers header + CTU data (everything up to but not
          * including the CRC bytes themselves). Compute from the
          * output buffer and append the 2-byte CRC. */

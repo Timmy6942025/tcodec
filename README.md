@@ -1,253 +1,129 @@
-# TCodec — A Novel Video Codec for ARM
+# TCodec — ARM-first research video codec
 
-**Target**: 4K@60fps encode+decode on Raspberry Pi 4 / mid-range phones  
-**Compression**: 20:1 with minimal quality loss  
-**Design**: ARM-NEON-first, integer-arithmetic-only, WPP-parallel
+TCodec is a deterministic C research codec for 8-bit planar YCbCr 4:2:0 video.
+It targets ARM/NEON deployment, but the current implementation remains a
+prototype: its real-content compression and ARM real-time decode targets are
+not yet met.
 
----
+## Verified feature set
 
-## Architecture Overview
+| Feature | Status |
+|---|---|
+| Versioned TCV packets | v0, v1, and explicit v2 quadtree payload |
+| Intra prediction | 18 luma modes |
+| Legacy transforms | 4×4/8×8 WHT for v0/v1 |
+| v2 transforms | Integer residual DCT path with shared quantization |
+| Inter prediction | Median-MV, skip/merge, multi-reference, 6-tap luma fallback |
+| B-frames | Hierarchical GOP4 reorder and bi-prediction infrastructure |
+| Entropy | Legacy Exp-Golomb path and context-modeled range-coded path |
+| Filtering | Deblocking plus v2 luma SAO Band Offset |
+| Rate control | CQP, CBR, and VBR prototype modes |
+| ARM path | NEON dispatch and scalar/NEON parity checks |
+| Regression suite | 51 codec tests plus container/integration tests |
 
-TCodec is a novel block-based hybrid video codec designed from the ground up for
-ARM NEON SIMD execution. Every algorithm choice prioritizes:
+Implemented does not mean competitive: see `BENCHMARKS.md` and
+`docs/FINISH_Tier1.md` for measured limitations and gate status.
 
-1. **NEON-vectorizable operations** — no branch-heavy scalar paths
-2. **Integer-only arithmetic** — fixed-point DCT, table-driven entropy
-3. **Asymmetric complexity** — expensive work at encoder, cheap at decoder
-4. **Wavefront parallelism** — linear scaling on 4–8 core ARM SoCs
+## Build and test
 
-### Current Feature Set
-
-| Feature | Status | Notes |
-|---------|--------|-------|
-| 18-mode intra prediction | ✅ Done | Planar, DC, 7 vertical angular, 9 horizontal angular |
-| WHT 4×4 / 8×8 transform | ✅ Done | Self-inverse, uniform dequant |
-| tANS coefficient coding | ✅ Done | Contextless tANS; context modeling planned |
-| Hierarchical hex motion search | ✅ Done | ±16/32/64 range by preset |
-| 6-tap luma interpolation | ✅ Done | H.264-style half-pel + bilinear quarter-pel |
-| Multi-reference inter prediction | ✅ Done | 4 DPB slots; SLOW preset searches all |
-| Skip/merge inter modes | ✅ Done | 2-bit mode field: skip/inter/intra/merge |
-| Median MV predictor | ✅ Done | Search center + MVD predictor + merge MV |
-| Deblocking filter | ✅ Done | Scalar + NEON (auto-dispatch on ARM) |
-| ρ-domain rate control | ✅ Done | CQP, CBR, VBR modes |
-| CfL chroma prediction | ✅ Done | Chroma-from-luma for intra; DC(128) for inter |
-| JND band weighting | ✅ Done | Per-coefficient luma quant weighting |
-| Scene cut detection | ✅ Done | Chi-squared histogram, forces keyframe |
-| NEON SAD | ✅ Done | Auto-dispatch on ARM (4×4/8×8/16×16) |
-| NEON color conversion | ✅ Done | 32-bit accumulation luma; scalar chroma/inverse |
-| NEON deblock | ✅ Done | Auto-dispatch on ARM |
-| NEON transform | ✅ Done | DCT + WHT, auto-dispatch on ARM |
-| WPP thread pool | ✅ Done | Per-row bitstream buffers + tANS encoders, entry point table, sequential fallback |
-| B-frames | ✅ Done | Hierarchical GOP4 + bi-directional prediction (D4), display reorder, -b flag |
-| tANS context modeling | ❌ Planned | 16 contexts: 4 bands × 4 magnitude classes |
-| SAO filter | ❌ Planned | Post-deblock offset filter |
-| DCT-II alternative | ❌ Planned | Requires position-dependent dequant |
-
-### Key Novelty: Variance → Transform Size
-
-Instead of a full quadtree partition search (expensive), TCodec uses **block
-variance** to select the transform size:
-
-- **High variance** (edges, detail) → 4×4 WHT (preserves detail, fewer coefficients)
-- **Low variance** (flat, smooth) → 8×8 WHT (better energy compaction, fewer bits)
-
-This gives 80% of quadtree compression efficiency at 20% of the decision cost.
-
-**Note**: The actual transform is the Walsh-Hadamard Transform (WHT), not DCT.
-DCT functions exist in the codebase but are not yet wired into the pipeline.
-
----
-
-## Bitstream Structure
-
-```
-┌─────────────┐
-│ Frame Header │  12 bytes fixed
-├─────────────┤
-│ Tile 0       │  Variable
-│  Row 0 CTUs  │  WPP parallel
-│  Row 1 CTUs  │
-│  ...         │
-├─────────────┤
-│ Tile 1       │
-│  ...         │
-└─────────────┘
+```sh
+make                         # release library and CLI tools
+make clean && make -j2       # reproducible clean build
+make test                    # bounded 50-test regression + containers
+make test-full               # all 51 codec tests, including 300-frame long run (slow)
+make soak-1080p              # external 300-frame exact-byte soak
+make test-mp4                # only the FFmpeg compatibility bridge test
+make cross-test              # AArch64/NEON compile-only checks
+./tools/parity_check.sh      # scalar/NEON and entropy parity checks
 ```
 
-### Frame Header (12 bytes)
+The MP4 bridge tests require `ffmpeg`, `ffprobe`, and Python 3. The core codec
+and native TCMX tests do not require FFmpeg.
 
-| Offset | Size | Field |
-|--------|------|-------|
-| 0 | 3 | Magic `0x54 0x43 0x56` ("TCV") |
-| 3 | 1 | Version (0) |
-| 4 | 2 | Frame width |
-| 6 | 2 | Frame height |
-| 8 | 1 | Flags (key_frame, qp, tile_cols_log2, tile_rows_log2) |
-| 9 | 1 | QP delta (signed, encoded as `(uint8_t)(int8_t)(qp - 32)`) |
-| 10 | 1 | Frame number (low 8 bits) |
-| 11 | 1 | Reserved |
+## CLI usage
 
-| 12 | 1 | Profile/level |
-| 13 | 2 | Tool flags (entropy mode, B-frames, CRC, ...) |
-| 15 | 1 | Extension header (only when `TC_FLAG_EXT_HEADER`): bits 0-1 = frame type code (0=KEY, 1=INTER/P, 2=BIDIR/B), rest reserved |
-
-### B-frames (D4)
-
-Hierarchical GOP-4 with bi-directional prediction. Coding order per group:
-A(4k), A(4k+4), B(4k+2), B(4k+1), B(4k+3); the decoder reorders to display
-order. B blocks signal a 2-bit `ref_sel` (0=forward, 1=backward,
-2=bidirectional average with mirrored MV) on every inter block. Enable with
-`tcenc -b` (v1 streams only). Reorder latency is handled by
-`TC_ERR_NEED_MORE` on both encode and decode; drain with
-`tc_encoder_flush_tail` / `tc_decoder_flush_tail`.
-
-### Block Mode Field (P-frames)
-
-| Value | Mode | Residual | MV Source |
-|-------|------|----------|-----------|
-| 0 | Skip | Zero | MVD + ref_idx signaled |
-| 1 | Inter | Non-zero | MVD + ref_idx signaled |
-| 2 | Intra | Non-zero | None (intra prediction) |
-| 3 | Merge | Zero | Derived from median of spatial neighbors |
-
-MVD is coded relative to the median MV predictor (not collocated), producing
-smaller MVDs when spatial neighbors are available.
-
----
-
-## Encoding Pipeline
-
-```
-RGB Input → Color Convert (YCbCr 4:2:0) → Frame Buffer
-  → For each CTU row (WPP parallel):
-      For each CTU:
-        1. Variance analysis → WHT size selection (4×4 or 8×8)
-        2. Intra prediction (18 modes, SAD-select best)
-        3. Motion estimation (hierarchical hex search, median-predictor-centered)
-        4. Mode decision (skip/merge/inter/intra, simplified RDO)
-        5. Forward WHT → Quantize (JND-weighted) → tANS encode
-        6. Deblock filter (edge strength)
-  → Rate control feedback (ρ-domain)
+```sh
+./build/tcenc -w 1280 -h 720 -q 32 --v2 -o stream.tcv input.yuv
+./build/tcdec stream.tcv output.yuv
 ```
 
-## Decoding Pipeline
+A `.tcv` file is a sequence of 4-byte little-endian packet sizes followed by
+TCV frame packets. See `BITSTREAM.md` for the versioned syntax.
 
-```
-Bitstream → tANS decode → Inverse quantize (JND-weighted) → Inverse WHT
-  → Prediction (intra/inter/merge) → Add residual
-  → Deblock filter → Frame buffer → Color Convert (YCbCr → RGB)
-```
+## Native packet transport and ISO-BMFF
 
----
+`build/tcmux` provides a packet-preserving private transport:
 
-## Build
-
-```bash
-cd tcodec
-make              # Build library + CLI tools
-make test         # Run unit tests (21 tests)
-make bench        # Benchmark critical paths
-make NEON=1       # Force NEON build (auto-detected on ARM)
-make install      # Install to /usr/local
+```sh
+./build/tcmux mux -i stream.tcv -o stream.tcmx -f 30
+./build/tcmux demux -i stream.tcmx -o roundtrip.tcv
+./build/tcmux segment -i stream.tcmx -o segments -s 60 -p playlist.m3u8
 ```
 
-## Usage
+The native MP4 commands preserve the actual TCV access units in an ISO-BMFF
+file using a private `tcv1` sample entry:
 
-### C API
-
-```c
-#include <tcodec.h>
-
-/* Encode */
-tc_config_t cfg;
-tc_config_defaults(&cfg, 1920, 1080);
-cfg.qp = 32;
-cfg.preset = TC_PRESET_FAST;
-
-tc_encoder_t *enc = tc_encoder_create(&cfg);
-tc_encoder_encode(enc, y, stride_y, cb, stride_cb, cr, stride_cr, &pkt);
-
-/* Decode */
-tc_decoder_t *dec = tc_decoder_create(0, 0);  /* auto-detect dimensions */
-tc_decoder_decode(dec, pkt.data, pkt.size,
-                  &out_y, &out_stride_y,
-                  &out_cb, &out_stride_cb,
-                  &out_cr, &out_stride_cr);
-
-/* Stats */
-int64_t total_bytes;
-int32_t total_frames;
-double avg_psnr;
-tc_encoder_get_stats(enc, &total_bytes, &total_frames, &avg_psnr);
+```sh
+./build/tcmux mp4mux -i stream.tcv -o native.mp4 -f 30
+./build/tcmux mp4demux -i native.mp4 -o recovered.tcv
+cmp stream.tcv recovered.tcv
 ```
 
-### CLI Tools
+`native.mp4` is a standards-shaped carriage file, not a stock-player format:
+FFmpeg/ffplay cannot decode the private `tcv1` codec without a TCodec decoder
+integration. The native round trip is byte-exact and is covered by
+`tools/test_tcmux.sh`.
 
-```bash
-# Encode
-tcenc -i input.y4m -o output.tcv --preset fast --qp 32
+For ordinary FFmpeg/ffplay playback, use the explicit compatibility bridge.
+It decodes TCV and lossy re-encodes the frames as H.264 in MP4:
 
-# Decode
-tcdec -i output.tcv -o output.y4m
+```sh
+tools/tcmux_mp4.sh mux -i stream.tcv -o playable.mp4 -w 1280 -h 720 -f 30
+tools/tcmux_mp4.sh demux -i playable.mp4 -o recovered.yuv
+ffplay playable.mp4
+tools/tcmux_mp4.sh segment -i stream.tcv -o hls -w 1280 -h 720 -f 30 -s 6
+ffplay hls/playlist.m3u8
 ```
 
-## Test Suite
+The bridge stages outputs and refuses to overwrite existing files/directories.
+Its HLS output is fMP4 and is validated by FFmpeg in the integration test.
 
-21 tests covering:
-- Color conversion roundtrip (14-bit fixed-point, ±25 tolerance for 4:2:0)
-- Encode/decode roundtrip at multiple QP values (10–50)
-- Skip/merge mode with static content
-- Scene cut detection (chi-squared histogram)
-- CfL chroma prediction
-- Deterministic encoding (identical output across runs)
-- Motion estimation quality (panning gradient)
-- Multi-reference frames (SLOW preset, 4 DPB slots)
-- Non-CTU-aligned resolution (96×80)
- 
-## Key Architecture Notes
+## 300-frame 1080p correctness soak
 
-- CTU_SIZE = 64, block size = 8×8, chroma 4:2:0 (4×4 blocks)
-- Frame header: 8-byte magic, 8-bit version, 16-bit width/height, 8-bit flags, 8-bit qp_delta, 8-bit tile_cols_log2, 8-bit tile_rows_log2
-- Block modes: 2-bit field (0=skip, 1=inter, 2=intra, 3=merge)
-- MVD coded relative to median of spatial neighbor MVs (not collocated)
-- 4 DPB slots, ref_idx signaled per block (2 bits)
-- Scalar code guarded by #if !TCODEC_NEON when NEON version exists
-- NEON versions in neon/ directory, named same as scalar (replaces via #if)
-- tANS for coefficients, Exp-Golomb (se) for MVD only
-- Build: make release (optimized), make test (run tests), make NEON=1 (force NEON)
-- TC_VERSION = 0 (decoder rejects version > TC_VERSION)
+```sh
+make soak-1080p
+# short smoke: TCODEC_SOAK_FRAMES=2 make soak-1080p
 ```
 
-### Quick Reference: File Map
+The runner generates a 1920×1080 source, encodes v2 with range coding, decodes
+it with the current serial `tcdec` CLI, and checks the exact decoded byte count.
+It reports throughput but does not claim the unmet Tier-1 60-fps@720p or
+30-fps@1080p target.
 
-| Path | Purpose |
-|------|---------|
-| `src/encoder.c` | Main encode loop: mode decision, quantize, bitstream write |
-| `src/decoder.c` | Main decode loop: bitstream read, dequantize, reconstruct |
-| `src/entropy.c` | tANS + Exp-Golomb coding |
-| `src/motion.c` | Hierarchical hex search, 6-tap interpolation, SAD |
-| `src/predict.c` | 18 intra modes (planar, DC, 7 vert angular, 9 horiz angular) |
-| `src/transform.c` | WHT 4×4 and 8×8 |
-| `src/quantize.c` | Quantize/dequantize with JND band weighting |
-| `src/filter.c` | Deblocking filter (scalar, guarded by #if !TCODEC_NEON) |
-| `src/color.c` | RGB↔YCbCr conversion (scalar guarded, NEON dispatched) |
-| `src/frame.c` | Frame allocation, DPB management |
-| `src/bitstream.c` | Bitstream reader/writer |
-| `src/ratectl.c` | ρ-domain rate control (CQP/CBR/VBR) |
-| `src/threadpool.c` | Thread pool (wired for WPP in enc/dec) |
-| `src/tcodec.c` | Public API implementation |
-| `neon/motion_neon.c` | NEON SAD (wired) + NEON inter predict (NOT wired — bilinear) |
-| `neon/filter_neon.c` | NEON deblock (wired) |
-| `neon/color_neon.c` | NEON color convert (wired, 32-bit accumulation) |
-| `neon/transform_neon.c` | NEON WHT (exists, verify dispatch) |
-| `include/tcodec.h` | Public API: encoder, decoder, config, PSNR |
-| `include/tcodec_common.h` | Internal constants: CTU_SIZE, TC_VERSION, QP limits |
-| `include/tcodec_types.h` | Types: tc_pixel_t, tc_mv_s, tc_frame_t, etc. |
-| `test/test_tcodec.c` | 21 tests |
-| `tools/tcenc.c` | Encoder CLI |
-| `tools/tcdec.c` | Decoder CLI |
+## Tests
 
----
+`test/test_tcodec.c` currently registers 51 tests covering color conversion,
+round trips, QP behavior, motion, multi-reference, v0/v1 compatibility, v2
+quadtree raw/range paths, malformed streams, bit flips, B-frame reorder, WPP
+parity, transforms, SAO, rate control, and deterministic output.
+
+`make test` is the bounded default: it runs 50 tests and explicitly reports the
+single skipped 300-frame in-process long run. `make test-full` runs all 51.
+Both targets additionally run malformed-input and exact-round-trip tests for
+TCMX/TCMF, native private `tcv1` MP4 carriage, and the H.264 MP4/fMP4
+compatibility bridge. `make soak-1080p` is the separate reproducible 300-frame
+1080p correctness runner.
+
+## Documentation map
+
+- `SPEC.md` — implemented codec behavior and limitations
+- `BITSTREAM.md` — v0/v1/v2 syntax and error handling
+- `PROFILES.md` — profiles, levels, tools, and presets
+- `BENCHMARKS.md` — measured performance and benchmark methodology
+- `TODO.md` — checked implementation work and explicitly deferred research
+- `MASTER_PLAN.md` — long-term roadmap and current-state reality check
+- `docs/FINISH_Tier1.md` — final gate assessment and reproducible evidence
+- `AI_AGENT_PROMPT.md` — concise handoff for future coding sessions
 
 ## License
 

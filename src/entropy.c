@@ -156,8 +156,11 @@ void tc_tans_dec_coeffs(tc_tans_dec_t *d, tc_coeff_t *coeffs, int n,
     if (last_nz_plus1 == 0) {
         return;  /* All zero block */
     }
+    if (last_nz_plus1 > (uint32_t)n) {
+        d->bs->error = 1;
+        return;
+    }
     int last_nz = (int)last_nz_plus1 - 1;
-    if (last_nz >= n) last_nz = n - 1;  /* Safety clamp */
 
     /* Decode coefficients in reverse zigzag */
     for (int i = last_nz; i >= 0; i--) {
@@ -167,6 +170,10 @@ void tc_tans_dec_coeffs(tc_tans_dec_t *d, tc_coeff_t *coeffs, int n,
         uint32_t mag = tc_bs_reader_read_ue(d->bs);
 
         if (mag > 0) {
+            if (mag > 32767u) {
+                d->bs->error = 1;
+                return;
+            }
             /* Read sign bit */
             uint32_t sign = tc_bs_reader_read_bits(d->bs, 1);
             coeffs[pos] = (tc_coeff_t)(sign ? -(int)mag : (int)mag);

@@ -97,6 +97,16 @@ int tc_decoder_crc_valid(tc_decoder_t *dec);
  * Only meaningful for v1 bitstreams with TC_TOOL_ENTROPY_CODED set. */
 int tc_decoder_entropy_coded(tc_decoder_t *dec);
 
+/* Optional component timing for performance work. Disabled by default;
+ * nanosecond counters accumulate until reset. */
+void tc_decoder_set_profile(tc_decoder_t *dec, int enabled);
+void tc_decoder_reset_profile(tc_decoder_t *dec);
+void tc_decoder_get_profile(tc_decoder_t *dec,
+                            uint64_t *parse_ns, uint64_t *coeff_ns,
+                            uint64_t *transform_ns, uint64_t *motion_ns,
+                            uint64_t *chroma_ns, uint64_t *deblock_ns,
+                            uint64_t *copy_ns);
+
 /* ── Utility functions ───────────────────────────────────────── */
 
 /* Get human-readable error string. */

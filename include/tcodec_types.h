@@ -56,7 +56,7 @@ extern "C" {
 #define TC_TANS_TABLE_BITS  10          /* tANS table = 1024 entries */
 #define TC_TANS_TABLE_SIZE  (1 << TC_TANS_TABLE_BITS)
 #define TC_NUM_CONTEXTS     16          /* Reserved for legacy ANS context coding */
-#define TC_NUM_CONTEXTS_RC  64          /* Range coder contexts (Phase 3) */
+#define TC_NUM_CONTEXTS_RC  76          /* Range coder contexts (Phase 3, D2) */
 #define TC_TILE_MAX         8
 
 /* Magic bytes */
@@ -67,6 +67,7 @@ extern "C" {
 /* Bitstream versions */
 #define TC_VERSION_V0  0   /* Original 12-byte header, no profile/level/tool flags */
 #define TC_VERSION_V1  1   /* 14-byte header with profile, level, tool_flags, RAP, CRC */
+#define TC_VERSION_V2  2   /* Quadtree CU + RDO mode decision + chroma MC (v1 header) */
 
 /* Default version for new encodes */
 #define TC_VERSION     TC_VERSION_V1
@@ -204,10 +205,9 @@ typedef struct tc_block_info {
 #define TC_BLOCKS_PER_CTU 256         /* 64×64 / 4×4 = 16×16 = 256 */
 #define TC_8x8_PER_CTU    64          /* 64×64 / 8×8 = 8×8 = 64 */
 
-typedef struct TCODEC_ALIGN(128) tc_ctu_info {
+typedef struct tc_ctu_info {
     tc_block_info_t blocks[TC_8x8_PER_CTU];  /* Per-8×8 block info */
     uint8_t         dct_size_map[TC_8x8_PER_CTU]; /* 4×4 or 8×8 per block */
-    tc_coeff_t      coeffs[TC_CTU_SIZE * TC_CTU_SIZE]; /* Residual buffer */
     int32_t         row;              /* CTU row in frame */
     int32_t         col;              /* CTU column in frame */
 } tc_ctu_info_t;
@@ -264,9 +264,9 @@ typedef struct tc_frame_header {
 #define TC_TOOL_MEDIAN_MV_PRED    (1u << 3)  /* Median MV predictor + MVD coding */
 #define TC_TOOL_MULTI_REF         (1u << 4)  /* Multiple reference frames */
 #define TC_TOOL_SIX_TAP_INTERP    (1u << 5)  /* 6-tap luma interpolation filter */
-#define TC_TOOL_ENTROPY_CODED     (1u << 6)  /* Context-modeled entropy (future) */
+#define TC_TOOL_ENTROPY_CODED     (1u << 6)  /* Context-modeled entropy */
 #define TC_TOOL_DERINGING         (1u << 7)  /* Directional deringing (future) */
-#define TC_TOOL_SAO               (1u << 8)  /* Sample Adaptive Offset (future) */
+#define TC_TOOL_SAO               (1u << 8)  /* v2 luma SAO Band Offset */
 #define TC_TOOL_GRAIN_SYNTHESIS   (1u << 9)  /* Film grain synthesis (future) */
 #define TC_TOOL_BIPRED            (1u << 10) /* B-frames: bi-directional prediction (D4) */
 #define TC_TOOL_LOOP_RESTORATION  (1u << 11) /* Wiener-like restoration (future) */
@@ -337,6 +337,7 @@ typedef struct tc_config {
     int             enable_crc;      /* 1 = add CRC-16 to frames (v1 only) */
     int             enable_entropy_coded; /* 1 = use range coder (Phase 3, v1 only) */
     int             enable_b_frames;      /* 1 = hierarchical B-frames, GOP 4 (D4, v1 only) */
+    int             use_v2;             /* 1 = bitstream v2 quadtree coding path */
 } tc_config_t;
 
 #ifdef __cplusplus

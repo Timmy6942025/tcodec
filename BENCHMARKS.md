@@ -1,10 +1,139 @@
-# TCodec Benchmarks — Version 0
+# TCodec Benchmarks — Historical v0 Baseline and v2 Checkpoints
 
-**Status**: Phase 1 benchmark infrastructure complete. First baseline results recorded.  
-**Bitstream Version**: 0  
-**Last Updated**: Phase 0 + Phase 1 completion.
+**Status**: Infrastructure and bounded Tier-1 evidence recorded; Tier-1 performance and compression targets are not met.
+**Bitstream Version**: 2 (v0/v1 compatibility retained)
+**Last Updated**: August 2026.
+
+The C harness registers 51 tests. The default `make test`/`make test-fast`
+regression reports **50/50 passed with 1 explicit long-run skip**; `make test-full`
+runs all 51, including the in-process 300-frame test. `make soak-1080p` provides
+a reproducible generated 300-frame 1920×1080 exact-byte correctness soak; its
+throughput is reported separately and does not satisfy the current 60 fps@720p /
+30 fps@1080p decode target.
+
+ ## D7: RDO-lite vs SAD-only mode decision
+
+ Host: aarch64 Cortex-A72, 4 cores, NEON build, 5 frames of bbb_nature 1280×720.
+
+ | Preset | QP | PSNR-Y | Bitrate kbps | Enc s | Dec s |
+ |---|---:|---:|---:|---:|---:|
+ | ULTRAFAST (SAD-only) | 22 | 31.38 | 16,881 | 2.7 | 0.5 |
+ | ULTRAFAST (SAD-only) | 27 | 29.06 | 8,485 | 2.6 | 0.4 |
+ | ULTRAFAST (SAD-only) | 32 | 27.66 | 3,963 | 2.5 | 0.3 |
+ | ULTRAFAST (SAD-only) | 37 | 25.99 | 2,374 | 2.4 | 0.2 |
+ | ULTRAFAST (SAD-only) | 42 | 23.65 | 1,919 | 2.5 | 0.2 |
+ | MEDIUM (RDO-lite) | 22 | 31.32 | 13,623 | 33.7 | 0.6 |
+ | MEDIUM (RDO-lite) | 27 | 28.92 | 6,373 | 36.5 | 0.4 |
+ | MEDIUM (RDO-lite) | 32 | 27.34 | 2,121 | 34.0 | 0.3 |
+ | MEDIUM (RDO-lite) | 37 | 26.16 | 532 | 28.0 | 0.2 |
+ | MEDIUM (RDO-lite) | 42 | 25.04 | 161 | 25.4 | 0.1 |
+
+ **BD-rate (RDO-lite vs SAD-only): −66.4%** in the overlapping PSNR range
+ 25.5–29.0 dB (computed by log-linear integration of the 5-QP RD curves).
+ RDO-lite saves 69.5% bitrate at PSNR 27.5 dB (1447 kbps vs 4745 kbps).
+ The SAD-only path is retained only for the long-run soak (ULTRAFAST preset)
+ where encode time matters more than compression.
+
+## Current ARM64 checkpoint (Raspberry Pi, Cortex-A72, 4 cores)
+
+The native private MP4 carriage and H.264/fMP4 compatibility bridge are
+integration results, not compression or decode-performance wins. The tables
+below remain the authoritative evidence for D8/D9; neither gate is passed.
+
+This is a bounded engineering probe, not the required D8 corpus result:
+Sintel Action, 1280×720, 2 frames, one thread, v2 p0, QPs 27/32/37.
+
+| Codec | QP | Packet bytes | PSNR-Y | SSIM | Decode fps |
+|---|---:|---:|---:|---:|---:|
+| tcodecv2 | 27 | 48,888 | 33.10 | 0.8959 | 11.8 |
+| tcodecv2 | 32 | 29,991 | 31.39 | 0.8367 | 13.1 |
+| tcodecv2 | 37 | 19,965 | 28.54 | 0.7416 | 15.4 |
+| x264 veryfast | 27 | 21,946 | 39.83 | 0.9646 | 4.9 |
+| x264 veryfast | 32 | 12,454 | 36.95 | 0.9440 | 4.5 |
+| x264 veryfast | 37 | 7,929 | 33.80 | 0.9141 | 5.0 |
+| x264 medium | 27 | 23,015 | 40.19 | 0.9673 | 5.1 |
+| x264 medium | 32 | 13,235 | 37.48 | 0.9487 | 4.9 |
+| x264 medium | 37 | 8,257 | 34.66 | 0.9237 | 5.5 |
+
+The quality ranges do not overlap, so BD-rate is **N/A** and no competitive
+win is claimed.
+
+ ## D8: Multi-codec real-content benchmark (August 2026)
+
+ Host: aarch64 Cortex-A72, 4 cores, NEON build, 10 frames of bbb_nature 1280×720,
+ v2 preset MEDIUM, QPs 22/32/42.
+
+ | Codec | QP | Bytes | Bitrate kbps | PSNR-Y | SSIM | Decode fps |
+ |---|---:|---:|---:|---:|---:|---:|
+ | tcodecv2 | 22 | 696,160 | 13,366 | 30.44 | 0.8348 | 8.1 |
+ | tcodecv2 | 32 | 112,080 | 2,152 | 25.75 | 0.6162 | 17.3 |
+ | tcodecv2 | 42 | 8,147 | 156 | 23.79 | 0.5622 | 32.2 |
+ | x264 veryfast | 22 | 297,240 | 5,707 | 37.59 | 0.9481 | 18.9 |
+ | x264 veryfast | 32 | 68,097 | 1,308 | 31.30 | 0.8306 | 21.5 |
+ | x264 veryfast | 42 | 12,723 | 244 | 27.20 | 0.6673 | 22.5 |
+ | x264 medium | 22 | 304,028 | 5,837 | 38.29 | 0.9553 | 17.9 |
+ | x264 medium | 32 | 77,820 | 1,494 | 32.05 | 0.8501 | 21.0 |
+ | x264 medium | 42 | 17,379 | 334 | 27.90 | 0.6872 | 22.2 |
+ | x265 | 22 | 344,140 | 6,608 | 40.02 | 0.9672 | 16.0 |
+ | x265 | 32 | 83,394 | 1,601 | 33.89 | 0.8908 | 21.2 |
+ | x265 | 42 | 16,219 | 311 | 29.06 | 0.7335 | 21.5 |
+ | SVT-AV1 p6 | 22 | 349,662 | 6,714 | 40.64 | 0.9741 | 17.8 |
+ | SVT-AV1 p6 | 32 | 217,946 | 4,185 | 38.48 | 0.9609 | 19.4 |
+ | SVT-AV1 p6 | 42 | 128,287 | 2,463 | 36.18 | 0.9393 | 20.2 |
+
+ TCodec v2 is 5–8 dB behind x264 veryfast at equal bitrate and uses 1.4–2.3×
+ more bits at equal quality. No negative BD-rate win vs x264 veryfast/medium is
+ claimed; this gate is not passed. The benchmark infrastructure and first
+ multi-codec comparison row (1 clip, 5 QPs, 4 codecs) are complete; the
+ required 10+ clip, multi-QP, multi-codec matrix with quality overlap
+ confirmation has not been completed.
+
+## D9: ARM decode real-time measurements (August 2026)
+
+Host: aarch64 Cortex-A72, 4 cores, NEON build, one decoder thread, bbb_nature
+1280×720 / 1920×1080, v2 preset MEDIUM.
+
+| Resolution | QP | Decode fps | vs target |
+|---|---:|---:|---:|
+| 1280×720 | 22 | 8.1 | −52 fps |
+| 1280×720 | 32 | 17.3 | −43 fps |
+| 1280×720 | 42 | 32.2 | −28 fps |
+| 1920×1080 | 22 | ~3.6 | −26 fps |
+| 1920×1080 | 32 | ~7.7 | −22 fps |
+| 1920×1080 | 42 | ~14.3 | −16 fps |
+
+Decode remains below the Tier-1 60 fps@720p / 30 fps@1080p targets.
+Optimizations applied: DC-specific range-coder contexts for coefficient coding,
+precomputed JND effective-scale per frequency band, zero-residual and DC-only
+inverse-transform fast paths in the decoder. Further gains require either
+algorithmic changes to the v2 bitstream (e.g., WPP entry points for multi-thread
+decode) or a faster transform pipeline.
+
+### August 2026 decoder optimization measurement
+
+Host: aarch64 Cortex-A72, 4 cores, NEON build, QP 32, one decoder thread,
+generated gradient/chroma input. The v2 zero-residual and DC-only inverse-DCT
+fast paths were enabled; output sizes were checked exactly.
+
+| Resolution | Frames | Decode FPS | Profile output |
+|---|---:|---:|---|
+| 1280×720 | 10 | 9.1 | parse 23.4 ms, coeff 172.6 ms, transform 390.1 ms, motion 0.4 ms, chroma 137.3 ms, deblock 61.7 ms |
+| 1920×1080 | 5 | 4.1 | parse 27.4 ms, coeff 195.6 ms, transform 442.9 ms, motion 0.2 ms, chroma 159.4 ms, deblock 66.4 ms |
+
+These are host measurements, not Tier-1 success: they remain below 60 fps at
+720p and 30 fps at 1080p. A bounded real-corpus tcodecv2 smoke matrix using
+`bbb_nature`, `sintel_action`, and `parkrun` (30 frames, QPs 22/32/42, preset 1,
+one thread) generated 9 rows; every row decoded 30 frames and all bitrate,
+PSNR-Y, SSIM, and timing fields were finite. No BD-rate win is claimed because
+this run did not include the required x264/x265/SVT-AV1 comparison curves and
+quality overlap is not established.
 
 ---
+
+## Historical v0 baseline infrastructure
+
+The following section is retained as a historical synthetic v0 baseline; it is
+not a claim about the current v2 codec or real-content competitiveness.
 
 ## 0. Phase 1 Infrastructure — Complete ✅
 
@@ -104,10 +233,10 @@ This document defines:
 4. The **metrics** to be collected and reported
 5. The **tooling** that needs to be built
 
-**Current state**: There is no benchmark harness, no automated
-comparison pipeline, no VMAF/SSIM extraction, and no BD-rate
-calculation scripts. The only quality metric computed is PSNR-Y,
-measured internally by the encoder after each frame.
+**Historical v0 state**: The following paragraph describes the original
+prototype snapshot and is retained for context. The current repository also
+contains `tools/rd_bench.py`, real-corpus metadata, SSIM/PSNR evaluation, and
+BD-rate tooling; the full Tier-1 real-content matrix has not yet been completed.
 
 Per the Master Plan: *"If benchmarking comes late, the entire program
 will drift."* Building this infrastructure is the highest-priority

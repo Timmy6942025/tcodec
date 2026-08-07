@@ -253,7 +253,8 @@ void tc_rc_enc_coeffs(tc_rc_enc_t *rc, tc_rc_ctx_t *ctx,
     int gt1_count = 0;
     for (int i = last_nz; i >= 0; i--) {
         int c = coeffs[i];
-        int cidx_sig = RC_CTX_SIG + (i * 8 / n);
+        int is_dc = (i == 0);
+        int cidx_sig = is_dc ? RC_CTX_SIG_DC : RC_CTX_SIG + (i * 8 / n);
         if (cidx_sig >= RC_CTX_MAX) cidx_sig = RC_CTX_MAX - 1;
 
         if (c == 0) {
@@ -266,15 +267,15 @@ void tc_rc_enc_coeffs(tc_rc_enc_t *rc, tc_rc_ctx_t *ctx,
         int mag = tc_abs(c);
 
         /* GT1 flag */
-        int cidx_gt1 = RC_CTX_GT1 + tc_min(gt1_count, 5);
+        int cidx_gt1 = is_dc ? RC_CTX_GT1_DC : RC_CTX_GT1 + tc_min(gt1_count, 5);
         tc_rc_enc_bit(rc, &ctx[cidx_gt1], (mag > 1) ? 1 : 0);
 
         if (mag > 1) {
-            int cidx_gt2 = RC_CTX_GT2 + tc_min(gt1_count, 1);
+            int cidx_gt2 = is_dc ? RC_CTX_GT2_DC : RC_CTX_GT2 + tc_min(gt1_count, 1);
             tc_rc_enc_bit(rc, &ctx[cidx_gt2], (mag > 2) ? 1 : 0);
 
             if (mag > 2) {
-                tc_rc_enc_ue(rc, ctx, RC_CTX_LEVEL, (uint32_t)(mag - 3));
+                tc_rc_enc_ue(rc, ctx, is_dc ? RC_CTX_LEVEL_DC : RC_CTX_LEVEL, (uint32_t)(mag - 3));
             }
             gt1_count++;
             if (gt1_count > 5) gt1_count = 5;
@@ -282,7 +283,7 @@ void tc_rc_enc_coeffs(tc_rc_enc_t *rc, tc_rc_ctx_t *ctx,
 
         /* Sign bit */
         int sign_bit = (c < 0) ? 1 : 0;
-        tc_rc_enc_bit(rc, &ctx[RC_CTX_SIGN], sign_bit);
+        tc_rc_enc_bit(rc, &ctx[is_dc ? RC_CTX_SIGN_DC : RC_CTX_SIGN], sign_bit);
     }
 }
 
@@ -403,36 +404,49 @@ void tc_rc_dec_coeffs(tc_rc_dec_t *rc, tc_rc_ctx_t *ctx,
         }
     }
     if (!found) {
-        last_nz = 4 + (int)tc_rc_dec_ue(rc, ctx, RC_CTX_LAST);
+        uint32_t extra = tc_rc_dec_ue(rc, ctx, RC_CTX_LAST);
+        if (extra > (uint32_t)n) {
+            rc->bs->error = 1;
+            return;
+        }
+        last_nz = 4 + (int)extra;
     }
-    if (last_nz >= n) last_nz = n - 1;
+    if (last_nz < 0 || last_nz >= n) {
+        rc->bs->error = 1;
+        return;
+    }
 
     int gt1_count = 0;
     for (int i = last_nz; i >= 0; i--) {
-        int cidx_sig = RC_CTX_SIG + (i * 8 / n);
+        int is_dc = (i == 0);
+        int cidx_sig = is_dc ? RC_CTX_SIG_DC : RC_CTX_SIG + (i * 8 / n);
         if (cidx_sig >= RC_CTX_MAX) cidx_sig = RC_CTX_MAX - 1;
 
         if (!tc_rc_dec_bit(rc, &ctx[cidx_sig])) { coeffs[i] = 0; continue; }
 
-        int cidx_gt1 = RC_CTX_GT1 + tc_min(gt1_count, 5);
+        int cidx_gt1 = is_dc ? RC_CTX_GT1_DC : RC_CTX_GT1 + tc_min(gt1_count, 5);
         int gt1 = tc_rc_dec_bit(rc, &ctx[cidx_gt1]);
         int mag;
 
         if (!gt1) {
             mag = 1;
         } else {
-            int cidx_gt2 = RC_CTX_GT2 + tc_min(gt1_count, 1);
+            int cidx_gt2 = is_dc ? RC_CTX_GT2_DC : RC_CTX_GT2 + tc_min(gt1_count, 1);
             int gt2 = tc_rc_dec_bit(rc, &ctx[cidx_gt2]);
             if (!gt2) {
                 mag = 2;
             } else {
-                mag = 3 + (int)tc_rc_dec_ue(rc, ctx, RC_CTX_LEVEL);
+                mag = 3 + (int)tc_rc_dec_ue(rc, ctx, is_dc ? RC_CTX_LEVEL_DC : RC_CTX_LEVEL);
             }
             gt1_count++;
             if (gt1_count > 5) gt1_count = 5;
         }
 
-        int sign = tc_rc_dec_bit(rc, &ctx[RC_CTX_SIGN]);
+        if (mag > 32767) {
+            rc->bs->error = 1;
+            return;
+        }
+        int sign = tc_rc_dec_bit(rc, &ctx[is_dc ? RC_CTX_SIGN_DC : RC_CTX_SIGN]);
         coeffs[i] = (tc_coeff_t)(sign ? -mag : mag);
     }
 }

@@ -15,9 +15,25 @@
  */
 
 #include "tcodec_common.h"
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <assert.h>
+#include <time.h>
+
+static uint64_t dec_now_ns(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC_RAW, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+}
+
+static TCODEC_FORCEINLINE void dec_profile_add(tc_decoder_t *dec,
+                                                uint64_t *bucket,
+                                                uint64_t start)
+{
+    if (dec->profile_enabled) *bucket += dec_now_ns() - start;
+}
 
 /* ── Read frame header ──────────────────────────────────────── */
 
@@ -81,15 +97,25 @@ static tc_error_t read_frame_header(tc_bs_reader_t *bs, tc_frame_header_t *hdr)
 
     hdr->version    = (uint8_t)tc_bs_reader_read_bits(bs, 8);
 
-    /* Version check: reject incompatible future versions.
-     * We support v0 and v1. v2+ bitstreams may have different
-     * header structure or coding tools we don't understand. */
-    if (hdr->version > TC_VERSION_V1) {
+    /* Version check: v0/v1/v2 are understood (v2 uses the v1 header
+     * layout with the v2 quadtree payload); anything newer is a
+     * future bitstream we must not reinterpret.  Each version is
+     * dispatched to exactly one decoder path — never silently
+     * upgraded or downgraded. */
+    if (hdr->version > TC_VERSION_V2) {
         return TC_ERR_BITSTREAM;
     }
 
     hdr->width      = (uint16_t)tc_bs_reader_read_bits(bs, 16);
     hdr->height     = (uint16_t)tc_bs_reader_read_bits(bs, 16);
+
+    /* Dimension sanity check (all versions): prevents a hostile header
+     * from triggering huge allocations (uint16 can encode up to 65535,
+     * but TC_MAX_WIDTH/HEIGHT bound the supported space). */
+    if (hdr->width == 0 || hdr->height == 0 ||
+        hdr->width > TC_MAX_WIDTH || hdr->height > TC_MAX_HEIGHT) {
+        return TC_ERR_BITSTREAM;
+    }
     hdr->flags      = (uint8_t)tc_bs_reader_read_bits(bs, 8);
     hdr->qp_delta   = (uint8_t)tc_bs_reader_read_bits(bs, 8);
     hdr->frame_num  = (uint8_t)tc_bs_reader_read_bits(bs, 8);
@@ -137,7 +163,7 @@ static tc_error_t read_frame_header(tc_bs_reader_t *bs, tc_frame_header_t *hdr)
 
 
         /* Validate level constraints (if explicit level set) */
-        if (hdr->level_idx > 0 && hdr->level_idx <= TC_LEVEL_MAX) {
+            if (hdr->level_idx > 0 && hdr->level_idx <= TC_LEVEL_MAX) {
             const tc_level_info_t *lvl = tc_level_get_info(hdr->level_idx);
             if (hdr->width > lvl->max_width || hdr->height > lvl->max_height) {
                 return TC_ERR_BITSTREAM;  /* Exceeds level constraints */
@@ -148,6 +174,8 @@ static tc_error_t read_frame_header(tc_bs_reader_t *bs, tc_frame_header_t *hdr)
          * For v1, bits 5-3 are RAP/CRC/EXT — no additional validation needed
          * since they have well-defined meanings. */
     }
+
+    if (bs->error) return TC_ERR_BITSTREAM;
 
     /* Derived fields (common to v0 and v1). B-frames (D4) are
      * signaled per frame through the v1 tool flags (TC_TOOL_BIPRED);
@@ -631,6 +659,463 @@ static void decode_row_impl(tc_decoder_t *dec, int row, int qp,
     }
 }
 
+/* ════════════════════════════════════════════════════════════════
+ * Bitstream v2 quadtree decoder
+ * ────────────────────────────────────────────────────────────────
+ * Mirrors the encoder's qt_* write pass bit-for-bit: same quadtree
+ * geometry (tc_qt_index), same child order (z-order q=0..3), same
+ * syntax order, same MV predictor, same quantizer primitives
+ * (tc_eff_scale / tc_dequant_coeff) and the same pixel-domain
+ * transforms (tc_idct4x4 / tc_idct8x8).  The decoder needs no node
+ * snapshots: it reconstructs directly, which is exactly what the
+ * encoder's write pass produces (its snapshot restores are no-ops
+ * for the final reconstruction).
+ * ══════════════════════════════════════════════════════════════ */
+
+typedef struct {
+    tc_decoder_t     *dec;
+    int               ctu_x, ctu_y;
+    int               qp, qp_c;
+    tc_frame_type_t   frame_type;
+    int               poc;
+    tc_bs_reader_t   *bs;
+    tc_tans_dec_t    *tans;
+    tc_rc_dec_t      *rc;
+    tc_rc_ctx_t      *rc_ctx;
+    qt_mvcell_t       grid[TC_MVGRID_STRIDE * TC_MVGRID_STRIDE];
+} qt_dec_t;
+
+static TCODEC_FORCEINLINE uint32_t qt_read_bits(qt_dec_t *d, int base_ctx, int nbits)
+{
+    uint64_t start = d->dec->profile_enabled ? dec_now_ns() : 0;
+    uint32_t value = dec_read_bits(d->bs, d->rc, d->rc_ctx, base_ctx, nbits);
+    dec_profile_add(d->dec, &d->dec->profile_parse_ns, start);
+    return value;
+}
+
+static TCODEC_FORCEINLINE int32_t qt_read_se(qt_dec_t *d, int base_ctx)
+{
+    uint64_t start = d->dec->profile_enabled ? dec_now_ns() : 0;
+    int32_t value = dec_read_se(d->bs, d->rc, d->rc_ctx, base_ctx);
+    dec_profile_add(d->dec, &d->dec->profile_parse_ns, start);
+    return value;
+}
+
+/* MV predictor — must match encoder qt_mvp() exactly (median of the
+ * left / above / above-right 8×8 MV-grid cells, in the same relative
+ * MV convention). */
+static tc_mv_s qt_dec_mvp(const qt_dec_t *d, int cx, int cy)
+{
+    tc_mv_s a={0,0}, b={0,0}, c={0,0};
+    int ha=0, hb=0, hc=0;
+    if (cx > 0)     { const qt_mvcell_t *m=&d->grid[cy*TC_MVGRID_STRIDE+(cx-1)]; if(!m->intra){a.x=m->dx;a.y=m->dy;ha=1;} }
+    if (cy > 0)     { const qt_mvcell_t *m=&d->grid[(cy-1)*TC_MVGRID_STRIDE+cx]; if(!m->intra){b.x=m->dx;b.y=m->dy;hb=1;} }
+    if (cy > 0 && cx < 7) { const qt_mvcell_t *m=&d->grid[(cy-1)*TC_MVGRID_STRIDE+(cx+1)]; if(!m->intra){c.x=m->dx;c.y=m->dy;hc=1;} }
+    if (!ha && !hb && !hc) return (tc_mv_s){0,0};
+    if (!ha) a = hb ? b : c;
+    if (!hb) b = ha ? a : c;
+    if (!hc) c = ha ? a : b;
+    int px,py;
+    { int t,x[3]={a.x,b.x,c.x}; if(x[0]>x[1]){t=x[0];x[0]=x[1];x[1]=t;} if(x[1]>x[2]){t=x[1];x[1]=x[2];x[2]=t;} if(x[0]>x[1]){t=x[0];x[0]=x[1];x[1]=t;} px=x[1]; }
+    { int t,y[3]={a.y,b.y,c.y}; if(y[0]>y[1]){t=y[0];y[0]=y[1];y[1]=t;} if(y[1]>y[2]){t=y[1];y[1]=y[2];y[2]=t;} if(y[0]>y[1]){t=y[0];y[0]=y[1];y[1]=t;} py=y[1]; }
+    return (tc_mv_s){px,py};
+}
+
+/* Luma residual of one CU: per-8×8-TU transform-size flag + entropy-
+ * coded coefficients, dequantized with the shared JND-weighted step
+ * and inverted with the pixel-domain IDCT.  Mirrors qt_code_luma(). */
+static void qt_dec_luma(qt_dec_t *d, int px, int py, int cu,
+                        const tc_pixel_t *pred)
+{
+    tc_decoder_t *dec = d->dec;
+    int qp = d->qp, ntu = cu/8;
+    int rs = dec->cur->stride_y;
+    for (int ty=0;ty<ntu;ty++) for (int tx=0;tx<ntu;tx++){
+        int ox=tx*8, oy=ty*8;
+        uint32_t dct = qt_read_bits(d, RC_CTX_DCT_SIZE, 1);
+        if (dct == TC_BLOCK_8x8_ID) {
+            tc_coeff_t tu[64], iq[64];
+            uint64_t coeff_start = dec->profile_enabled ? dec_now_ns() : 0;
+            dec_read_coeffs(d->tans, d->rc, d->rc_ctx, tu, 64, TC_BLOCK_8x8_ID);
+            dec_profile_add(dec, &dec->profile_coeff_ns, coeff_start);
+            int eff_band[4];
+            for (int band = 0; band < 4; band++) eff_band[band] = tc_eff_scale(qp, band, 0);
+            int nonzero = 0, dc_only = 1;
+            for (int i=0;i<64;i++){
+                int band=tc_freq_band(i,8);
+                iq[i]=(tc_coeff_t)tc_dequant_coeff(tu[i],eff_band[band]);
+                if (tu[i]) nonzero = 1;
+                if (i != 0 && tu[i]) dc_only = 0;
+            }
+            if (!nonzero) {
+                /* Zero residuals are common for v2 skip-like inter CUs.
+                 * Copy rows directly instead of clearing a transform buffer
+                 * and executing 64 add/clip operations. */
+                uint64_t copy_start = dec->profile_enabled ? dec_now_ns() : 0;
+                for (int y=0;y<8;y++)
+                    memcpy(dec->cur->y + (py+oy+y)*rs + px+ox,
+                           pred + (oy+y)*cu + ox, 8);
+                dec_profile_add(dec, &dec->profile_copy_ns, copy_start);
+            } else if (dc_only) {
+                /* The fixed-point residual IDCT of a DC-only 8x8 TU is
+                 * spatially constant.  Apply the exact two rounded 1-D
+                 * operations used by ndct8_point(), once, then reconstruct
+                 * the block without entering the 64-operation transform. */
+                int v = tc_idct_dc8_res((int)iq[0]);
+                for (int y=0;y<8;y++) for (int x=0;x<8;x++) {
+                    int z=(int)pred[(oy+y)*cu+ox+x]+v;
+                    dec->cur->y[(py+oy+y)*rs+(px+ox+x)]=(tc_pixel_t)tc_clip(z,0,255);
+                }
+            } else {
+                tc_coeff_t res8[64];
+                uint64_t transform_start = dec->profile_enabled ? dec_now_ns() : 0;
+                tc_idct8x8_res(iq,res8,8);
+                dec_profile_add(dec, &dec->profile_transform_ns, transform_start);
+                for (int y=0;y<8;y++) for (int x=0;x<8;x++){ int v=(int)pred[(oy+y)*cu+ox+x]+res8[y*8+x]; dec->cur->y[(py+oy+y)*rs+(px+ox+x)]=(tc_pixel_t)tc_clip(v,0,255); }
+            }
+        } else {
+            for (int q=0;q<4;q++){
+                int sx=(q&1)*4, sy=(q&2)*2;
+                /* The encoder emits one transform-size flag per 4×4
+                 * sub-block (always 4×4 in practice); read to consume. */
+                (void)qt_read_bits(d, RC_CTX_DCT_SIZE, 1);
+                 tc_coeff_t c4[16], iq4[16];
+                 uint64_t coeff_start = dec->profile_enabled ? dec_now_ns() : 0;
+                 dec_read_coeffs(d->tans, d->rc, d->rc_ctx, c4, 16, TC_BLOCK_4x4_ID);
+                 dec_profile_add(dec, &dec->profile_coeff_ns, coeff_start);
+                 int eff4_band[4];
+                 for (int band = 0; band < 4; band++) eff4_band[band] = tc_eff_scale(qp, band, 0);
+                 int nonzero = 0, dc_only = 1;
+                 for (int i=0;i<16;i++){
+                     int band=tc_freq_band(i,4);
+                     iq4[i]=(tc_coeff_t)tc_dequant_coeff(c4[i],eff4_band[band]);
+                     if (c4[i]) nonzero = 1;
+                     if (i != 0 && c4[i]) dc_only = 0;
+                 }
+                if (!nonzero) {
+                    uint64_t copy_start = dec->profile_enabled ? dec_now_ns() : 0;
+                    for (int y=0;y<4;y++)
+                        memcpy(dec->cur->y + (py+oy+sy+y)*rs + px+ox+sx,
+                               pred + (oy+sy+y)*cu + ox+sx, 4);
+                    dec_profile_add(dec, &dec->profile_copy_ns, copy_start);
+                } else if (dc_only) {
+                    int v = tc_idct_dc4_res((int)iq4[0]);
+                    for (int y=0;y<4;y++) for (int x=0;x<4;x++) {
+                        int z=(int)pred[(oy+sy+y)*cu+(ox+sx+x)]+v;
+                        dec->cur->y[(py+oy+sy+y)*rs+(px+ox+sx+x)]=(tc_pixel_t)tc_clip(z,0,255);
+                    }
+                } else {
+                    tc_coeff_t res4[16];
+                    uint64_t transform_start = dec->profile_enabled ? dec_now_ns() : 0;
+                    tc_idct4x4_res(iq4,res4,4);
+                    dec_profile_add(dec, &dec->profile_transform_ns, transform_start);
+                    for (int y=0;y<4;y++) for (int x=0;x<4;x++){ int v=(int)pred[(oy+sy+y)*cu+(ox+sx+x)]+res4[y*4+x]; dec->cur->y[(py+oy+sy+y)*rs+(px+ox+sx+x)]=(tc_pixel_t)tc_clip(v,0,255); }
+                }
+            }
+        }
+    }
+}
+
+/* Chroma residual of one CU: 4×4 transforms on both components, QP+1,
+ * no transform-size flag.  Mirrors qt_code_chroma(). */
+static void qt_dec_chroma(qt_dec_t *d, int px, int py, int cu,
+                          const tc_pixel_t *pred[2])
+{
+    tc_decoder_t *dec = d->dec;
+    int qp = d->qp_c, cs = cu/2;
+    int rs = dec->cur->stride_c;
+    tc_pixel_t *rec[2] = { dec->cur->cb, dec->cur->cr };
+    for (int comp = 0; comp < 2; comp++) {
+        for (int ty = 0; ty < cs/4; ty++)
+            for (int tx = 0; tx < cs/4; tx++) {
+                int ox=tx*4, oy=ty*4;
+                tc_coeff_t c4[16], iq[16];
+                uint64_t coeff_start = dec->profile_enabled ? dec_now_ns() : 0;
+                dec_read_coeffs(d->tans, d->rc, d->rc_ctx, c4, 16, TC_BLOCK_4x4_ID);
+                dec_profile_add(dec, &dec->profile_coeff_ns, coeff_start);
+                int eff4_band[4];
+                for (int band = 0; band < 4; band++) eff4_band[band] = tc_eff_scale(qp, band, 0);
+                int nonzero = 0, dc_only = 1;
+                for (int i=0;i<16;i++){
+                    int band=tc_freq_band(i,4);
+                    iq[i]=(tc_coeff_t)tc_dequant_coeff(c4[i],eff4_band[band]);
+                    if (c4[i]) nonzero = 1;
+                    if (i != 0 && c4[i]) dc_only = 0;
+                }
+                if (!nonzero) {
+                    uint64_t copy_start = dec->profile_enabled ? dec_now_ns() : 0;
+                    for (int y=0;y<4;y++)
+                        memcpy(rec[comp] + (py/2+oy+y)*rs + px/2+ox,
+                               pred[comp] + (oy+y)*cs + ox, 4);
+                    dec_profile_add(dec, &dec->profile_copy_ns, copy_start);
+                } else if (dc_only) {
+                    int v = ((int)iq[0] * 8192 + 8192) >> 14;
+                    v = (v * 8192 + 8192) >> 14;
+                    for (int y=0;y<4;y++) for (int x=0;x<4;x++) {
+                        int z=(int)pred[comp][(oy+y)*cs+(ox+x)]+v;
+                        rec[comp][(py/2+oy+y)*rs+(px/2+ox+x)]=(tc_pixel_t)tc_clip(z,0,255);
+                    }
+                } else {
+                    tc_coeff_t res[16];
+                    uint64_t transform_start = dec->profile_enabled ? dec_now_ns() : 0;
+                    tc_idct4x4_res(iq,res,4);
+                    dec_profile_add(dec, &dec->profile_transform_ns, transform_start);
+                    for (int y=0;y<4;y++) for (int x=0;x<4;x++){
+                        int v=(int)pred[comp][(oy+y)*cs+(ox+x)]+res[y*4+x];
+                        rec[comp][(py/2+oy+y)*rs+(px/2+ox+x)]=(tc_pixel_t)tc_clip(v,0,255);
+                    }
+                }
+            }
+    }
+}
+
+/* Decode one leaf CU.  Reads the exact syntax the encoder's write
+ * pass emits and reconstructs identically. */
+static void qt_dec_leaf(qt_dec_t *d, int depth, int cx, int cy)
+{
+    int cu = 8 << (TC_QT_MAX_DEPTH - depth);
+    int px = d->ctu_x + cx*8, py = d->ctu_y + cy*8;
+    tc_decoder_t *dec = d->dec;
+    tc_pixel_t *pred = dec->v2_pred;
+    const tc_pixel_t *cpred[2];
+    tc_pixel_t (*cbuf)[(TC_CTU_SIZE/2) * (TC_CTU_SIZE/2)] = dec->v2_cbuf;
+    cpred[0]=cbuf[0]; cpred[1]=cbuf[1];
+    int is_intra = (int)qt_read_bits(d, RC_CTX_BLOCK_MODE, 1);
+    int skip = 0, merge = 0;
+    int dct_size = TC_BLOCK_8x8_ID;
+    int32_t mvd_x = 0, mvd_y = 0;
+
+    if (is_intra) {
+        uint32_t im = qt_read_bits(d, RC_CTX_INTRA_MODE, 5);
+        if (im >= TC_INTRA_MODES) {
+            d->bs->error = 1;
+            im = TC_INTRA_DC;
+        }
+        uint32_t ch_intra = qt_read_bits(d, RC_CTX_BLOCK_MODE, 1);
+        if (ch_intra) {
+            /* reserved: intra chroma DC with explicit cmode (3 bits) */
+            (void)qt_read_bits(d, RC_CTX_INTRA_MODE, 3);
+        }
+        tc_pixel_t ra[2*64+1], rl[2*64+1];
+        tc_intra_get_ref_v2(dec->cur->y, dec->cur->stride_y, px, py, cu,
+                            dec->width, dec->height, ra+1, rl+1);
+        tc_intra_predict(pred, cu, ra+1, rl+1, cu, (tc_intra_mode_t)im);
+        qt_dec_luma(d, px, py, cu, pred);
+        uint64_t chroma_start = dec->profile_enabled ? dec_now_ns() : 0;
+        if (ch_intra) {
+            tc_intra_chroma_dc(dec->cur->cb, dec->cur->stride_c, px/2, py/2, cu/2, cbuf[0], cu/2);
+            tc_intra_chroma_dc(dec->cur->cr, dec->cur->stride_c, px/2, py/2, cu/2, cbuf[1], cu/2);
+        } else {
+            /* Intra luma CUs carry collocated chroma motion compensation
+             * from dpb[0] using the MVP-derived MV (v2 design); falls
+             * back to neighbour-DC when no reference exists yet. */
+            tc_mv_s cmv = qt_dec_mvp(d, cx, cy);
+            cmv.x += px*4; cmv.y += py*4;
+            const tc_frame_buf_t *r = dec->dpb[0].frame;
+            if (r) {
+                tc_inter_predict_chroma(r->cb, r->stride_c, dec->width/2, dec->height/2, cmv, cbuf[0], cu/2, cu/2);
+                tc_inter_predict_chroma(r->cr, r->stride_c, dec->width/2, dec->height/2, cmv, cbuf[1], cu/2, cu/2);
+            } else {
+                tc_intra_chroma_dc(dec->cur->cb, dec->cur->stride_c, px/2, py/2, cu/2, cbuf[0], cu/2);
+                tc_intra_chroma_dc(dec->cur->cr, dec->cur->stride_c, px/2, py/2, cu/2, cbuf[1], cu/2);
+            }
+        }
+        qt_dec_chroma(d, px, py, cu, cpred);
+        dec_profile_add(dec, &dec->profile_chroma_ns, chroma_start);
+    } else {
+        int ref_sel = 0;
+        if (d->frame_type == TC_FRAME_BIDIR) {
+            ref_sel = (int)qt_read_bits(d, RC_CTX_REF_SEL, 1);
+            (void)qt_read_bits(d, RC_CTX_BLOCK_MODE, 1);  /* bi flag (reserved) */
+            if (ref_sel > 1) d->bs->error = 1;
+        }
+        uint32_t skipf = qt_read_bits(d, RC_CTX_SKIP_FLAG, 1);
+        if (skipf) {
+            skip = 1;
+        } else {
+            uint32_t mergef = qt_read_bits(d, RC_CTX_MERGE_FLAG, 1);
+            if (mergef) {
+                merge = 1;
+            } else {
+                dct_size = (int)qt_read_bits(d, RC_CTX_DCT_SIZE, 1);
+                mvd_x = qt_read_se(d, RC_CTX_MVD_X);
+                mvd_y = qt_read_se(d, RC_CTX_MVD_Y);
+                if (mvd_x < -32768 || mvd_x > 32767 ||
+                    mvd_y < -32768 || mvd_y > 32767)
+                    d->bs->error = 1;
+            }
+        }
+        tc_mv_s mvp = qt_dec_mvp(d, cx, cy);
+        tc_mv_s mv = { mvp.x + px*4, mvp.y + py*4 };
+        if (!skip && !merge) { mv.x += mvd_x; mv.y += mvd_y; }
+
+        /* Luma inter prediction: BIDIR frames average forward+mirrored
+         * backward references (reserved syntax for v2 — the v2 encoder
+         * does not emit B-frames); otherwise single dpb[0] prediction. */
+            if (d->frame_type == TC_FRAME_BIDIR) {
+            const tc_frame_buf_t *r1 = ref_sel ? dec->dpb[1].frame : dec->dpb[0].frame;
+            const tc_frame_buf_t *r2 = ref_sel ? dec->dpb[0].frame : dec->dpb[1].frame;
+            if (r1 && r2) {
+                tc_pixel_t *t1 = dec->v2_bipred_a;
+                tc_pixel_t *t2 = dec->v2_bipred_b;
+                uint64_t motion_start = dec->profile_enabled ? dec_now_ns() : 0;
+                tc_inter_predict(r1->y, r1->stride_y, dec->width, dec->height, mv, t1, cu, cu);
+                tc_mv_s mv2 = { -mv.x, -mv.y };
+                tc_inter_predict(r2->y, r2->stride_y, dec->width, dec->height, mv2, t2, cu, cu);
+                for (int i=0;i<cu*cu;i++) pred[i]=(tc_pixel_t)((t1[i]+t2[i]+1)>>1);
+                dec_profile_add(dec, &dec->profile_motion_ns, motion_start);
+            } else if (r1) {
+                tc_inter_predict(r1->y, r1->stride_y, dec->width, dec->height, mv, pred, cu, cu);
+            } else {
+                memset(pred, 128, (size_t)cu*cu);
+            }
+        } else {
+            const tc_frame_buf_t *r = dec->dpb[0].frame;
+            uint64_t motion_start = dec->profile_enabled ? dec_now_ns() : 0;
+            if (r) tc_inter_predict(r->y, r->stride_y, dec->width, dec->height, mv, pred, cu, cu);
+            else   memset(pred, 128, (size_t)cu*cu);
+            dec_profile_add(dec, &dec->profile_motion_ns, motion_start);
+        }
+
+        if (!skip) {
+            qt_dec_luma(d, px, py, cu, pred);
+            uint64_t chroma_start = dec->profile_enabled ? dec_now_ns() : 0;
+            /* Inter CUs never transmit a chroma-intra flag: chroma is
+             * always collocated MC from dpb[0] with the luma MV. */
+            const tc_frame_buf_t *r = dec->dpb[0].frame;
+            if (r) {
+                tc_inter_predict_chroma(r->cb, r->stride_c, dec->width/2, dec->height/2, mv, cbuf[0], cu/2, cu/2);
+                tc_inter_predict_chroma(r->cr, r->stride_c, dec->width/2, dec->height/2, mv, cbuf[1], cu/2, cu/2);
+            } else {
+                tc_intra_chroma_dc(dec->cur->cb, dec->cur->stride_c, px/2, py/2, cu/2, cbuf[0], cu/2);
+                tc_intra_chroma_dc(dec->cur->cr, dec->cur->stride_c, px/2, py/2, cu/2, cbuf[1], cu/2);
+            }
+            qt_dec_chroma(d, px, py, cu, cpred);
+            dec_profile_add(dec, &dec->profile_chroma_ns, chroma_start);
+        } else {
+            /* Skip: luma prediction only; chroma is deliberately not
+             * touched (matches the encoder — both sides hold the same
+             * stale values, so reconstruction stays in lockstep). */
+            uint64_t copy_start = dec->profile_enabled ? dec_now_ns() : 0;
+            for (int y = 0; y < cu; y++)
+                memcpy(dec->cur->y + (py + y) * dec->cur->stride_y + px,
+                       pred + y * cu, (size_t)cu);
+            dec_profile_add(dec, &dec->profile_copy_ns, copy_start);
+        }
+    }
+
+
+    /* Update the MV grid exactly as the encoder does: intra cells mark
+     * themselves unavailable; inter cells store the CU's absolute MV
+     * minus the cell's own position, truncated to int16. */
+    int cs = cu/8;
+    for (int y=0;y<cs;y++) for (int x=0;x<cs;x++){
+        qt_mvcell_t *g = &d->grid[(cy+y)*TC_MVGRID_STRIDE + (cx+x)];
+        if (is_intra) {
+            g->intra = 1;
+        } else {
+            g->intra = 0;
+            tc_mv_s mvp = qt_dec_mvp(d, cx, cy);
+            int base_x = mvp.x + px*4 + ((merge || skip) ? 0 : mvd_x);
+            int base_y = mvp.y + py*4 + ((merge || skip) ? 0 : mvd_y);
+            g->dx = (int16_t)(base_x - (px + x*8)*4);
+            g->dy = (int16_t)(base_y - (py + y*8)*4);
+        }
+    }
+    (void)dct_size;
+}
+
+/* Quadtree split recursion.  Nodes fully outside the frame are skipped
+ * without any syntax (the encoder writes nothing for them); every
+ * in-frame node carries a 1-bit split flag. */
+static void qt_dec_split(qt_dec_t *d, int depth, int cx, int cy)
+{
+    int cu = 8 << (TC_QT_MAX_DEPTH - depth);
+    int px = d->ctu_x + cx*8, py = d->ctu_y + cy*8;
+    int in_frame = (px + cu <= d->dec->width && py + cu <= d->dec->height);
+
+    /* Child offset in 8×8 cells is half the parent side: 2^(2-depth).
+     * Only reachable at depth < 3 (min CU). */
+    if (!in_frame && cu > TC_QT_MIN_CU) {
+        for (int q=0;q<4;q++)
+            qt_dec_split(d, depth+1, cx+((q&1)<<(2-depth)), cy+((q>>1)<<(2-depth)));
+        return;
+    }
+    if (!in_frame) return;
+
+    uint32_t split = qt_read_bits(d, RC_CTX_QT_SPLIT + depth, 1);
+    /* A split flag at the minimum CU size is malformed. */
+    if (split && cu == TC_QT_MIN_CU) {
+        d->bs->error = 1;
+        return;
+    }
+    if (split) {
+        for (int q=0;q<4;q++)
+            qt_dec_split(d, depth+1, cx+((q&1)<<(2-depth)), cy+((q>>1)<<(2-depth)));
+    } else {
+        qt_dec_leaf(d, depth, cx, cy);
+    }
+}
+
+/* Decode one CTU (quadtree) and deblock it when fully in-frame. */
+static void decode_ctu_v2(tc_decoder_t *dec, int row, int col, int qp,
+                          tc_frame_type_t frame_type, int poc,
+                          tc_bs_reader_t *bs, tc_tans_dec_t *tans,
+                          tc_rc_dec_t *rc, tc_rc_ctx_t *rc_ctx)
+{
+    qt_dec_t d;
+    memset(&d, 0, sizeof(d));
+    d.dec = dec;
+    d.ctu_x = col * TC_CTU_SIZE;
+    d.ctu_y = row * TC_CTU_SIZE;
+    d.qp = qp;
+    d.qp_c = tc_clip(qp + 1, 0, 63);
+    d.frame_type = frame_type;
+    d.poc = poc;
+    d.bs = bs; d.tans = tans; d.rc = rc; d.rc_ctx = rc_ctx;
+    for (int i = 0; i < TC_MVGRID_STRIDE*TC_MVGRID_STRIDE; i++) d.grid[i].intra = 1;
+    qt_dec_split(&d, 0, 0, 0);
+    if (d.ctu_x + TC_CTU_SIZE <= dec->width && d.ctu_y + TC_CTU_SIZE <= dec->height) {
+        uint64_t deblock_start = dec->profile_enabled ? dec_now_ns() : 0;
+        tc_deblock_ctu(dec->cur->y, dec->cur->stride_y,
+                       dec->cur->cb, dec->cur->stride_c,
+                       dec->cur->cr, dec->cur->stride_c,
+                       d.ctu_x, d.ctu_y, qp);
+        dec_profile_add(dec, &dec->profile_deblock_ns, deblock_start);
+    }
+
+    /* v2 SAO is signaled by the frame tool flags. Older v2 streams
+     * without the flag remain decodable and carry no SAO syntax. */
+    if (dec->last_header.tool_flags & TC_TOOL_SAO) {
+        uint32_t has_sao = qt_read_bits(&d, RC_CTX_SAO_TYPE, 1);
+        if (has_sao > 1) { d.bs->error = 1; return; }
+        if (has_sao) {
+            uint32_t band = qt_read_bits(&d, RC_CTX_SAO_BAND, 5);
+            /* Offset is the v2 bounded mapped nibble 0..14 (-7..+7).
+             * 15 is reserved and must be rejected, not clamped. */
+            uint32_t offset_code = qt_read_bits(&d, RC_CTX_SAO_OFFSET, 4);
+            if (band > 31 || offset_code > 14) {
+                d.bs->error = 1;
+                return;
+            }
+            int32_t offset = (int32_t)offset_code - 7;
+            tc_sao_ctu_luma(dec->cur->y, dec->cur->stride_y,
+                            d.ctu_x, d.ctu_y, dec->width, dec->height,
+                            (int)band, (int)offset);
+        }
+    }
+}
+
+static void decode_row_v2(tc_decoder_t *dec, int row, int qp,
+                          tc_frame_type_t frame_type, int poc,
+                          tc_bs_reader_t *bs, tc_tans_dec_t *tans,
+                          tc_rc_dec_t *rc, tc_rc_ctx_t *rc_ctx)
+{
+    for (int col = 0; col < dec->num_ctu_cols; col++) {
+        decode_ctu_v2(dec, row, col, qp, frame_type, poc, bs, tans, rc, rc_ctx);
+    }
+}
+
 #if !defined(TCODEC_NO_THREADS)
 /* WPP thread pool wrapper matching tc_wpp_row_func signature.
  * Each thread picks its per-row reader/tans by row index. */
@@ -738,6 +1223,39 @@ int tc_decoder_entropy_coded(tc_decoder_t *dec)
     return dec->use_entropy_coded;
 }
 
+void tc_decoder_set_profile(tc_decoder_t *dec, int enabled)
+{
+    if (dec) dec->profile_enabled = enabled ? 1 : 0;
+}
+
+void tc_decoder_reset_profile(tc_decoder_t *dec)
+{
+    if (!dec) return;
+    dec->profile_parse_ns = 0;
+    dec->profile_coeff_ns = 0;
+    dec->profile_transform_ns = 0;
+    dec->profile_motion_ns = 0;
+    dec->profile_chroma_ns = 0;
+    dec->profile_deblock_ns = 0;
+    dec->profile_copy_ns = 0;
+}
+
+void tc_decoder_get_profile(tc_decoder_t *dec,
+                            uint64_t *parse_ns, uint64_t *coeff_ns,
+                            uint64_t *transform_ns, uint64_t *motion_ns,
+                            uint64_t *chroma_ns, uint64_t *deblock_ns,
+                            uint64_t *copy_ns)
+{
+    if (!dec) return;
+    if (parse_ns) *parse_ns = dec->profile_parse_ns;
+    if (coeff_ns) *coeff_ns = dec->profile_coeff_ns;
+    if (transform_ns) *transform_ns = dec->profile_transform_ns;
+    if (motion_ns) *motion_ns = dec->profile_motion_ns;
+    if (chroma_ns) *chroma_ns = dec->profile_chroma_ns;
+    if (deblock_ns) *deblock_ns = dec->profile_deblock_ns;
+    if (copy_ns) *copy_ns = dec->profile_copy_ns;
+}
+
 /* ── Main decode function ────────────────────────────────────── */
 
 tc_error_t tc_decoder_decode(tc_decoder_t *dec,
@@ -755,6 +1273,18 @@ tc_error_t tc_decoder_decode(tc_decoder_t *dec,
     if (err != TC_OK) return err;
 
     dec->last_header = hdr;
+
+    /* v2 uses 4:2:0 chroma and row-wise CU copies; reject odd geometry
+     * before allocating or entering the quadtree path. */
+    if (hdr.version == TC_VERSION_V2 &&
+        ((hdr.width & 1u) || (hdr.height & 1u))) {
+        return TC_ERR_BITSTREAM;
+    }
+
+    /* Explicit per-frame decoder path dispatch: v2 payloads are never
+     * handled by the legacy 8×8 block decoder and vice versa. */
+    dec->use_v2 = (hdr.version == TC_VERSION_V2) ? 1 : 0;
+    dec->cur_qp = hdr.qp;
 
     /* Update dimensions if auto-detect */
     if (dec->width == 0 || dec->height == 0) {
@@ -786,9 +1316,11 @@ tc_error_t tc_decoder_decode(tc_decoder_t *dec,
 
     /* Determine if entropy coding is active for this frame.
      * TC_TOOL_ENTROPY_CODED is mutually exclusive with WPP
-     * (serial bitstream; WPP+RC to be addressed in Phase 9). */
+     * (serial bitstream; WPP+RC to be addressed in Phase 9).
+     * v2 (v1 header layout) carries the same tool flag and is
+     * range-coded when the flag is set (the --v2 CLI forces it). */
     int use_entropy_coded = 0;
-    if (hdr.version == TC_VERSION_V1 && (hdr.tool_flags & TC_TOOL_ENTROPY_CODED)) {
+    if (hdr.version != TC_VERSION_V0 && (hdr.tool_flags & TC_TOOL_ENTROPY_CODED)) {
         use_entropy_coded = 1;
     }
     dec->use_entropy_coded = use_entropy_coded;
@@ -818,7 +1350,7 @@ tc_error_t tc_decoder_decode(tc_decoder_t *dec,
      * Graceful degradation: we still decode the frame even on CRC mismatch,
      * but the caller can check last_crc_valid to detect corruption. */
     dec->last_crc_valid = 1;  /* Default: OK (no CRC or CRC matches) */
-    if (hdr.version == TC_VERSION_V1 && hdr.has_crc) {
+    if (hdr.version != TC_VERSION_V0 && hdr.has_crc) {
         if (size >= 2) {
             size_t crc_pos = size - 2;
             uint16_t stored_crc = (uint16_t)((data[crc_pos] << 8) | data[crc_pos + 1]);
@@ -848,6 +1380,14 @@ tc_error_t tc_decoder_decode(tc_decoder_t *dec,
      * we can't use WPP dispatch (e.g., no thread pool), so the reader
      * is positioned correctly for sequential decoding. */
     int is_wpp = (hdr.flags & TC_FLAG_WPP) != 0;
+
+    /* v2 is a sequential (range-coded) format: WPP entry points are
+     * never written by the v2 encoder.  A v2 stream claiming WPP is
+     * malformed — refuse it instead of mis-parsing the payload. */
+    if (dec->use_v2 && is_wpp) {
+        return TC_ERR_BITSTREAM;
+    }
+
     size_t row_data_start = 0;  /* Byte offset where row data begins */
     size_t row_offsets[64];     /* Max CTU rows: 4096/64 = 64 */
     int have_row_offsets = 0;
@@ -941,6 +1481,19 @@ tc_error_t tc_decoder_decode(tc_decoder_t *dec,
     }
 #endif /* !TCODEC_NO_THREADS */
 
+    /* Mirror the encoder: after scene-cut keyframes (poc > 0) the DPB is
+     * cleared so no pre-cut frame can be referenced.  Keyframes never
+     * use inter prediction, but v2 intra leaves with ch_intra=0 fall
+     * back to neighbour-DC chroma when dpb[0] is empty — encoder and
+     * decoder must agree on that emptiness. */
+    if (hdr.frame_type == TC_FRAME_KEY && hdr.frame_num > 0) {
+        for (int i = 0; i < TC_REF_FRAMES; i++) {
+            tc_frame_free(dec->dpb[i].frame);
+            dec->dpb[i].frame = NULL;
+            dec->dpb[i].poc = -1;
+        }
+    }
+
     if (!use_wpp) {
         /* Sequential: decode all rows from a single bitstream reader.
          *
@@ -956,9 +1509,15 @@ tc_error_t tc_decoder_decode(tc_decoder_t *dec,
         }
 
         for (int row = 0; row < num_ctu_rows; row++) {
-            decode_row_impl(dec, row, qp, hdr.frame_type, hdr.frame_num,
-                            &dec->bs, &dec->tans,
-                            rc_ptr, rc_ctx_ptr);
+            if (dec->use_v2) {
+                /* Explicit v2 quadtree path — never the legacy decoder. */
+                decode_row_v2(dec, row, qp, hdr.frame_type, hdr.frame_num,
+                              &dec->bs, &dec->tans, rc_ptr, rc_ctx_ptr);
+            } else {
+                decode_row_impl(dec, row, qp, hdr.frame_type, hdr.frame_num,
+                                &dec->bs, &dec->tans,
+                                rc_ptr, rc_ctx_ptr);
+            }
             /* WPP rows are byte-aligned — skip padding to reach
              * the next row's start. Without this, the reader would
              * misinterpret padding bits as block data.
@@ -980,6 +1539,9 @@ tc_error_t tc_decoder_decode(tc_decoder_t *dec,
     (void)row_data_start;
     (void)is_wpp;
     (void)use_wpp;
+
+    if (dec->use_v2 && dec->bs.error)
+        return TC_ERR_BITSTREAM;
 
     /* Update DPB: shift entries and insert new frame at slot 0.
      * IMPORTANT: Must free oldest entry BEFORE struct copy loop,

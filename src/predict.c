@@ -353,3 +353,85 @@ tc_sad_t tc_intra_cost(const tc_pixel_t *orig, int orig_stride,
     }
     return sad;
 }
+
+/* ── Chroma intra DC prediction (bitstream v2) ──────────────────
+ *
+ * Mean of the reconstructed samples directly above and to the left of
+ * the chroma block; 128 when neither neighbour exists.  Identical on
+ * encoder and decoder (both run on the same reconstruction).
+ * ══════════════════════════════════════════════════════════════ */
+
+void tc_intra_chroma_dc(const tc_pixel_t *recon_c, int stride,
+                        int cx, int cy, int csize,
+                        tc_pixel_t *TCODEC_RESTRICT dst, int dst_stride)
+{
+    int sum = 0, n = 0;
+    if (cy > 0) {
+        for (int i = 0; i < csize; i++) { sum += recon_c[(cy - 1) * stride + cx + i]; n++; }
+    }
+    if (cx > 0) {
+        for (int i = 0; i < csize; i++) { sum += recon_c[(cy + i) * stride + cx - 1]; n++; }
+    }
+    int dc = n ? (sum + n / 2) / n : 128;
+    for (int r = 0; r < csize; r++)
+        for (int c = 0; c < csize; c++)
+            dst[r * dst_stride + c] = (tc_pixel_t)dc;
+}
+
+/* ── Reference sample collection, bitstream v2 ──────────────────
+ *
+ * Same layout as tc_intra_get_ref() (index -1 = above-left corner,
+ * 0..2N-1 = reference run, 2N = interpolation guard) but the samples
+ * beyond the block (above-right / below-left) are *replicated* rather
+ * than read from the frame.
+ *
+ * Reason: with quadtree coding units the z-order scan makes the
+ * above-right region of a CU sometimes belong to a CU that has not
+ * been coded yet.  Reading it would make the result depend on stale
+ * buffer contents — fine as long as encoder and decoder happen to
+ * hold identical stale data, but not something a bitstream should
+ * ever rely on.  Replication is deterministic and costs very little
+ * (only the 45° NE angular mode loses information).
+ * ══════════════════════════════════════════════════════════════ */
+
+void tc_intra_get_ref_v2(const tc_pixel_t *recon, int stride,
+                         int x, int y, int blk_size, int frame_w, int frame_h,
+                         tc_pixel_t *ref_above, tc_pixel_t *ref_left)
+{
+    int have_above = (y > 0);
+    int have_left  = (x > 0);
+    tc_pixel_t tl;
+
+    if (have_above && have_left) tl = recon[(y - 1) * stride + (x - 1)];
+    else if (have_above)         tl = recon[(y - 1) * stride + x];
+    else if (have_left)          tl = recon[y * stride + (x - 1)];
+    else                         tl = 128;
+
+    if (have_above) {
+        const tc_pixel_t *ar = recon + (y - 1) * stride;
+        for (int i = 0; i < blk_size; i++) {
+            int px = x + i;
+            ref_above[i] = ar[px < frame_w ? px : frame_w - 1];
+        }
+    } else {
+        tc_pixel_t v = have_left ? recon[y * stride + (x - 1)] : (tc_pixel_t)128;
+        for (int i = 0; i < blk_size; i++) ref_above[i] = v;
+    }
+    for (int i = blk_size; i <= 2 * blk_size; i++)
+        ref_above[i] = ref_above[blk_size - 1];
+
+    if (have_left) {
+        for (int i = 0; i < blk_size; i++) {
+            int py = y + i;
+            ref_left[i] = recon[(py < frame_h ? py : frame_h - 1) * stride + (x - 1)];
+        }
+    } else {
+        tc_pixel_t v = have_above ? ref_above[0] : (tc_pixel_t)128;
+        for (int i = 0; i < blk_size; i++) ref_left[i] = v;
+    }
+    for (int i = blk_size; i <= 2 * blk_size; i++)
+        ref_left[i] = ref_left[blk_size - 1];
+
+    ref_above[-1] = tl;
+    ref_left[-1]  = tl;
+}

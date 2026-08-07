@@ -1,7 +1,15 @@
 #!/bin/bash
-# gen_golden.sh — Generate golden corpus for TCodec
-# Encodes standard test patterns at multiple QPs and stores
-# the bitstreams + SHA256 hashes for regression detection.
+# gen_golden.sh — Generate golden/conformance corpus for TCodec
+#
+# Encodes standard test patterns at multiple QPs across every supported
+# bitstream version and entropy mode, stores the bitstreams and decoded
+# outputs, and writes SHA-256 hashes for conformance verification.
+#
+#   ./tools/gen_golden.sh [golden_dir]
+#
+# The manifest (MANIFEST.sha256) is committed; the binary streams are
+# gitignored and regenerated locally. `make test` regenerates and
+# verifies before running the suite.
 set -e
 
 GOLDEN_DIR="${1:-golden}"
@@ -62,7 +70,7 @@ gen_yuv diagonal 128 128 diagonal
 gen_yuv gradient 320 240 gradient
 gen_yuv gradient 96 80 gradient
 
-# Encode each clip at multiple QPs and store bitstream + hash
+# Encode each clip at multiple QPs across all bitstream versions
 QPS="22 32 42"
 HASH_FILE="$GOLDEN_DIR/MANIFEST.sha256"
 > "$HASH_FILE"
@@ -70,26 +78,71 @@ HASH_FILE="$GOLDEN_DIR/MANIFEST.sha256"
 echo "Encoding golden bitstreams..."
 for yuv in "$GOLDEN_DIR"/*.yuv; do
     base=$(basename "$yuv" .yuv)
-    # Parse dimensions from filename (e.g. gradient_128x128)
+    case "$base" in *_dec) continue ;; esac   # skip decoded outputs
     dims=$(echo "$base" | grep -oP '\d+x\d+')
     w=$(echo "$dims" | cut -dx -f1)
     h=$(echo "$dims" | cut -dx -f2)
 
     for qp in $QPS; do
-        tcname="${base}_qp${qp}.tcv"
+        # v0: legacy 12-byte-header bitstream (frozen)
+        tcname="${base}_qp${qp}_v0.tcv"
         echo "  Encoding $tcname (w=$w h=$h qp=$qp)..."
-        "$TCENC" -w "$w" -h "$h" -q "$qp" -o "$GOLDEN_DIR/$tcname" "$yuv" 2>&1 || { echo "  FAILED: $tcname"; continue; }
+        "$TCENC" -w "$w" -h "$h" -q "$qp" --bs-version 0 \
+            -o "$GOLDEN_DIR/$tcname" "$yuv" 2>&1 \
+            || { echo "  FAILED: $tcname"; exit 1; }
         hash=$(sha256sum "$GOLDEN_DIR/$tcname" | cut -d' ' -f1)
         echo "$hash  $tcname" >> "$HASH_FILE"
-        # Verify decode roundtrip
-        "$TCDEC" "$GOLDEN_DIR/$tcname" "$GOLDEN_DIR/${tcname%.tcv}_dec.yuv" 2>&1 || true
+
+        # v1: default Exp-Golomb path
+        tcname="${base}_qp${qp}_v1.tcv"
+        echo "  Encoding $tcname (w=$w h=$h qp=$qp)..."
+        "$TCENC" -w "$w" -h "$h" -q "$qp" --bs-version 1 \
+            -o "$GOLDEN_DIR/$tcname" "$yuv" 2>&1 \
+            || { echo "  FAILED: $tcname"; exit 1; }
+        hash=$(sha256sum "$GOLDEN_DIR/$tcname" | cut -d' ' -f1)
+        echo "$hash  $tcname" >> "$HASH_FILE"
+
+        # v1 entropy: context-modeled range coder
+        tcname="${base}_qp${qp}_v1e.tcv"
+        echo "  Encoding $tcname (w=$w h=$h qp=$qp)..."
+        "$TCENC" -w "$w" -h "$h" -q "$qp" --bs-version 1 --entropy \
+            -o "$GOLDEN_DIR/$tcname" "$yuv" 2>&1 \
+            || { echo "  FAILED: $tcname"; exit 1; }
+        hash=$(sha256sum "$GOLDEN_DIR/$tcname" | cut -d' ' -f1)
+        echo "$hash  $tcname" >> "$HASH_FILE"
+
+        # v2: quadtree raw syntax
+        tcname="${base}_qp${qp}_v2.tcv"
+        echo "  Encoding $tcname (w=$w h=$h qp=$qp)..."
+        "$TCENC" -w "$w" -h "$h" -q "$qp" --v2 \
+            -o "$GOLDEN_DIR/$tcname" "$yuv" 2>&1 \
+            || { echo "  FAILED: $tcname"; exit 1; }
+        hash=$(sha256sum "$GOLDEN_DIR/$tcname" | cut -d' ' -f1)
+        echo "$hash  $tcname" >> "$HASH_FILE"
+
+        # v2 entropy: quadtree + range coder
+        tcname="${base}_qp${qp}_v2e.tcv"
+        echo "  Encoding $tcname (w=$w h=$h qp=$qp)..."
+        "$TCENC" -w "$w" -h "$h" -q "$qp" --v2 --entropy \
+            -o "$GOLDEN_DIR/$tcname" "$yuv" 2>&1 \
+            || { echo "  FAILED: $tcname"; exit 1; }
+        hash=$(sha256sum "$GOLDEN_DIR/$tcname" | cut -d' ' -f1)
+        echo "$hash  $tcname" >> "$HASH_FILE"
     done
 done
 
-# Store hash of the test binary
-sha256sum ./build/test_tcodec >> "$HASH_FILE"
+# Decode every conformance stream and hash the decoded output.
+# Byte-identical re-decode is asserted both here (manifest) and in
+# the C suite (test_golden_decode).
+echo "Decoding conformance streams..."
+for tc in "$GOLDEN_DIR"/*.tcv; do
+    dec="${tc%.tcv}_dec.yuv"
+    "$TCDEC" "$tc" "$dec" 2>&1 || { echo "  DECODE FAILED: $tc"; exit 1; }
+    hash=$(sha256sum "$dec" | cut -d' ' -f1)
+    echo "$hash  $(basename "$dec")" >> "$HASH_FILE"
+done
 
 echo ""
 echo "Golden corpus generated in $GOLDEN_DIR/"
 echo "Manifest: $HASH_FILE"
-cat "$HASH_FILE"
+(cd "$GOLDEN_DIR" && sha256sum -c MANIFEST.sha256) >/dev/null && echo "Manifest verified OK"

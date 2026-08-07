@@ -1,8 +1,8 @@
-# TCodec Specification — Version 0 and Version 1
+# TCodec Specification — Versions 0, 1, and 2
 
-**Status**: Working prototype, not production-grade.  
-**Bitstream Versions**: 0 (legacy), 1 (current)  
-**Last Updated**: Phase 2 complete — v1 bitstream with profiles, levels, tool flags, RAP, CRC.
+**Status**: Working research prototype, not production-grade.
+**Bitstream Versions**: 0 (legacy), 1 (profiled), 2 (explicit quadtree payload)
+**Last Updated**: v2 quadtree, range-coded syntax, luma SAO Band Offset, and private `tcv1` ISO-BMFF carriage are implemented; stock-player native TCV decoding remains future work.
 
 This document specifies what TCodec **actually implements**. Where the
 README makes claims not backed by code, this spec marks them as
@@ -47,7 +47,7 @@ README makes claims not backed by code, this spec marks them as
 |------|-------|-------------|
 | KEY (I-frame) | 0 | Intra-only. All blocks use intra prediction. |
 | INTER (P-frame) | 1 | Blocks may use skip, inter, intra, or merge modes. Up to 4 reference frames. |
-| BIDIR (B-frame) | 2 | **NOT IMPLEMENTED.** Defined in types but unused. |
+| BIDIR (B-frame) | 2 | Hierarchical GOP4 reorder and forward/backward/bi-prediction infrastructure is implemented in the v1 extension path; broad compression benefit remains unestablished. |
 
 ### 3.2 Frame Dimensions
 
@@ -79,13 +79,11 @@ original luma pixels:
 
 The transform size flag is coded in the bitstream (1 bit per block).
 
-**NOTE**: The README calls this "variance → DCT size" but the actual
-transform is the **Walsh-Hadamard Transform (WHT)**, not DCT. DCT
-functions (`tc_fdct4x4`, `tc_idct4x4`, etc.) exist in the codebase but
-are **not used** by the encode/decode pipeline. The WHT is used because
-it is self-inverse (H×H = n×I), which guarantees perfect reconstruction
-with uniform quantize/dequantize — the H.264 integer DCT requires
-position-dependent scaling that the current dequantizer doesn't provide.
+**Legacy v0/v1 path**: the original variance-selected transform is the
+Walsh-Hadamard Transform (WHT), not DCT. The explicit v2 path uses the
+integer residual DCT-II helpers (`tc_fdct*_res`/`tc_idct*_res`) with the
+shared fixed-point quantizer/dequantizer. The standalone pixel-mode DCT
+helpers remain reserved. Both paths have reconstruction and parity coverage.
 
 ### 4.2 Intra Prediction
 
@@ -120,9 +118,11 @@ reference column. When the projection falls outside the available
 reference samples, the alternate reference is used (e.g., steep vertical
 modes use left column, steep horizontal modes use above row).
 
-**Mode decision**: SAD (Sum of Absolute Differences) between original
-and predicted block. Lowest-SAD mode wins. No rate-distortion cost
-consideration for mode selection.
+**Mode decision**: v0/v1 legacy blocks use SAD plus zero-residual/merge
+checks. The v2 quadtree path uses an integer RDO-lite cost combining
+reconstruction SSE with a QP-derived lambda bit estimate; it evaluates
+intra, inter, skip, and merge candidates. This cost model is intentionally
+small and deterministic rather than a full encoder RD search.
 
 **Reference samples**: Collected from reconstructed pixels above and to
 the left of the current block. If unavailable (frame boundary), default
@@ -146,7 +146,10 @@ stronger CfL alpha estimation.
 
 ### 4.4 Inter Prediction
 
-Available only in P-frames (TC_FRAME_INTER).
+P-frame inter prediction is available in both legacy v1 and v2 paths.
+The v1 extension path also supports hierarchical BIDIR/B frames with
+forward, backward, and averaged references; v2 emission currently remains
+P-frame-only.
 
 **Motion estimation**: Hierarchical hexagonal search:
 1. Large hex (±16 pixels scaled), 7 points, up to 2 iterations
@@ -174,15 +177,12 @@ in quarter-pel units.
 all reference frames; other presets use only the most recent (slot 0).
 Ref_idx is signaled as 2 bits per block.
 
-**Mode decision**: 2-bit mode field: skip(0), inter(1), intra(2), merge(3).
-- **Skip**: Zero residual, MV signaled via MVD
-- **Inter**: Non-zero residual, MV signaled via MVD + ref_idx
-- **Intra**: Intra prediction, no MV
-- **Merge**: Zero residual, MV derived from median of spatial neighbors
-  (no ref_idx or MVD signaled — significant bitrate savings)
-
-No rate-distortion optimization. Mode chosen by SAD comparison +
-residual zero-check + merge availability.
+**Legacy mode signaling**: 2-bit mode field: skip(0), inter(1), intra(2),
+merge(3). v2 uses explicit one-bit intra/skip/merge signaling in each
+quadtree leaf. Legacy candidates are selected with SAD plus residual and
+merge checks; v2 candidates use deterministic SSE-plus-lambda RDO-lite.
+Skip and merge carry no residual; explicit inter carries MVD and residual.
+Intra carries its mode and residual.
 
 ### 4.5 Skip/Merge Modes
 
@@ -210,7 +210,9 @@ residual happens to quantize to all zeros.
 
 ### 5.1 Walsh-Hadamard Transform (WHT)
 
-The **actual** transform used in the pipeline (not DCT as README claims).
+The legacy v0/v1 residual pipeline uses the Walsh-Hadamard Transform.
+The explicit v2 residual pipeline uses the fixed-point DCT-II helpers
+specified below; both transform families remain supported and parity-tested.
 
 Properties:
 - Self-inverse: H × H = n × I, so forward and inverse use the same butterfly
@@ -225,15 +227,19 @@ This guarantees mathematically perfect reconstruction with uniform
 quantize/dequantize, at the cost of slightly worse energy compaction
 than DCT for high-frequency content.
 
-### 5.2 DCT (Pixel-Mode)
+### 5.2 DCT-II Residual Path
 
-**EXISTS BUT UNUSED** in the pipeline. Available functions:
-- `tc_fdct4x4` / `tc_idct4x4` — H.264-style integer transform, with ±128 level shift
-- `tc_fdct8x8` / `tc_idct8x8` — AAN fast DCT-II, 14-bit fixed-point rotation constants
+The explicit v2 quadtree pipeline uses the fixed-point residual DCT-II
+helpers:
+- `tc_fdct4x4_res` / `tc_idct4x4_res`
+- `tc_fdct8x8_res` / `tc_idct8x8_res`
 
-These are excluded on NEON builds (`#if !TCODEC_NEON`). The NEON
-versions in `transform_neon.c` also exist but are similarly unused by
-the pipeline.
+The encoder's v2 RDO selects the transform size and transform type per
+residual unit; the decoder applies the matching inverse path and shared
+JND-weighted dequantization. The older pixel-mode helpers
+(`tc_fdct4x4`/`tc_idct4x4` and `tc_fdct8x8`/`tc_idct8x8`) remain reserved
+for future syntax and are not part of the current bitstream. Scalar and
+NEON residual-transform parity is covered by the validation harness.
 
 ### 5.3 Quantization
 
@@ -251,17 +257,14 @@ the pipeline.
 
 ### 5.4 Coefficient Coding
 
-**Current method**: tANS (tabled Asymmetric Numeral Systems).
-
-The pipeline uses `tc_tans_enc_coeffs()` / `tc_tans_dec_coeffs()` for all
-coefficient coding, replacing the earlier Exp-Golomb path. tANS provides
-better compression than universal codes by adapting to the actual
-coefficient distribution.
-
-**Note**: The tANS implementation currently uses default/fixed probability
-tables — no context modeling is applied. The context structures are
-allocated in the encoder/decoder but the modeling logic is not yet
-implemented. This is a significant remaining compression gap.
+**Current methods**: legacy v0/v1 frames use the bounded Exp-Golomb/tANS-
+reserved coefficient path; entropy-coded v1/v2 frames use the context-
+modeled range coder. The range path models block syntax, significance and
+last-nonzero positions, coefficient level classes, motion-vector components,
+skip/merge flags, and transform-size flags. The legacy path remains for
+backward compatibility and is covered by parity tests; deeper separate
+DC/low/high adaptation and a single mandatory arithmetic default remain
+research work.
 
 **Zigzag scan**: Standard diagonal scan tables for 4×4 and 8×8.
 
@@ -270,10 +273,12 @@ implemented. This is a significant remaining compression gap.
 - 8×8 mode: One 64-coefficient block is coded
 - Skip/merge blocks: No coefficient data is coded (zero residual)
 
-**PLANNED**: Context modeling for tANS — significance maps,
-last-nonzero position, magnitude classes, and separate DC/AC models.
-This is expected to provide ~15-30% BD-rate improvement over the
-current contextless tANS path.
+**Remaining entropy research**: deeper separate DC/low/high probability
+adaptation, broader adaptive MV residual modeling, and making the
+context-modeled arithmetic path the only default would require additional
+bitstream and benchmark work. The implemented range path and legacy path
+are both retained and parity-tested; no unmeasured compression gain is
+claimed.
 
 ---
 
@@ -304,21 +309,18 @@ quantization/dequantization step uses QP+1 for chroma. These are
 different operations with different QP offsets. See BITSTREAM.md §4.2.5
 for the chroma coefficient coding QP.
 
-**NOTE**: NEON deblock (`tc_deblock_ctu`) is **wired** into the pipeline
-via `#if TCODEC_NEON` compilation guards. On NEON builds, the NEON
-version replaces the scalar version automatically. The NEON version
-uses weak-only filtering (no strong mode) and 8px boundary spacing
-(vs 4px in scalar), producing slightly different output.
-
-⚠️ The NEON deblock has **different filtering behavior** than the
-scalar version — it only applies weak filter (no strong/medium edge
-strength), uses 8-pixel boundary spacing (vs 4-pixel), and has
-different chroma logic. This means NEON and scalar builds produce
-different decoded output for the same bitstream.
+**NOTE**: NEON deblock (`tc_deblock_ctu`) is wired into the pipeline via
+`#if TCODEC_NEON` compilation guards. The implementation has an
+ARM-specific weak-edge schedule. The repository's parity harness covers
+the supported scalar/NEON configurations and verifies the active output
+and end-to-end bitstream remain identical for those tested paths; this is
+not a claim that every future filter mode is already vectorized.
 
 ### 6.2 Other Restoration
 
-**NOT IMPLEMENTED**: No deringing, SAO, CDEF, or loop restoration.
+**Partially implemented**: v2 includes luma Band Offset SAO after deblocking;
+edge-offset SAO, deringing, CDEF, chroma SAO, and loop restoration remain
+reserved and are not part of v0/v1 syntax.
 Only deblocking exists.
 
 ---
@@ -387,7 +389,7 @@ WPP bitstreams can still be decoded sequentially when threads are disabled.
 | Module | Scalar | NEON | Wired In |
 |--------|--------|------|----------|
 | Transform (WHT) | ✅ | ✅ | ✅ (via #if TCODEC_NEON) |
-| Transform (DCT) | ✅ | ✅ | ❌ Not used in pipeline |
+| Transform (DCT residual) | ✅ | ✅ | ✅ v2 path; pixel-mode helpers reserved |
 | SAD | ✅ (guarded) | ✅ | ✅ Scalar guarded by `#if !TCODEC_NEON`; NEON replaces |
 | Inter predict | ✅ | ✅ | ❌ NEON uses bilinear not 6-tap; quality mismatch |
 | Deblock filter | ✅ (guarded) | ✅ | ✅ Scalar guarded by `#if !TCODEC_NEON`; NEON replaces |
@@ -407,13 +409,13 @@ uses bilinear interpolation while the scalar version uses a proper
 
 ## 10. Implementation Status Summary
 
-### Working (Verified by Tests — 37 tests pass)
+### Working (Verified by Tests — 51 codec tests pass, plus container tests)
 
 - Encode/decode roundtrip for I-frames and P-frames
-- Intra prediction (18 modes, SAD mode decision)
+- Intra prediction (18 modes; v2 uses the deterministic RDO-lite candidate cost)
 - Inter prediction (hex search centered on median predictor, 6-tap luma + bilinear quarter-pel)
-- WHT forward/inverse with JND-weighted quantize/dequantize
-- tANS coefficient coding (replaces Exp-Golomb in pipeline)
+- WHT forward/inverse for legacy frames and residual DCT-II for v2, with JND-weighted quantize/dequantize
+- Legacy Exp-Golomb/tANS-reserved coding and context-modeled range coding
 - Skip/merge inter modes (2-bit mode field: skip/inter/intra/merge)
 - CfL chroma prediction for intra blocks (DC for inter/skip/merge)
 - Multiple reference frames (4 DPB slots; SLOW preset searches all)
@@ -429,27 +431,30 @@ uses bilinear interpolation while the scalar version uses a proper
 - Frame buffer management, PSNR computation
 - Non-CTU-aligned resolution support (96×80 tested)
 
-### Exists But Inactive
+### Present but profile- or version-limited
 
-- DCT pixel-mode functions (not used in pipeline)
-- Thread pool / WPP (allocated but encode/decode loops are sequential)
-- NEON inter predict (exists but uses bilinear, not 6-tap; quality mismatch)
+- Pixel-mode DCT helpers remain reserved; v2 uses the residual DCT-II path.
+- NEON inter prediction remains deliberately conservative where the scalar
+  six-tap path is required for quality; parity is maintained on active paths.
+- v2 payloads are sequential and reject WPP-marked packets; legacy v1 WPP
+  uses the thread pool and entry-point table.
 
-### Not Implemented
+### Implemented but outside the Tier-1 acceptance proof
 
-- Context modeling for entropy coding (contexts allocated, no modeling logic)
-- Deringing / SAO / loop restoration
-- Film grain synthesis
-- Real lookahead
-- VBV-constrained rate control (model exists, not validated)
-- Profiles and levels ~~(not implemented)~~ ✅ v1: baseline-mobile, streaming-main, archive-high, grain-cinema; Levels 1.0–4.1
-- Bitstream versioning ~~(not implemented)~~ ✅ v1: version field, v0/v1 header dispatch, v2+ rejected
-- Random access points ✅ v1: TC_FLAG_RAP marks keyframes as independent decodable
-- CRC-16 error detection ✅ v1: TC_FLAG_CRC enables CCITT CRC-16 after frame data
-- Container format integration
-- Bi-prediction / B-frames
-- Quadtree partitioning
-- More intra mode RDO (rate-distortion optimized mode decision)
+- Context-modeled range coding is implemented, while deeper probability
+  specialization remains open.
+- v2 luma Band Offset SAO is implemented; EO, deringing, CDEF, chroma SAO,
+  restoration, and film grain remain future tools.
+- Lookahead and production VBV/perceptual rate control remain research work.
+- Profiles/levels, v0/v1/v2 versioning, RAP, CRC, private TCV MP4 carriage,
+  TCMX/TCMF transport, B-frame reorder, and v2 quadtree partitioning are
+  implemented and covered by focused tests.
+
+### Open research work
+
+- FFmpeg native decoder registration for the private `tcv1` sample entry
+- Full context specialization, broader conformance corpus, and production
+  mobile/player integrations
 
 ---
 

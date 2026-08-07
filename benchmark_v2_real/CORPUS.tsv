@@ -1,0 +1,26 @@
+# TCodec real-content benchmark corpus (D8)
+#
+# Columns (TAB separated):
+#   id | source-url | fetch-bytes (0=all, N=byte-range prefix) | seek | duration | w | h | fps | class
+#
+# The corpus is *not* committed as binaries. tools/fetch_corpus.sh rebuilds
+# benchmark_v2_real/raw/<id>.mkv (FFV1 lossless) from these sources and
+# benchmark_v2_real/MANIFEST.sha256 pins the exact bytes of every clip.
+id	url	fetch_bytes	seek_s	dur_s	w	h	fps	class
+sintel_action	https://media.xiph.org/video/derf/y4m/sintel_trailer_2k_720p24.y4m	0	25	15	1280	720	24	animation-film-fastcuts-dark
+bbb_nature	https://media.xiph.org/video/derf/y4m/big_buck_bunny_720p24.y4m.xz	900000000	32	15	1280	720	24	3d-animation-nature-gradients
+ed_dark	https://media.xiph.org/video/derf/y4m/elephants_dream_720p24.y4m.xz	700000000	20	15	1280	720	24	3d-animation-dark-lowlight
+sita_flat	https://media.xiph.org/video/derf/y4m/sita_sings_the_blues_720p24.y4m.xz	700000000	12	15	1280	720	24	2d-flat-animation-titles
+tos_vfx	https://media.xiph.org/tearsofsteel/tears_of_steel_1080p.webm	0	240	15	1280	720	24	live-action-vfx-grain
+csgo_gaming	https://media.xiph.org/video/derf/twitch/y4m/CSGO.y4m	2900000000	0	15	1280	720	30	gaming-hud-fastpan
+minecraft_gaming	https://media.xiph.org/video/derf/twitch/y4m/MINECRAFT.y4m	2900000000	0	15	1280	720	30	gaming-blocky-flat
+screen_ui	generated:screen	0	0	15	1280	720	30	screen-content-text-ui
+park_joy	https://media.xiph.org/video/derf/y4m/park_joy_420_720p50.y4m	0	0	10	1280	720	50	nature-extreme-motion-water
+ducks_takeoff	https://media.xiph.org/video/derf/y4m/ducks_take_off_420_720p50.y4m	0	0	10	1280	720	50	nature-water-grain
+in_to_tree	https://media.xiph.org/video/derf/y4m/in_to_tree_420_720p50.y4m	0	0	10	1280	720	50	nature-dolly-fine-detail
+old_town_cross	https://media.xiph.org/video/derf/y4m/old_town_cross_420_720p50.y4m	0	0	10	1280	720	50	aerial-pan-buildings
+parkrun	https://media.xiph.org/video/derf/y4m/720p50_parkrun_ter.y4m	0	0	10	1280	720	50	grain-heavy-snow-pan
+stockholm	https://media.xiph.org/video/derf/y4m/720p5994_stockholm_ter.y4m	0	0	10	1280	720	60	city-pan-detail
+vidyo_talk	https://media.xiph.org/video/derf/y4m/vidyo1_720p_60fps.y4m	0	0	10	1280	720	60	talking-head-conference
+sintel_1080p	https://media.xiph.org/video/derf/y4m/sintel_trailer_2k_1080p24.y4m	0	25	10	1920	1080	24	1080p-decode-speed-target
+tos_1080p	https://media.xiph.org/tearsofsteel/tears_of_steel_1080p.webm	0	240	10	1920	1080	24	1080p-decode-speed-target
