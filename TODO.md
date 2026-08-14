@@ -20,7 +20,7 @@
   [x] **ACT 1**: Wire JND per coefficient band weighting — ✅ Wired: encoder/decoder apply `tc_freq_band()` + `tc_jnd_weight()` per coefficient inline in the quantize/dequantize loops.
   [x] **ACT 2**: Wire median MV predictor — ✅ Wired: median of spatial neighbors used as ME search center AND as MVD predictor (replaces collocated). Dead `median_predictor()` function removed from motion.c.
   [x] **ACT 3**: Wire NEON SAD into pipeline — ✅ Wired: scalar `tc_sad()` guarded by `#if !TCODEC_NEON`; NEON `tc_sad()` dispatches 4×4/8×8/16×16 automatically.
-  [ ] **ACT 4**: Wire NEON inter predict — `tc_inter_predict_neon()` exists but uses bilinear (not 6 tap). **Deferred** — scalar `tc_inter_predict()` uses proper 6 tap luma filter with bilinear fallback; NEON version would reduce quality. Needs rewrite to match 6 tap behavior.
+  [x] **ACT 4**: Wire decoder-only NEON inter predict — exact 6-tap luma and bilinear chroma kernels are dispatched only for proven in-frame schedules; scalar prediction remains authoritative for encoder, edge, diagonal, and unsupported paths.
   [x] **ACT 5**: Wire NEON deblock — ✅ Wired: scalar `tc_deblock_ctu()` guarded by `#if !TCODEC_NEON`; NEON `tc_deblock_ctu()` replaces it on ARM. ⚠️ NEON version uses weak only filter (no strong mode) and 8px boundaries (vs 4px) — different behavior from scalar.
   [x] **ACT 6**: Wire NEON color convert — ✅ Wired: NEON luma with 32 bit accumulation (fixed int16 overflow); chroma/inverse match scalar for roundtrip correctness. Scalar `_internal` functions guarded by `#if !TCODEC_NEON`; public API wrappers always compiled.
   [x] **ACT 7**: Wire WPP thread pool — ✅ Wired: encoder uses per row bitstream buffers + tANS encoders, dispatches via `tc_threadpool_run()`, merges byte aligned row bitstreams with entry point table. Decoder reads entry point table when `TC_FLAG_WPP` is set, initializes per row readers, dispatches WPP. Sequential fallback with inter row byte alignment skips. `TCODEC_NO_THREADS` compatible.
@@ -239,7 +239,7 @@
     [ ] Wire existing NEON functions (ACT 3 through ACT 6)
     [ ] NEON range coder entropy decode
     [ ] NEON transform kernels (DCT, WHT, IDCT, IWHT)
-    [ ] NEON interpolation (6 tap luma, 4 tap chroma)
+    [x] Decoder-only NEON interpolation (6 tap luma, bilinear chroma) with scalar fallback for unsupported schedules
     [ ] NEON intra prediction
     [x] Scalar/NEON deblock + SAO parity; vector SAO kernel is v2 luma BO
     [ ] NEON coefficient zigzag/reorder
@@ -324,7 +324,7 @@ Phase 3 (entropy coding changes will modify the bitstream format).
 14. **In loop restoration** — EO SAO, deringing, and restoration (v2 BO subset is implemented)
 15. **Film grain strategy** — Major win for movies
 16. **Mature rate control** — Lookahead, VBV, perceptual
-17. **NEON inter predict rewrite** — Match 6 tap behavior (ACT 4 deferred due to quality mismatch)
+17. ~~**NEON inter predict rewrite**~~ — ✅ Decoder-only exact 6-tap luma/chroma dispatch wired; encoder and unsupported schedules retain scalar reference behavior
 18. ~~**WPP thread pool wiring**~~ — ✅ ACT 7: WPP wired for encoder and decoder with entry point table
 19. **Full ARM NEON optimization** — Performance for deployment
 20. **Ecosystem** — FFmpeg, containers, streaming

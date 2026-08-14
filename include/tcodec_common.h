@@ -139,6 +139,14 @@ void tc_fdct8x8_res(const tc_coeff_t *TCODEC_RESTRICT in, int stride,
 void tc_idct8x8_res(const tc_coeff_t *TCODEC_RESTRICT in,
                     tc_coeff_t *TCODEC_RESTRICT out, int stride);
 
+/* Decoder residual-IDCT entry points.  On ARM these are the fully
+ * vectorized NEON kernels; the scalar build provides exact aliases so
+ * callers do not need architecture-specific source. */
+void tc_idct4x4_neon(const tc_coeff_t *TCODEC_RESTRICT in,
+                     tc_coeff_t *TCODEC_RESTRICT out, int stride);
+void tc_idct8x8_neon(const tc_coeff_t *TCODEC_RESTRICT in,
+                     tc_coeff_t *TCODEC_RESTRICT out, int stride);
+
 /* Exact DC-only inverse-DCT values used by the v2 decoder fast path.
  * These are the same fixed-point two-pass operations as the full
  * residual transforms when every coefficient except DC is zero. */
@@ -177,9 +185,28 @@ int tc_quantize(tc_coeff_t *TCODEC_RESTRICT coeffs, int n,
 void tc_dequantize(tc_coeff_t *TCODEC_RESTRICT coeffs, int n,
                    int qp, int band);
 
+/* Add signed residuals to a 4×4 prediction block and clamp to pixels.
+ * NEON builds use widening loads and saturating narrowing; scalar builds
+ * use the same integer result as a reference implementation. */
+void tc_recon_add_clip4x4(const tc_pixel_t *pred, int pred_stride,
+                          const tc_coeff_t *res, tc_pixel_t *dst,
+                          int dst_stride);
+void tc_recon_add_dc4x4(const tc_pixel_t *pred, int pred_stride, int dc,
+                        tc_pixel_t *dst, int dst_stride);
+void tc_recon_add_clip8x8(const tc_pixel_t *pred, int pred_stride,
+                          const tc_coeff_t *res, tc_pixel_t *dst,
+                          int dst_stride);
+void tc_recon_add_dc8x8(const tc_pixel_t *pred, int pred_stride, int dc,
+                        tc_pixel_t *dst, int dst_stride);
+
 /* Get quantization step size for given QP. */
 int tc_qscale(int qp);
 int tc_lambda(int qp);
+
+/* Build the decoder's QP-local effective-scale lookup.  The second
+ * dimension is intentionally 64 entries so frequency classification
+ * can remain in the coefficient loop without recomputing quantizer math. */
+void tc_build_eff_scale_table(int qp, int table[4][64]);
 
 /* JND-based weight for a coefficient position in a band. */
 int tc_jnd_weight(int band, int pos);
@@ -448,6 +475,31 @@ void tc_inter_predict_chroma(const tc_pixel_t *ref, int ref_stride,
                              tc_pixel_t *TCODEC_RESTRICT dst, int dst_stride,
                              int blk_size);
 
+/* Decoder-only exact SIMD dispatch. Encoder callers must use the scalar
+ * normative functions above so prediction decisions and recon remain
+ * architecture-independent. */
+void tc_inter_predict_decoder(const tc_pixel_t *ref, int ref_stride,
+                              int ref_w, int ref_h,
+                              tc_mv_s mv,
+                              tc_pixel_t *TCODEC_RESTRICT dst, int dst_stride,
+                              int blk_size);
+void tc_inter_predict_chroma_decoder(const tc_pixel_t *ref, int ref_stride,
+                                     int ref_w, int ref_h,
+                                     tc_mv_s mv,
+                                     tc_pixel_t *TCODEC_RESTRICT dst,
+                                     int dst_stride, int blk_size);
+
+void tc_inter_predict_neon(const tc_pixel_t *ref, int ref_stride,
+                           int ref_w, int ref_h,
+                           tc_mv_s mv,
+                           tc_pixel_t *TCODEC_RESTRICT dst, int dst_stride,
+                           int blk_size);
+void tc_inter_predict_chroma_neon(const tc_pixel_t *ref, int ref_stride,
+                                  int ref_w, int ref_h,
+                                  tc_mv_s mv,
+                                  tc_pixel_t *TCODEC_RESTRICT dst, int dst_stride,
+                                  int blk_size);
+
 /* Reference samples for bitstream v2 (above-right / below-left are
  * replicated instead of read — see predict.c for the rationale). */
 void tc_intra_get_ref_v2(const tc_pixel_t *recon, int stride,
@@ -624,6 +676,7 @@ typedef struct tc_decoder {
     /* Thread pool for WPP (only when threading enabled) */
 #if !defined(TCODEC_NO_THREADS)
     tc_threadpool_t  *pool;
+    void             *v2_pool;         /* Persistent v2 CTU worker pool */
     tc_bs_reader_t   *row_bs;          /* Per-row bitstream readers */
     tc_tans_dec_t    *row_tans;        /* Per-row tANS decoders */
     int               num_threads;     /* Number of WPP worker threads */

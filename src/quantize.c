@@ -10,6 +10,10 @@
 
 #include "tcodec_common.h"
 
+#if TCODEC_NEON
+#include <arm_neon.h>
+#endif
+
 /* ── QP → Scale table ──────────────────────────────────────────
  *
  * Following HEVC convention:
@@ -39,6 +43,17 @@ int tc_qscale(int qp)
     if (qp < 0)  return qscale_table[0];
     if (qp > 63) return qscale_table[63];
     return qscale_table[qp];
+}
+
+void tc_build_eff_scale_table(int qp, int table[4][64])
+{
+    const int scale = tc_qscale(qp);
+    for (int band = 0; band < 4; band++) {
+        for (int pos = 0; pos < 64; pos++) {
+            const int weight = tc_jnd_weight(band, pos);
+            table[band][pos] = tc_max((scale * weight + 4) >> 3, 1);
+        }
+    }
 }
 
 /* ── JND Perceptual Weighting ──────────────────────────────────
@@ -129,6 +144,124 @@ void tc_dequantize(tc_coeff_t *TCODEC_RESTRICT coeffs, int n,
             coeffs[i] = (tc_coeff_t)(coeffs[i] * effective_scale - (effective_scale >> 1));
         }
     }
+}
+
+void tc_recon_add_clip4x4(const tc_pixel_t *pred, int pred_stride,
+                          const tc_coeff_t *res, tc_pixel_t *dst,
+                          int dst_stride)
+{
+#if TCODEC_NEON
+    for (int row = 0; row < 4; row++) {
+        uint8_t pa[8] = {0}, outa[8];
+        int16_t ra[8] = {0};
+        memcpy(pa, pred + row * pred_stride, 4);
+        memcpy(ra, res + row * 4, 4 * sizeof(*ra));
+        uint16x8_t p16 = vmovl_u8(vld1_u8(pa));
+        int16x8_t r16 = vld1q_s16(ra);
+        int32x4_t sum_lo = vaddq_s32(
+            vreinterpretq_s32_u32(vmovl_u16(vget_low_u16(p16))),
+            vmovl_s16(vget_low_s16(r16)));
+        int32x4_t sum_hi = vaddq_s32(
+            vreinterpretq_s32_u32(vmovl_u16(vget_high_u16(p16))),
+            vmovl_s16(vget_high_s16(r16)));
+        sum_lo = vmaxq_s32(vminq_s32(sum_lo, vdupq_n_s32(255)), vdupq_n_s32(0));
+        sum_hi = vmaxq_s32(vminq_s32(sum_hi, vdupq_n_s32(255)), vdupq_n_s32(0));
+        int16x8_t sum = vcombine_s16(vmovn_s32(sum_lo), vmovn_s32(sum_hi));
+        vst1_u8(outa, vqmovun_s16(sum));
+        memcpy(dst + row * dst_stride, outa, 4);
+    }
+#else
+    for (int row = 0; row < 4; row++) {
+        for (int col = 0; col < 4; col++) {
+            int v = (int)pred[row * pred_stride + col] + (int)res[row * 4 + col];
+            dst[row * dst_stride + col] = (tc_pixel_t)tc_clip(v, 0, 255);
+        }
+    }
+#endif
+}
+
+void tc_recon_add_clip8x8(const tc_pixel_t *pred, int pred_stride,
+                          const tc_coeff_t *res, tc_pixel_t *dst,
+                          int dst_stride)
+{
+#if TCODEC_NEON
+    for (int row = 0; row < 8; row++) {
+        uint8_t pa[8], outa[8];
+        memcpy(pa, pred + row * pred_stride, 8);
+        uint16x8_t p16 = vmovl_u8(vld1_u8(pa));
+        int16x8_t r16 = vld1q_s16(res + row * 8);
+        int32x4_t sum_lo = vaddq_s32(
+            vreinterpretq_s32_u32(vmovl_u16(vget_low_u16(p16))),
+            vmovl_s16(vget_low_s16(r16)));
+        int32x4_t sum_hi = vaddq_s32(
+            vreinterpretq_s32_u32(vmovl_u16(vget_high_u16(p16))),
+            vmovl_s16(vget_high_s16(r16)));
+        sum_lo = vmaxq_s32(vminq_s32(sum_lo, vdupq_n_s32(255)), vdupq_n_s32(0));
+        sum_hi = vmaxq_s32(vminq_s32(sum_hi, vdupq_n_s32(255)), vdupq_n_s32(0));
+        int16x8_t sum = vcombine_s16(vmovn_s32(sum_lo), vmovn_s32(sum_hi));
+        vst1_u8(outa, vqmovun_s16(sum));
+        memcpy(dst + row * dst_stride, outa, 8);
+    }
+#else
+    for (int row = 0; row < 8; row++)
+        for (int col = 0; col < 8; col++)
+            dst[row * dst_stride + col] = (tc_pixel_t)tc_clip(
+                (int)pred[row * pred_stride + col] + res[row * 8 + col], 0, 255);
+#endif
+}
+
+void tc_recon_add_dc8x8(const tc_pixel_t *pred, int pred_stride, int dc,
+                        tc_pixel_t *dst, int dst_stride)
+{
+#if TCODEC_NEON
+    for (int row = 0; row < 8; row++) {
+        uint8_t pa[8], outa[8];
+        memcpy(pa, pred + row * pred_stride, 8);
+        uint16x8_t p16 = vmovl_u8(vld1_u8(pa));
+        int32x4_t sum_lo = vaddq_s32(
+            vreinterpretq_s32_u32(vmovl_u16(vget_low_u16(p16))), vdupq_n_s32(dc));
+        int32x4_t sum_hi = vaddq_s32(
+            vreinterpretq_s32_u32(vmovl_u16(vget_high_u16(p16))), vdupq_n_s32(dc));
+        sum_lo = vmaxq_s32(vminq_s32(sum_lo, vdupq_n_s32(255)), vdupq_n_s32(0));
+        sum_hi = vmaxq_s32(vminq_s32(sum_hi, vdupq_n_s32(255)), vdupq_n_s32(0));
+        int16x8_t sum = vcombine_s16(vmovn_s32(sum_lo), vmovn_s32(sum_hi));
+        vst1_u8(outa, vqmovun_s16(sum));
+        memcpy(dst + row * dst_stride, outa, 8);
+    }
+#else
+    for (int row = 0; row < 8; row++)
+        for (int col = 0; col < 8; col++)
+            dst[row * dst_stride + col] = (tc_pixel_t)tc_clip(
+                (int)pred[row * pred_stride + col] + dc, 0, 255);
+#endif
+}
+
+void tc_recon_add_dc4x4(const tc_pixel_t *pred, int pred_stride, int dc,
+                        tc_pixel_t *dst, int dst_stride)
+{
+#if TCODEC_NEON
+    for (int row = 0; row < 4; row++) {
+        uint8_t pa[8] = {0}, outa[8];
+        memcpy(pa, pred + row * pred_stride, 4);
+        uint16x8_t p16 = vmovl_u8(vld1_u8(pa));
+        int32x4_t sum_lo = vaddq_s32(
+            vreinterpretq_s32_u32(vmovl_u16(vget_low_u16(p16))), vdupq_n_s32(dc));
+        int32x4_t sum_hi = vaddq_s32(
+            vreinterpretq_s32_u32(vmovl_u16(vget_high_u16(p16))), vdupq_n_s32(dc));
+        sum_lo = vmaxq_s32(vminq_s32(sum_lo, vdupq_n_s32(255)), vdupq_n_s32(0));
+        sum_hi = vmaxq_s32(vminq_s32(sum_hi, vdupq_n_s32(255)), vdupq_n_s32(0));
+        int16x8_t sum = vcombine_s16(vmovn_s32(sum_lo), vmovn_s32(sum_hi));
+        vst1_u8(outa, vqmovun_s16(sum));
+        memcpy(dst + row * dst_stride, outa, 4);
+    }
+#else
+    for (int row = 0; row < 4; row++) {
+        for (int col = 0; col < 4; col++) {
+            int v = (int)pred[row * pred_stride + col] + dc;
+            dst[row * dst_stride + col] = (tc_pixel_t)tc_clip(v, 0, 255);
+        }
+    }
+#endif
 }
 
 

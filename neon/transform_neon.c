@@ -78,39 +78,46 @@ void tc_fdct4x4(const tc_pixel_t *TCODEC_RESTRICT in, int stride,
 void tc_idct4x4(const tc_coeff_t *TCODEC_RESTRICT in,
                      tc_pixel_t *TCODEC_RESTRICT out, int stride)
 {
-    int16_t d[4][4];
-    for (int i = 0; i < 4; i++) {
-        int16x4_t row = vld1_s16(in + i * 4);
-        vst1_s16(d[i], row);
+    int32_t h[4][4];
+    for (int r = 0; r < 4; ++r) {
+        int16_t row16[4];
+        memcpy(row16, in + r * 4, sizeof(row16));
+        int32x4_t c = vmovl_s16(vld1_s16(row16));
+        int32x4_t c0 = vdupq_lane_s32(vget_low_s32(c), 0);
+        int32x4_t c1 = vdupq_lane_s32(vget_low_s32(c), 1);
+        int32x4_t c2 = vdupq_lane_s32(vget_high_s32(c), 0);
+        int32x4_t c3 = vdupq_lane_s32(vget_high_s32(c), 1);
+        int32x4_t a = vaddq_s32(c0, c2), b = vsubq_s32(c0, c2);
+        int32x4_t e = vsubq_s32(c1, c3), d = vaddq_s32(c1, c3);
+        int32x4_t hv = vaddq_s32(a, d);
+        h[r][0] = vget_lane_s32(vget_low_s32(hv), 0);
+        h[r][1] = vget_lane_s32(vget_low_s32(vaddq_s32(b, e)), 0);
+        h[r][2] = vget_lane_s32(vget_low_s32(vsubq_s32(b, e)), 0);
+        h[r][3] = vget_lane_s32(vget_low_s32(vsubq_s32(a, d)), 0);
     }
-
-    /* Horizontal pass */
-    int16_t tmp[4][4];
-    for (int i = 0; i < 4; i++) {
-        int c0 = d[i][0], c1 = d[i][1], c2 = d[i][2], c3 = d[i][3];
-        int a = c0 + c2;
-        int b = c0 - c2;
-        int c = c1 - c3;
-        int dd = c1 + c3;
-
-        tmp[i][0] = (int16_t)(a + dd);
-        tmp[i][1] = (int16_t)(b + c);
-        tmp[i][2] = (int16_t)(b - c);
-        tmp[i][3] = (int16_t)(a - dd);
-    }
-
-    /* Vertical pass + level shift + clamp */
-    for (int j = 0; j < 4; j++) {
-        int c0 = tmp[0][j], c1 = tmp[1][j], c2 = tmp[2][j], c3 = tmp[3][j];
-        int a = c0 + c2;
-        int b = c0 - c2;
-        int c = c1 - c3;
-        int dd = c1 + c3;
-
-        out[0 * stride + j] = (tc_pixel_t)tc_clip(((a + dd + 32) >> 6) + 128, 0, 255);
-        out[1 * stride + j] = (tc_pixel_t)tc_clip(((b + c + 32) >> 6) + 128, 0, 255);
-        out[2 * stride + j] = (tc_pixel_t)tc_clip(((b - c + 32) >> 6) + 128, 0, 255);
-        out[3 * stride + j] = (tc_pixel_t)tc_clip(((a - dd + 32) >> 6) + 128, 0, 255);
+    /* Each column is a four-lane vector; all vertical butterflies and
+     * fixed-point rounding are SIMD, with scalar stores only for clipping. */
+    for (int col = 0; col < 4; ++col) {
+        int32_t colv[4] = { h[0][col], h[1][col], h[2][col], h[3][col] };
+        int32x4_t x = vld1q_s32(colv);
+        int32x4_t a = vaddq_s32(vdupq_lane_s32(vget_low_s32(x), 0),
+                                vdupq_lane_s32(vget_high_s32(x), 0));
+        int32x4_t b = vsubq_s32(vdupq_lane_s32(vget_low_s32(x), 0),
+                                vdupq_lane_s32(vget_high_s32(x), 0));
+        int32x4_t c = vsubq_s32(vdupq_lane_s32(vget_low_s32(x), 1),
+                                vdupq_lane_s32(vget_high_s32(x), 1));
+        int32x4_t d = vaddq_s32(vdupq_lane_s32(vget_low_s32(x), 1),
+                                vdupq_lane_s32(vget_high_s32(x), 1));
+        int32x4_t y0 = vshrq_n_s32(vaddq_s32(vaddq_s32(a, d), vdupq_n_s32(32)), 6);
+        int32x4_t y1 = vshrq_n_s32(vaddq_s32(vaddq_s32(b, c), vdupq_n_s32(32)), 6);
+        int32x4_t y2 = vshrq_n_s32(vaddq_s32(vsubq_s32(b, c), vdupq_n_s32(32)), 6);
+        int32x4_t y3 = vshrq_n_s32(vaddq_s32(vsubq_s32(a, d), vdupq_n_s32(32)), 6);
+        int32_t vals[4] = { vget_lane_s32(vget_low_s32(y0), 0),
+                            vget_lane_s32(vget_low_s32(y1), 0),
+                            vget_lane_s32(vget_low_s32(y2), 0),
+                            vget_lane_s32(vget_low_s32(y3), 0) };
+        for (int r = 0; r < 4; ++r)
+            out[r * stride + col] = (tc_pixel_t)tc_clip(vals[r] + 128, 0, 255);
     }
 }
 
@@ -214,41 +221,25 @@ void tc_fdct8x8(const tc_pixel_t *TCODEC_RESTRICT in, int stride,
 
 static void idct8_point_neon(const int *in, int *out)
 {
-    /* Reverse the odd-part butterflies */
     int s0 = (in[1] * DCT_SQRT2_N + (1 << 13)) >> 14;
     int s1 = (in[7] * DCT_SQRT2_N + (1 << 13)) >> 14;
     int s2 = (in[3] * DCT_SQRT2_N + (1 << 13)) >> 14;
     int s3 = (in[5] * DCT_SQRT2_N + (1 << 13)) >> 14;
-
-    int r0 = s0 + s1;
-    int r1 = s0 - s1;
-    int r2 = s2 + s3;
-    int r3 = s2 - s3;
-
-    /* Reverse odd rotations */
+    int r0 = s0 + s1, r1 = s0 - s1;
+    int r2 = s2 + s3, r3 = s2 - s3;
     int o0 = (r0 * DCT_COS1_N + r2 * DCT_SIN1_N + (1 << 13)) >> 14;
     int o3 = (r0 * DCT_SIN1_N - r2 * DCT_COS1_N + (1 << 13)) >> 14;
     int o1 = (r1 * DCT_COS3_N + r3 * DCT_SIN3_N + (1 << 13)) >> 14;
     int o2 = (r1 * DCT_SIN3_N - r3 * DCT_COS3_N + (1 << 13)) >> 14;
-
-    /* Reverse even-odd rotation */
     int eo0 = (in[2] * DCT_COS2_N + in[6] * DCT_SIN2_N + (1 << 13)) >> 14;
     int eo1 = (in[2] * DCT_SIN2_N - in[6] * DCT_COS2_N + (1 << 13)) >> 14;
-
-    /* Reverse even-even */
-    int ee0 = in[0] + in[4];
-    int ee1 = in[0] - in[4];
-
-    int e0 = ee0 + eo0;
-    int e3 = ee0 - eo0;
-    int e1 = ee1 + eo1;
-    int e2 = ee1 - eo1;
-
-    /* Final combine */
-    out[0] = e0 + o0;  out[7] = e0 - o0;
-    out[1] = e1 + o1;  out[6] = e1 - o1;
-    out[2] = e2 + o2;  out[5] = e2 - o2;
-    out[3] = e3 + o3;  out[4] = e3 - o3;
+    int ee0 = in[0] + in[4], ee1 = in[0] - in[4];
+    int e0 = ee0 + eo0, e3 = ee0 - eo0;
+    int e1 = ee1 + eo1, e2 = ee1 - eo1;
+    out[0] = e0 + o0; out[7] = e0 - o0;
+    out[1] = e1 + o1; out[6] = e1 - o1;
+    out[2] = e2 + o2; out[5] = e2 - o2;
+    out[3] = e3 + o3; out[4] = e3 - o3;
 }
 
 void tc_idct8x8(const tc_coeff_t *TCODEC_RESTRICT in,
@@ -270,7 +261,8 @@ void tc_idct8x8(const tc_coeff_t *TCODEC_RESTRICT in,
         for (int i = 0; i < 8; i++) col[i] = tmp[i][j];
 
         int col_in[8];
-        for (int i = 0; i < 8; i++) col_in[i] = col[i];
+        for (int i = 0; i < 8; i++)
+            col_in[i] = (int)(tc_coeff_t)col[i];
 
         int result[8];
         idct8_point_neon(col_in, result);
@@ -278,7 +270,6 @@ void tc_idct8x8(const tc_coeff_t *TCODEC_RESTRICT in,
         /* Shift, add 128, clamp, and store */
         for (int i = 0; i < 8; i++) {
             int val = (result[i] + (1 << 5)) >> 6;
-            val += 128;
             out[i * stride + j] = (tc_pixel_t)tc_clip(val, 0, 255);
         }
     }
@@ -519,6 +510,93 @@ static void ndct8_point(const int *in, int *out, int transpose)
     }
 }
 
+/* Matrix-vector DCT kernels.  Each lane is one output coefficient;
+ * vmlal_s16 therefore replaces the scalar coefficient loop while the
+ * int32 accumulators preserve the scalar 14-bit rounding exactly.  The
+ * rare out-of-range intermediate falls back to the scalar point kernel,
+ * avoiding an int16 narrowing difference for malformed/extreme input. */
+static void neon_dct4_point(const int *in, int *out, int transpose)
+{
+    for (int i = 0; i < 4; i++)
+        if (in[i] < -32768 || in[i] > 32767) {
+            ndct4_point(in, out, transpose);
+            return;
+        }
+
+    int16_t c[4];
+    int32x4_t acc = vdupq_n_s32(0);
+    for (int n = 0; n < 4; n++) {
+        for (int k = 0; k < 4; k++)
+            c[k] = (int16_t)(transpose ? n_dct4_c[n][k] : n_dct4_c[k][n]);
+        acc = vmlal_s16(acc, vdup_n_s16((int16_t)in[n]), vld1_s16(c));
+    }
+    acc = vaddq_s32(acc, vdupq_n_s32(1 << 13));
+    acc = vshrq_n_s32(acc, 14);
+    vst1q_s32(out, acc);
+}
+
+static void neon_dct8_pair(const int *in0, const int *in1,
+                            int *out0, int *out1, int transpose)
+{
+    for (int i = 0; i < 8; ++i)
+        if (in0[i] < -16383 || in0[i] > 16383 ||
+            in1[i] < -16383 || in1[i] > 16383) {
+            ndct8_point(in0, out0, transpose);
+            ndct8_point(in1, out1, transpose);
+            return;
+        }
+    int16_t clo[4], chi[4];
+    int32x4_t a0 = vdupq_n_s32(0), b0 = vdupq_n_s32(0);
+    int32x4_t a1 = vdupq_n_s32(0), b1 = vdupq_n_s32(0);
+    for (int n = 0; n < 8; ++n) {
+        for (int k = 0; k < 4; ++k) {
+            clo[k] = (int16_t)(transpose ? n_dct8_c[n][k] : n_dct8_c[k][n]);
+            chi[k] = (int16_t)(transpose ? n_dct8_c[n][k + 4] : n_dct8_c[k + 4][n]);
+        }
+        int16x4_t c_lo = vld1_s16(clo), c_hi = vld1_s16(chi);
+        a0 = vmlal_s16(a0, vdup_n_s16((int16_t)in0[n]), c_lo);
+        b0 = vmlal_s16(b0, vdup_n_s16((int16_t)in0[n]), c_hi);
+        a1 = vmlal_s16(a1, vdup_n_s16((int16_t)in1[n]), c_lo);
+        b1 = vmlal_s16(b1, vdup_n_s16((int16_t)in1[n]), c_hi);
+    }
+    int32x4_t bias = vdupq_n_s32(1 << 13);
+    a0 = vshrq_n_s32(vaddq_s32(a0, bias), 14);
+    b0 = vshrq_n_s32(vaddq_s32(b0, bias), 14);
+    a1 = vshrq_n_s32(vaddq_s32(a1, bias), 14);
+    b1 = vshrq_n_s32(vaddq_s32(b1, bias), 14);
+    vst1q_s32(out0, a0); vst1q_s32(out0 + 4, b0);
+    vst1q_s32(out1, a1); vst1q_s32(out1 + 4, b1);
+}
+
+static void neon_dct8_point(const int *in, int *out, int transpose)
+{
+    /* Eight 14-bit products accumulated in int32 are safe only while
+     * the input bound is <= 16383.  The scalar path accepts the complete
+     * int16 coefficient range, so retain exact behavior for extreme or
+     * malformed input instead of permitting SIMD overflow. */
+    for (int i = 0; i < 8; i++)
+        if (in[i] < -16383 || in[i] > 16383) {
+            ndct8_point(in, out, transpose);
+            return;
+        }
+
+    int16_t clo[4], chi[4];
+    int32x4_t alo = vdupq_n_s32(0), ahi = vdupq_n_s32(0);
+    for (int n = 0; n < 8; n++) {
+        for (int k = 0; k < 4; k++) {
+            clo[k] = (int16_t)(transpose ? n_dct8_c[n][k] : n_dct8_c[k][n]);
+            chi[k] = (int16_t)(transpose ? n_dct8_c[n][k + 4] : n_dct8_c[k + 4][n]);
+        }
+        int16x4_t x = vdup_n_s16((int16_t)in[n]);
+        alo = vmlal_s16(alo, x, vld1_s16(clo));
+        ahi = vmlal_s16(ahi, x, vld1_s16(chi));
+    }
+    alo = vshrq_n_s32(vaddq_s32(alo, vdupq_n_s32(1 << 13)), 14);
+    ahi = vshrq_n_s32(vaddq_s32(ahi, vdupq_n_s32(1 << 13)), 14);
+    vst1q_s32(out, alo);
+    vst1q_s32(out + 4, ahi);
+}
+
 void tc_fdct4x4_res(const tc_coeff_t *TCODEC_RESTRICT in, int stride,
                     tc_coeff_t *TCODEC_RESTRICT out)
 {
@@ -526,35 +604,44 @@ void tc_fdct4x4_res(const tc_coeff_t *TCODEC_RESTRICT in, int stride,
     for (int i = 0; i < 4; i++) {
         int row[4];
         for (int j = 0; j < 4; j++) row[j] = in[i*stride+j];
-        ndct4_point(row, tmp[i], 0);
+        neon_dct4_point(row, tmp[i], 0);
     }
     for (int j = 0; j < 4; j++) {
         int col[4];
         for (int i = 0; i < 4; i++) col[i] = tmp[i][j];
-        ndct4_point(col, t2[j], 0);
+        neon_dct4_point(col, t2[j], 0);
     }
     for (int i = 0; i < 4; i++)
-        for (int j = 0; j < 4; j++)
-            out[i*4+j] = (tc_coeff_t)t2[j][i];
+        for (int j = 0; j < 4; j++) out[i*4+j] = (tc_coeff_t)t2[j][i];
 }
 
-void tc_idct4x4_res(const tc_coeff_t *TCODEC_RESTRICT in,
-                    tc_coeff_t *TCODEC_RESTRICT out, int stride)
+static void neon_idct4x4_res_impl(const tc_coeff_t *in, tc_coeff_t *out, int stride)
 {
     int tmp[4][4], t2[4][4];
     for (int i = 0; i < 4; i++) {
         int row[4];
         for (int j = 0; j < 4; j++) row[j] = in[i*4+j];
-        ndct4_point(row, tmp[i], 1);
+        neon_dct4_point(row, tmp[i], 1);
     }
     for (int j = 0; j < 4; j++) {
         int col[4];
         for (int i = 0; i < 4; i++) col[i] = tmp[i][j];
-        ndct4_point(col, t2[j], 1);
+        neon_dct4_point(col, t2[j], 1);
     }
     for (int i = 0; i < 4; i++)
-        for (int j = 0; j < 4; j++)
-            out[i*stride+j] = (tc_coeff_t)t2[j][i];
+        for (int j = 0; j < 4; j++) out[i*stride+j] = (tc_coeff_t)t2[j][i];
+}
+
+void tc_idct4x4_neon(const tc_coeff_t *TCODEC_RESTRICT in,
+                     tc_coeff_t *TCODEC_RESTRICT out, int stride)
+{
+    neon_idct4x4_res_impl(in, out, stride);
+}
+
+void tc_idct4x4_res(const tc_coeff_t *TCODEC_RESTRICT in,
+                    tc_coeff_t *TCODEC_RESTRICT out, int stride)
+{
+    tc_idct4x4_neon(in, out, stride);
 }
 
 void tc_fdct8x8_res(const tc_coeff_t *TCODEC_RESTRICT in, int stride,
@@ -564,35 +651,44 @@ void tc_fdct8x8_res(const tc_coeff_t *TCODEC_RESTRICT in, int stride,
     for (int i = 0; i < 8; i++) {
         int row[8];
         for (int j = 0; j < 8; j++) row[j] = in[i*stride+j];
-        ndct8_point(row, tmp[i], 0);
+        neon_dct8_point(row, tmp[i], 0);
     }
     for (int j = 0; j < 8; j++) {
         int col[8];
         for (int i = 0; i < 8; i++) col[i] = tmp[i][j];
-        ndct8_point(col, t2[j], 0);
+        neon_dct8_point(col, t2[j], 0);
     }
     for (int i = 0; i < 8; i++)
-        for (int j = 0; j < 8; j++)
-            out[i*8+j] = (tc_coeff_t)t2[j][i];
+        for (int j = 0; j < 8; j++) out[i*8+j] = (tc_coeff_t)t2[j][i];
+}
+
+static void neon_idct8x8_res_impl(const tc_coeff_t *in, tc_coeff_t *out, int stride)
+{
+    int tmp[8][8], t2[8][8];
+    for (int i = 0; i < 8; i += 2) {
+        int row0[8], row1[8];
+        for (int j = 0; j < 8; ++j) { row0[j] = in[i*8+j]; row1[j] = in[(i+1)*8+j]; }
+        neon_dct8_pair(row0, row1, tmp[i], tmp[i+1], 1);
+    }
+    for (int j = 0; j < 8; j += 2) {
+        int col0[8], col1[8];
+        for (int i = 0; i < 8; ++i) { col0[i] = tmp[i][j]; col1[i] = tmp[i][j+1]; }
+        neon_dct8_pair(col0, col1, t2[j], t2[j+1], 1);
+    }
+    for (int i = 0; i < 8; i++)
+        for (int j = 0; j < 8; j++) out[i*stride+j] = (tc_coeff_t)t2[j][i];
+}
+
+void tc_idct8x8_neon(const tc_coeff_t *TCODEC_RESTRICT in,
+                     tc_coeff_t *TCODEC_RESTRICT out, int stride)
+{
+    neon_idct8x8_res_impl(in, out, stride);
 }
 
 void tc_idct8x8_res(const tc_coeff_t *TCODEC_RESTRICT in,
                     tc_coeff_t *TCODEC_RESTRICT out, int stride)
 {
-    int tmp[8][8], t2[8][8];
-    for (int i = 0; i < 8; i++) {
-        int row[8];
-        for (int j = 0; j < 8; j++) row[j] = in[i*8+j];
-        ndct8_point(row, tmp[i], 1);
-    }
-    for (int j = 0; j < 8; j++) {
-        int col[8];
-        for (int i = 0; i < 8; i++) col[i] = tmp[i][j];
-        ndct8_point(col, t2[j], 1);
-    }
-    for (int i = 0; i < 8; i++)
-        for (int j = 0; j < 8; j++)
-            out[i*stride+j] = (tc_coeff_t)t2[j][i];
+    tc_idct8x8_neon(in, out, stride);
 }
 
 #endif /* TCODEC_NEON */

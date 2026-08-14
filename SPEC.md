@@ -401,9 +401,10 @@ function is replaced by an `extern` declaration on NEON builds, and the
 NEON implementation defines the same function name. Public API wrappers
 are always compiled and dispatch to whichever `_internal` is linked.
 
-**ACT-4 (NEON inter predict) is deferred** because the NEON version
-uses bilinear interpolation while the scalar version uses a proper
-6-tap luma filter. Wiring the NEON version would reduce quality.
+**ACT-4 (NEON inter predict) is active on the decoder-only path.** The
+NEON kernel mirrors the scalar six-tap luma and bilinear chroma formulas for
+proven in-frame one-dimensional schedules. The scalar path remains authoritative
+for encoder prediction, edges, diagonal phases, and unsupported block shapes.
 
 ---
 
@@ -434,8 +435,9 @@ uses bilinear interpolation while the scalar version uses a proper
 ### Present but profile- or version-limited
 
 - Pixel-mode DCT helpers remain reserved; v2 uses the residual DCT-II path.
-- NEON inter prediction remains deliberately conservative where the scalar
-  six-tap path is required for quality; parity is maintained on active paths.
+- Decoder-only NEON inter prediction is conservative by design: exact
+  six-tap/bilinear schedules are vectorized, while encoder prediction and
+  unsupported/edge/diagonal schedules retain the scalar reference path.
 - v2 payloads are sequential and reject WPP-marked packets; legacy v1 WPP
   uses the thread pool and entry-point table.
 

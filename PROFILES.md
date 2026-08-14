@@ -55,7 +55,7 @@ This document serves as:
 |------|--------------|--------|--------|
 | Pixel-mode DCT helpers | `transform.c` / `transform_neon.c` | **Reserved** | v2 uses the residual DCT-II path; pixel-mode syntax is not signaled |
 | Thread pool / WPP | `threadpool.c`, `encoder.c`, `decoder.c` | **Active for legacy v1** | Range-coded/v2 payloads are sequential; legacy WPP has entry points and parity coverage |
-| NEON inter predict | `motion_neon.c` | **Quality-gated** | Scalar six-tap path remains authoritative where the NEON kernel would diverge |
+| NEON inter predict | `motion_neon.c` | **Decoder-only exact schedules** | Six-tap luma/bilinear chroma NEON is used for proven in-frame phases; scalar remains authoritative for encoder and unsupported paths |
 
 ### 2.3 Coding Tools Not Implemented
 

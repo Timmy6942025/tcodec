@@ -484,6 +484,19 @@ void tc_inter_predict(const tc_pixel_t *ref, int ref_stride,
     int dx = mv.x & 3;            /* Quarter-pel fraction */
     int dy = mv.y & 3;
 
+    /* Integer-pel blocks are overwhelmingly common in inter prediction.
+     * Handle them before the fractional SIMD dispatcher so they use the
+     * architecture's tuned copy path rather than six-tap setup overhead. */
+    if (dx == 0 && dy == 0 && fx >= 0 && fy >= 0 &&
+        fx + blk_size <= ref_w && fy + blk_size <= ref_h) {
+        for (int y = 0; y < blk_size; y++) {
+            memcpy(dst + y * dst_stride,
+                   ref + (fy + y) * ref_stride + fx,
+                   (size_t)blk_size);
+        }
+        return;
+    }
+
     if (dx == 0 && dy == 0) {
         /* Integer-pel: fast path, just copy — but only when the whole
          * block is inside the frame. Otherwise fall through to the
@@ -573,11 +586,13 @@ void tc_inter_predict_chroma(const tc_pixel_t *ref, int ref_stride,
     int xi = mv.x >> 3, yi = mv.y >> 3;
     int fx = mv.x & 7,  fy = mv.y & 7;
 
-    if (fx == 0 && fy == 0 &&
-        xi >= 0 && yi >= 0 &&
+    /* Integer chroma motion is common after the encoder's coarse search.
+     * Copy it directly before entering the generic SIMD interpolator. */
+    if (fx == 0 && fy == 0 && xi >= 0 && yi >= 0 &&
         xi + blk_size <= ref_w && yi + blk_size <= ref_h) {
         for (int r = 0; r < blk_size; r++)
-            memcpy(dst + r * dst_stride, ref + (yi + r) * ref_stride + xi,
+            memcpy(dst + r * dst_stride,
+                   ref + (yi + r) * ref_stride + xi,
                    (size_t)blk_size);
         return;
     }
@@ -597,4 +612,48 @@ void tc_inter_predict_chroma(const tc_pixel_t *ref, int ref_stride,
             dst[r * dst_stride + c] = (tc_pixel_t)v;
         }
     }
+}
+
+/* Decoder-only dispatch. The shared prediction functions above remain the
+ * scalar normative path used by the encoder. NEON is selected only after
+ * proving the complete reference footprint and the exact schedules covered
+ * by the bit-exact kernels; all other cases use the scalar implementation. */
+void tc_inter_predict_decoder(const tc_pixel_t *ref, int ref_stride,
+                              int ref_w, int ref_h, tc_mv_s mv,
+                              tc_pixel_t *TCODEC_RESTRICT dst, int dst_stride,
+                              int blk_size)
+{
+#if TCODEC_NEON
+    const int fx = mv.x >> 2, fy = mv.y >> 2;
+    /* Diagonal phases use the right-hand vertical anchor at x+1.  Its
+     * horizontal six-tap vector reaches one sample farther right than the
+     * ordinary block footprint, so require the stricter +3 margin. */
+    if (fx >= 2 && fy >= 2 && fx + blk_size + 3 < ref_w &&
+        fy + blk_size + 2 < ref_h && blk_size >= 8 &&
+        (blk_size & 7) == 0) {
+        tc_inter_predict_neon(ref, ref_stride, ref_w, ref_h, mv,
+                              dst, dst_stride, blk_size);
+        return;
+    }
+#endif
+    tc_inter_predict(ref, ref_stride, ref_w, ref_h, mv, dst, dst_stride,
+                     blk_size);
+}
+
+void tc_inter_predict_chroma_decoder(const tc_pixel_t *ref, int ref_stride,
+                                     int ref_w, int ref_h, tc_mv_s mv,
+                                     tc_pixel_t *TCODEC_RESTRICT dst,
+                                     int dst_stride, int blk_size)
+{
+#if TCODEC_NEON
+    const int xi = mv.x >> 3, yi = mv.y >> 3;
+    if (xi >= 0 && yi >= 0 && xi + blk_size + 1 < ref_w &&
+        yi + blk_size + 1 < ref_h) {
+        tc_inter_predict_chroma_neon(ref, ref_stride, ref_w, ref_h, mv,
+                                     dst, dst_stride, blk_size);
+        return;
+    }
+#endif
+    tc_inter_predict_chroma(ref, ref_stride, ref_w, ref_h, mv, dst, dst_stride,
+                            blk_size);
 }

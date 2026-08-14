@@ -440,6 +440,22 @@ void tc_idct8x8_res(const tc_coeff_t *TCODEC_RESTRICT in,
 
 #endif /* !TCODEC_NEON — scalar residual DCT */
 
+#if !TCODEC_NEON
+/* Keep the architecture-neutral decoder entry points linkable on the
+ * scalar build.  They intentionally alias the reference implementation. */
+void tc_idct4x4_neon(const tc_coeff_t *TCODEC_RESTRICT in,
+                     tc_coeff_t *TCODEC_RESTRICT out, int stride)
+{
+    tc_idct4x4_res(in, out, stride);
+}
+
+void tc_idct8x8_neon(const tc_coeff_t *TCODEC_RESTRICT in,
+                     tc_coeff_t *TCODEC_RESTRICT out, int stride)
+{
+    tc_idct8x8_res(in, out, stride);
+}
+#endif
+
 
 
 

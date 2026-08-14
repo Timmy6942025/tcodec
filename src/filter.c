@@ -157,7 +157,10 @@ static void filter_horiz_edge(tc_pixel_t *y, int stride,
 
 /* ── Filter one CTU ──────────────────────────────────────────── */
 
-#if TCODEC_NEON  /* NEON version in filter_neon.c replaces this */
+#if TCODEC_NEON  /* NEON version in filter_neon.c replaces this.
+                    Its all-weak luma edge kernels use widening loads and
+                    saturating narrowing; mixed/strong decisions stay on
+                    the exact scalar arithmetic path. */
 extern void tc_deblock_ctu(tc_pixel_t *y,  int stride_y,
                     tc_pixel_t *cb, int stride_cb,
                     tc_pixel_t *cr, int stride_cr,

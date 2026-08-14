@@ -320,34 +320,31 @@ static void rc_dec_normalize(tc_rc_dec_t *rc)
     }
 }
 
-int tc_rc_dec_bit(tc_rc_dec_t *rc, tc_rc_ctx_t *ctx)
+static TCODEC_FORCEINLINE int rc_dec_bit_core(tc_rc_dec_t *rc,
+                                                tc_rc_ctx_t *ctx)
 {
-    int      state = ctx_state(*ctx);
-    int      mps   = ctx_mps(*ctx);
-    uint32_t prob  = lps_prob_table[state];
-    uint32_t rLPS  = (rc->range >> RC_PROB_BITS) * prob;
-    int      bit;
-
+    int state = ctx_state(*ctx);
+    int mps = ctx_mps(*ctx);
+    uint32_t rLPS = (rc->range >> RC_PROB_BITS) * lps_prob_table[state];
+    int bit;
     if (rc->low < rc->range - rLPS) {
         rc->range -= rLPS;
         bit = mps;
         if (state < 63) *ctx = ctx_make(mps, state + 1);
     } else {
-        rc->low   -= rc->range - rLPS;
-        rc->range  = rLPS;
+        rc->low -= rc->range - rLPS;
+        rc->range = rLPS;
         bit = mps ^ 1;
         uint8_t ns = next_state_lps[state];
-        if (state == 0) *ctx = ctx_make(mps ^ 1, ns);
-        else            *ctx = ctx_make(mps, ns);
+        *ctx = ctx_make(state == 0 ? (mps ^ 1) : mps, ns);
     }
-
-    /* Normalize AFTER the bit decision — both encoder and decoder
-     * normalize at the same point, keeping arithmetic in lockstep.
-     * The 4 bytes read eagerly in tc_rc_dec_init seed the low
-     * register; subsequent normalization reads stay in sync. */
     rc_dec_normalize(rc);
-
     return bit;
+}
+
+int tc_rc_dec_bit(tc_rc_dec_t *rc, tc_rc_ctx_t *ctx)
+{
+    return rc_dec_bit_core(rc, ctx);
 }
 
 /* ── Context-modeled bit reading helpers ──────────────────── */
@@ -392,19 +389,24 @@ void tc_rc_dec_coeffs(tc_rc_dec_t *rc, tc_rc_ctx_t *ctx,
     (void)dct_size;
     memset(coeffs, 0, (size_t)n * sizeof(tc_coeff_t));
 
-    if (tc_rc_dec_bit(rc, &ctx[RC_CTX_LAST]) == 0) return;
+    /* Keep the context base local in this hot routine.  More importantly,
+     * use the force-inlined core below instead of an out-of-line public
+     * call for every significance/level/sign symbol; the arithmetic state
+     * machine and context mutation remain exactly unchanged. */
+    tc_rc_ctx_t *cbase = ctx;
+    if (rc_dec_bit_core(rc, &cbase[RC_CTX_LAST]) == 0) return;
 
     int last_nz = 0, found = 0;
     for (int i = 0; i < 4; i++) {
         int cidx = RC_CTX_LAST + (i % 4);
-        if (tc_rc_dec_bit(rc, &ctx[cidx]) == 1) {
+        if (rc_dec_bit_core(rc, &cbase[cidx]) == 1) {
             last_nz = i;
             found = 1;
             break;
         }
     }
     if (!found) {
-        uint32_t extra = tc_rc_dec_ue(rc, ctx, RC_CTX_LAST);
+        uint32_t extra = tc_rc_dec_ue(rc, cbase, RC_CTX_LAST);
         if (extra > (uint32_t)n) {
             rc->bs->error = 1;
             return;
@@ -422,21 +424,21 @@ void tc_rc_dec_coeffs(tc_rc_dec_t *rc, tc_rc_ctx_t *ctx,
         int cidx_sig = is_dc ? RC_CTX_SIG_DC : RC_CTX_SIG + (i * 8 / n);
         if (cidx_sig >= RC_CTX_MAX) cidx_sig = RC_CTX_MAX - 1;
 
-        if (!tc_rc_dec_bit(rc, &ctx[cidx_sig])) { coeffs[i] = 0; continue; }
+        if (!rc_dec_bit_core(rc, &cbase[cidx_sig])) { coeffs[i] = 0; continue; }
 
         int cidx_gt1 = is_dc ? RC_CTX_GT1_DC : RC_CTX_GT1 + tc_min(gt1_count, 5);
-        int gt1 = tc_rc_dec_bit(rc, &ctx[cidx_gt1]);
+        int gt1 = rc_dec_bit_core(rc, &cbase[cidx_gt1]);
         int mag;
 
         if (!gt1) {
             mag = 1;
         } else {
             int cidx_gt2 = is_dc ? RC_CTX_GT2_DC : RC_CTX_GT2 + tc_min(gt1_count, 1);
-            int gt2 = tc_rc_dec_bit(rc, &ctx[cidx_gt2]);
+            int gt2 = rc_dec_bit_core(rc, &cbase[cidx_gt2]);
             if (!gt2) {
                 mag = 2;
             } else {
-                mag = 3 + (int)tc_rc_dec_ue(rc, ctx, is_dc ? RC_CTX_LEVEL_DC : RC_CTX_LEVEL);
+                mag = 3 + (int)tc_rc_dec_ue(rc, cbase, is_dc ? RC_CTX_LEVEL_DC : RC_CTX_LEVEL);
             }
             gt1_count++;
             if (gt1_count > 5) gt1_count = 5;
@@ -446,7 +448,7 @@ void tc_rc_dec_coeffs(tc_rc_dec_t *rc, tc_rc_ctx_t *ctx,
             rc->bs->error = 1;
             return;
         }
-        int sign = tc_rc_dec_bit(rc, &ctx[is_dc ? RC_CTX_SIGN_DC : RC_CTX_SIGN]);
+        int sign = rc_dec_bit_core(rc, &cbase[is_dc ? RC_CTX_SIGN_DC : RC_CTX_SIGN]);
         coeffs[i] = (tc_coeff_t)(sign ? -mag : mag);
     }
 }

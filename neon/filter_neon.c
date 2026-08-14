@@ -11,9 +11,10 @@
  * filter.c (guarded out of NEON builds), so encoder decisions and
  * decoded output are bit-identical regardless of TCODEC_NEON.
  *
- * TODO(D9): a true NEON vectorized deblock can be added later, but
- * it must produce byte-identical results, verified by
- * tools/parity_check.sh.
+ * D9: weak luma edges are vectorized in 8-pixel horizontal and
+ * 4-pixel vertical batches. Mixed/strong decisions and chroma retain
+ * the scalar-equivalent path because their per-lane branches and
+ * in-place dependencies must remain byte-identical.
  */
 
 #include "tcodec_common.h"
@@ -58,10 +59,120 @@ static tc_pixel_t n_strong_filter_q(int p0, int q0, int q1, int q2, int q3)
     return (tc_pixel_t)tc_clip(val, 0, 255);
 }
 
+static int n_weak_filter8_horiz(tc_pixel_t *y, int stride,
+                                int x, int row, int qp)
+{
+    uint8x8_t p1 = vld1_u8(y + (row - 2) * stride + x);
+    uint8x8_t p0 = vld1_u8(y + (row - 1) * stride + x);
+    uint8x8_t q0 = vld1_u8(y + row * stride + x);
+    uint8x8_t q1 = vld1_u8(y + (row + 1) * stride + x);
+    int16x8_t p1s = vreinterpretq_s16_u16(vmovl_u8(p1));
+    int16x8_t p0s = vreinterpretq_s16_u16(vmovl_u8(p0));
+    int16x8_t q0s = vreinterpretq_s16_u16(vmovl_u8(q0));
+    int16x8_t q1s = vreinterpretq_s16_u16(vmovl_u8(q1));
+    int16x8_t four = vdupq_n_s16(4);
+    int16x8_t tc_v = vdupq_n_s16((int16_t)tc_clip(qp / 3, 1, 10));
+    int16x8_t delta = vaddq_s16(vsubq_s16(vaddq_s16(vmulq_n_s16(p0s, 4),
+                                                      vmulq_n_s16(q0s, 4)),
+                                          vaddq_s16(p1s, q1s)), four);
+    delta = vshrq_n_s16(delta, 3);
+    delta = vmaxq_s16(vminq_s16(delta, tc_v), vnegq_s16(tc_v));
+    int16x8_t p_out = vaddq_s16(p0s, delta);
+    int16x8_t q_delta = vaddq_s16(vsubq_s16(vaddq_s16(vmulq_n_s16(q0s, 4),
+                                                       vmulq_n_s16(p0s, 4)),
+                                           vaddq_s16(q1s, p1s)), four);
+    q_delta = vshrq_n_s16(q_delta, 3);
+    q_delta = vmaxq_s16(vminq_s16(q_delta, tc_v), vnegq_s16(tc_v));
+    int16x8_t q_out = vaddq_s16(q0s, q_delta);
+    p_out = vmaxq_s16(vminq_s16(p_out, vdupq_n_s16(255)), vdupq_n_s16(0));
+    q_out = vmaxq_s16(vminq_s16(q_out, vdupq_n_s16(255)), vdupq_n_s16(0));
+    vst1_u8(y + (row - 1) * stride + x, vqmovun_s16(p_out));
+    vst1_u8(y + row * stride + x, vqmovun_s16(q_out));
+    return 1;
+}
+
+static int n_weak_filter4_vert(tc_pixel_t *y, int stride,
+                               int x, int y_start, int qp)
+{
+    uint8_t p1a[8] = {0}, p0a[8] = {0}, q0a[8] = {0}, q1a[8] = {0};
+    for (int lane = 0; lane < 4; lane++) {
+        int row = y_start + lane;
+        p1a[lane] = y[row * stride + x - 2];
+        p0a[lane] = y[row * stride + x - 1];
+        q0a[lane] = y[row * stride + x];
+        q1a[lane] = y[row * stride + x + 1];
+    }
+    int16x8_t p1s = vreinterpretq_s16_u16(vmovl_u8(vld1_u8(p1a)));
+    int16x8_t p0s = vreinterpretq_s16_u16(vmovl_u8(vld1_u8(p0a)));
+    int16x8_t q0s = vreinterpretq_s16_u16(vmovl_u8(vld1_u8(q0a)));
+    int16x8_t q1s = vreinterpretq_s16_u16(vmovl_u8(vld1_u8(q1a)));
+    int16x8_t tc_v = vdupq_n_s16((int16_t)tc_clip(qp / 3, 1, 10));
+    int16x8_t four = vdupq_n_s16(4);
+    int16x8_t dp = vshrq_n_s16(vaddq_s16(vsubq_s16(vaddq_s16(vmulq_n_s16(p0s, 4),
+                                                               vmulq_n_s16(q0s, 4)),
+                                                   vaddq_s16(p1s, q1s)), four), 3);
+    dp = vmaxq_s16(vminq_s16(dp, tc_v), vnegq_s16(tc_v));
+    int16x8_t dq = vshrq_n_s16(vaddq_s16(vsubq_s16(vaddq_s16(vmulq_n_s16(q0s, 4),
+                                                               vmulq_n_s16(p0s, 4)),
+                                                   vaddq_s16(q1s, p1s)), four), 3);
+    dq = vmaxq_s16(vminq_s16(dq, tc_v), vnegq_s16(tc_v));
+    int16x8_t po = vmaxq_s16(vminq_s16(vaddq_s16(p0s, dp), vdupq_n_s16(255)), vdupq_n_s16(0));
+    int16x8_t qo = vmaxq_s16(vminq_s16(vaddq_s16(q0s, dq), vdupq_n_s16(255)), vdupq_n_s16(0));
+    uint8_t poa[8], qoa[8];
+    vst1_u8(poa, vqmovun_s16(po));
+    vst1_u8(qoa, vqmovun_s16(qo));
+    for (int lane = 0; lane < 4; lane++) {
+        int row = y_start + lane;
+        y[row * stride + x - 1] = poa[lane];
+        y[row * stride + x] = qoa[lane];
+    }
+    return 1;
+}
+
 static void n_filter_vert_edge(tc_pixel_t *y, int stride,
                                int x, int y_start, int height, int qp)
 {
-    for (int row = 0; row < height; row++) {
+    for (int row = 0; row + 4 <= height; row += 4) {
+        int all_weak = 1;
+        for (int lane = 0; lane < 4; lane++) {
+            int py = y_start + row + lane;
+            int p0 = y[py * stride + x - 1];
+            int p1 = y[py * stride + x - 2];
+            int q0 = y[py * stride + x];
+            int q1 = y[py * stride + x + 1];
+            int s = n_edge_strength(p0, p1, q0, q1, qp);
+            if (s == 0 || s >= 3) { all_weak = 0; break; }
+        }
+        if (all_weak) {
+            n_weak_filter4_vert(y, stride, x, y_start + row, qp);
+        } else {
+            for (int lane = 0; lane < 4; lane++) {
+                int py = y_start + row + lane;
+                int p3 = y[py * stride + x - 4];
+                int p2 = y[py * stride + x - 3];
+                int p1 = y[py * stride + x - 2];
+                int p0 = y[py * stride + x - 1];
+                int q0 = y[py * stride + x];
+                int q1 = y[py * stride + x + 1];
+                int q2 = y[py * stride + x + 2];
+                int q3 = y[py * stride + x + 3];
+                int strength = n_edge_strength(p0,p1,q0,q1,qp);
+                if (!strength) continue;
+                int tc = tc_clip(qp / 3, 1, 10);
+                if (strength >= 3 && tc_abs(p2-p0) < tc && tc_abs(p3-p0) < tc &&
+                    tc_abs(q2-q0) < tc && tc_abs(q3-q0) < tc) {
+                    y[py*stride+x-2] = n_strong_filter_p(p3,p2,p1,p0,q0);
+                    y[py*stride+x-1] = n_strong_filter_p(p2,p1,p0,q0,q1);
+                    y[py*stride+x] = n_strong_filter_q(p0,q0,q1,q2,q3);
+                    y[py*stride+x+1] = n_strong_filter_q(p1,q0,q1,q2,q3);
+                } else {
+                    y[py*stride+x-1] = n_weak_filter(p1,p0,q0,q1,tc);
+                    y[py*stride+x] = n_weak_filter(q1,q0,p0,p1,tc);
+                }
+            }
+        }
+    }
+    for (int row = (height / 4) * 4; row < height; row++) {
         int py = y_start + row;
         int p3 = y[py * stride + (x - 4)];
         int p2 = y[py * stride + (x - 3)];
@@ -99,7 +210,50 @@ static void n_filter_vert_edge(tc_pixel_t *y, int stride,
 static void n_filter_horiz_edge(tc_pixel_t *y, int stride,
                                 int x_start, int row, int width, int qp)
 {
-    for (int col = 0; col < width; col++) {
+    for (int col = 0; col + 8 <= width; col += 8) {
+        int all_weak = 1;
+        for (int lane = 0; lane < 8; lane++) {
+            int px = x_start + col + lane;
+            int p0 = y[(row - 1) * stride + px];
+            int p1 = y[(row - 2) * stride + px];
+            int q0 = y[row * stride + px];
+            int q1 = y[(row + 1) * stride + px];
+            if (n_edge_strength(p0, p1, q0, q1, qp) == 0 ||
+                n_edge_strength(p0, p1, q0, q1, qp) >= 3) {
+                all_weak = 0;
+                break;
+            }
+        }
+        if (all_weak) {
+            n_weak_filter8_horiz(y, stride, x_start + col, row, qp);
+        } else {
+            for (int lane = 0; lane < 8; lane++) {
+                int px = x_start + col + lane;
+                int p3 = y[(row - 4) * stride + px];
+                int p2 = y[(row - 3) * stride + px];
+                int p1 = y[(row - 2) * stride + px];
+                int p0 = y[(row - 1) * stride + px];
+                int q0 = y[row * stride + px];
+                int q1 = y[(row + 1) * stride + px];
+                int q2 = y[(row + 2) * stride + px];
+                int q3 = y[(row + 3) * stride + px];
+                int strength = n_edge_strength(p0, p1, q0, q1, qp);
+                if (!strength) continue;
+                int tc = tc_clip(qp / 3, 1, 10);
+                if (strength >= 3 && tc_abs(p2 - p0) < tc && tc_abs(p3 - p0) < tc &&
+                    tc_abs(q2 - q0) < tc && tc_abs(q3 - q0) < tc) {
+                    y[(row - 2) * stride + px] = n_strong_filter_p(p3,p2,p1,p0,q0);
+                    y[(row - 1) * stride + px] = n_strong_filter_p(p2,p1,p0,q0,q1);
+                    y[row * stride + px] = n_strong_filter_q(p0,q0,q1,q2,q3);
+                    y[(row + 1) * stride + px] = n_strong_filter_q(p1,q0,q1,q2,q3);
+                } else {
+                    y[(row - 1) * stride + px] = n_weak_filter(p1,p0,q0,q1,tc);
+                    y[row * stride + px] = n_weak_filter(q1,q0,p0,p1,tc);
+                }
+            }
+        }
+    }
+    for (int col = (width / 8) * 8; col < width; col++) {
         int px = x_start + col;
         int p3 = y[(row - 4) * stride + px];
         int p2 = y[(row - 3) * stride + px];
