@@ -22,6 +22,9 @@ test_tcodec
 # Benchmark results (regenerated)
 benchmark_results/
 
+# Real-content benchmark corpus sources (downloaded by tools/fetch_corpus.sh)
+benchmark_v2_real/raw/
+
 # Golden corpus encoded bitstreams (regenerated from YUV sources)
 golden/*.tcv
 
