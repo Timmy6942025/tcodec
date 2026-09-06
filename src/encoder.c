@@ -630,7 +630,28 @@ static int64_t qt_leaf(qt_enc_t *e, int depth, int cx, int cy, int write)
                         (enc->cfg.preset == TC_PRESET_FAST ? 3 : 1);
         const tc_pixel_t *orig_luma = enc->cur->y + py * enc->cur->stride_y + px;
         int best_imode = b_imode;
-        for (int m=0;m<TC_INTRA_MODES;m += mode_step){
+        /* Medium preset: SAD-screen all modes, full RDO top-4 (encode speed
+         * at ~equal quality; slow keeps exhaustive 18-mode RDO). */
+        int prune_top = (enc->cfg.preset == TC_PRESET_MEDIUM && !fast_intra) ? 4 : 0;
+        int cand[4] = {0, 0, 0, 0};
+        int64_t cand_sad[4] = {0, 0, 0, 0};
+        int n_cand = 0;
+        if (prune_top) {
+            for (int m=0;m<TC_INTRA_MODES;m += mode_step){
+                tc_intra_predict(pred,cu,ra+1,rl+1,cu,(tc_intra_mode_t)m);
+                int64_t sad = tc_sad(orig_luma, enc->cur->stride_y, pred, cu, cu);
+                int k = n_cand;
+                if (n_cand < 4) { n_cand++; }
+                else if (sad >= cand_sad[3]) continue;
+                else k = 3;
+                while (k > 0 && sad < cand_sad[k-1]) { cand[k] = cand[k-1]; cand_sad[k] = cand_sad[k-1]; k--; }
+                cand[k] = m; cand_sad[k] = sad;
+            }
+        }
+        int n_modes = prune_top ? n_cand : 0;
+        for (int mi=0; mi < (prune_top ? n_modes : TC_INTRA_MODES); mi++){
+            int m = prune_top ? cand[mi] : mi * mode_step;
+            if (!prune_top && (m >= TC_INTRA_MODES)) break;
             tc_intra_predict(pred,cu,ra+1,rl+1,cu,(tc_intra_mode_t)m);
             int lb = 0;
             int64_t dl;

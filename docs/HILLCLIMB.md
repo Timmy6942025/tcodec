@@ -71,7 +71,7 @@ decode parallelism, 10-clip corpus validation. See TODO.md/MASTER_PLAN.md.
 
 `b_ch` was never set: `ch_intra`=1 path dead encoder-side (v2 intra chroma
 always collocated MC). Activated with per-leaf chroma RDO (MC vs CfL-blended
-DC, header Honest: CfL pays flag+3 cmode bits) on medium+ full-RDO path;
+DC, header-honest: CfL pays flag+3 cmode bits) on medium+ full-RDO path;
 shared `tc_cfl_blend` helper (predict.c) mirrored in encoder replay, serial
 and parallel decoders. Probe color patch finally gives chroma signal.
 
@@ -133,3 +133,14 @@ decoder paths parse/reconstruct from the selected ref; DPB already shifts.
 | `screen_ui` 720p 10fr med QP32 | 4.65KB@41.05 → 4.13KB@41.67dB (-11.2%, +0.62dB TRUE WIN) |
 | decode | 10/10 exact bytes, both paths |
 | new `test_v2_multiref` | in-process RDO + bit-exact recon check |
+
+## Session 9 (medium intra pruning — speed at ~equal quality)
+
+Medium did exhaustive 18-mode full-RDO intra (18 transforms/leaf). SAD-screen
+to top-4, full RDO on those; slow keeps exhaustive. Top-6 trialed: worse on
+screen (+3.4% — non-monotonic RDO chaos), so top-4 locked.
+
+| Check | Result |
+|---|---|
+| probe | +1.9% bytes, -0.01dB Y (accepted speed price, documented) |
+| screen_ui med | 4.13KB@41.67 → 4.11KB@41.82 (-0.5%, +0.15dB) + 53s→28s encode (1.9x) |
