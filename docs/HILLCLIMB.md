@@ -61,6 +61,7 @@ checked: λ250 costs 0.012 dB/%; JND-1.5× at 0.092 dB/% rejected).
 | — | CfL alpha >>3→>>2 | flat bytes, Cr −0.41dB at qp37 (fixed alpha can't serve ± correlation) | REVERT — needs per-leaf alpha signaling (v2.1 syntax batch) |
 | 19 | last-pos bit-model term (linear 2..10) | probe -1.5%/+0.06 TRUE WIN; screen med +2.1%/-0.05 | shape miscalibrated — replaced by coder mirror |
 | 20 | last-pos term mirroring range coder (presence + trunc-unary + EG) | probe -2.3%/-0.02; screen med identical bytes, -0.02dB (neutral) | KEEP — strictly-better model, real-neutral |
+| — | full coder-faithful coeff model (sig/gt/sign/UE counts) | probe +0.9%/+0.10; screen med +4.7%/-0.20 | REVERT — fidelity without probability-skew awareness misranks; effective models need adaptive scaling |
 | — | search range 32→48 (color probe) | +0.9%, flat | REVERT (MV cost > gain on small motion) |
 | — | search range 32→24 (color probe) | +0.2%, +0.25dB | REVERT — tempting but asymmetric risk: clips true motion >24px catastrophically on unseen content |
 | — | SPEC truth pass | v2 never had CfL (legacy-only); corrected §4.3, queued v2-CfL (prediction-only, no syntax needed) | DOC |
