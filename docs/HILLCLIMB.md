@@ -46,3 +46,14 @@ earlier deadzone no-signal readings).
 Deadzone walk cumulative (hardened): 29326B@25.49 → 25014B@25.05 (-14.7%, -0.44dB).
 With λ250: 24396B@25.02 (-16.8%, -0.47dB). Kept trades only (exchange-rate
 checked: λ250 costs 0.012 dB/%; JND-1.5× at 0.092 dB/% rejected).
+
+## Session 3 (2026-09-06, estimator + skip re-trial)
+
+| Step | Change | Probe (hardened) | Verdict |
+|---|---|---|---|
+| 14 | `lb` estimator ×1.5 (was undershooting range coder) | 23882B @ 25.08dB (-2.1%, +0.06dB — true win) | KEEP |
+| 15 | estimator ×2 / ×1.75 | +0.6%/-0.04, -0.27%/-0.08 | REVERT (knee at ×1.5) |
+| 16 | v2 skip re-trial (calibrated costs) | -40% bytes, -4dB | REVERT — estimator theory disproven; suspect MVP divergence, needs tracing |
+| — | ME diamond 4→8 iters | -0.29%, +0.03dB | REVERT |
+
+Cumulative hardened: 29326B@25.49 → 23882B@25.08 (-18.5%, -0.41dB).
