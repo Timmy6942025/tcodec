@@ -61,6 +61,15 @@ checked: λ250 costs 0.012 dB/%; JND-1.5× at 0.092 dB/% rejected).
 | — | CfL alpha >>3→>>2 | flat bytes, Cr −0.41dB at qp37 (fixed alpha can't serve ± correlation) | REVERT — needs per-leaf alpha signaling (v2.1 syntax batch) |
 | 19 | last-pos bit-model term (linear 2..10) | probe -1.5%/+0.06 TRUE WIN; screen med +2.1%/-0.05 | shape miscalibrated — replaced by coder mirror |
 | 20 | last-pos term mirroring range coder (presence + trunc-unary + EG) | probe -2.3%/-0.02; screen med identical bytes, -0.02dB (neutral) | KEEP — strictly-better model, real-neutral |
+
+## Validation state
+
+- Fast suite 52/52 green on every kept commit; full suite 53/53 green
+  including the 300-frame 1080p in-process soak (final: all climbs).
+- Golden manifest regenerated with climbed encoder (all 212 hashes move —
+  decisions changed everywhere, decoders all pass).
+- Real-content gates: `screen_ui` medium 10fr QP32 + `park_joy` nature
+  checkpoint recorded in BENCHMARKS.md.
 | — | full coder-faithful coeff model (sig/gt/sign/UE counts) | probe +0.9%/+0.10; screen med +4.7%/-0.20 | REVERT — fidelity without probability-skew awareness misranks; effective models need adaptive scaling |
 | — | MVD bits ×0.75 (ctx-coded cheaper than EG) | probe +0.8%/+0.01 | REVERT — EG model fine at tested motion ranges |
 | — | search range 32→48 (color probe) | +0.9%, flat | REVERT (MV cost > gain on small motion) |
