@@ -582,6 +582,12 @@ static int64_t qt_leaf(qt_enc_t *e, int depth, int cx, int cy, int write)
             int64_t cost2 = dl2 + e->lambda*bits_merge;
             if (cost2<best_cost) { best_cost=cost2;b_intra=0;b_merge=1;b_skip=0;b_mvdx=disp.x;b_mvdy=disp.y; b_dct=TC_BLOCK_8x8_ID;b_ch=0;b_cmode=0;b_imode=1;b_refsel=0;b_bi=0; }
         }
+        /* NOTE: v2 skip (zero-residual + MVP, 2-bit header) was trialed here.
+         * Mechanism verified correct (perfect-match-only variant is neutral),
+         * but full RDO over-selects it: the lb bit estimator in qt_code_luma
+         * (1 + 2*nz + count_coeff_bits) is pessimistic vs the real range
+         * coder, so explicit inter looks pricier than it is. Fix the estimator
+         * calibration first (affects all RDO), then re-trial skip. */
     }
 
     /* Keyframes have no reference frame; always provide an intra
