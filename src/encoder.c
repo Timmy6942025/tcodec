@@ -356,6 +356,12 @@ static int64_t qt_code_luma(qt_enc_t *e, int px, int py, int cu,
             for (int y=0;y<8;y++) for (int x=0;x<8;x++){ int v=(int)pred[(oy+y)*cu+ox+x]+res8[y*8+x]; tc_pixel_t rv=(tc_pixel_t)tc_clip(v,0,255); enc->recon->y[(py+oy+y)*rs+(px+ox+x)]=rv; int d=(int)orig[(oy+y)*os+ox+x]-rv; distortion+=d*d; }
         } else {
             int base=(ty*ntu+tx)*64;
+            /* Outer 4x4 flag per TU: both v2 decoders (serial qt_dec_luma
+             * and parallel v2_parse_luma) read one outer DCT_SIZE flag plus
+             * four sub-flags. The old encoder wrote only the four sub-flags,
+             * so no v2 4x4 stream ever decoded (callers hardcoded 8x8). */
+            if (write) { enc_write_bits(e->bs,e->rc,e->rc_ctx,RC_CTX_DCT_SIZE,TC_BLOCK_4x4_ID,1); }
+            else bits += 1;
             for (int q=0;q<4;q++){
                 int sx=(q&1)*4, sy=(q&2)*2;
                 tc_coeff_t res4[16];
@@ -385,6 +391,23 @@ static uint8_t qt_choose_dct(const tc_pixel_t *pred, int cu)
     for (int i=0;i<n;i++){ int v=pred[i]; sum+=v; sumsq+=v*v; }
     int var = sumsq/n - (sum/n)*(sum/n);
     return (var > VARIANCE_THRESHOLD) ? TC_BLOCK_4x4_ID : TC_BLOCK_8x8_ID;
+}
+
+/* Best-of-both transform sizes for v2 inter candidates (preset>=MEDIUM).
+ * qt_code_luma already supports 4x4 and 8x8 with matched decoder syntax;
+ * callers previously hardcoded 8x8. Returns winning distortion, with the
+ * winning size's rate in *bits_out and size in *dct_out. Encoder-only,
+ * bitstream stays valid (dct_size is signaled per leaf). */
+static int64_t qt_code_best(qt_enc_t *e, int px, int py, int cu,
+                            const tc_pixel_t *pred, int *bits_out, uint8_t *dct_out)
+{
+    int lb8 = 0, lb4 = 0;
+    int64_t dl8 = qt_code_luma(e, px, py, cu, TC_BLOCK_8x8_ID, pred, &lb8, 0);
+    int64_t c8 = dl8 + e->lambda * (int64_t)lb8;
+    int64_t dl4 = qt_code_luma(e, px, py, cu, TC_BLOCK_4x4_ID, pred, &lb4, 0);
+    int64_t c4 = dl4 + e->lambda * (int64_t)lb4;
+    if (c4 < c8) { *bits_out = lb4; *dct_out = TC_BLOCK_4x4_ID; return dl4; }
+    *bits_out = lb8; *dct_out = TC_BLOCK_8x8_ID; return dl8;
 }
 
 static int64_t qt_leaf(qt_enc_t *e, int depth, int cx, int cy, int write)
@@ -538,11 +561,20 @@ static int64_t qt_leaf(qt_enc_t *e, int depth, int cx, int cy, int write)
             dl = (sad_proxy * sad_proxy) / (int64_t)(cu * cu);
             lb = 1 + 2;
         } else {
-            dl = qt_code_luma(e,px,py,cu,TC_BLOCK_8x8_ID,pred,&lb,0);
+            uint8_t cur_dct = TC_BLOCK_8x8_ID;
+            if (enc->cfg.preset >= TC_PRESET_MEDIUM && cu <= 32)
+                dl = qt_code_best(e,px,py,cu,pred,&lb,&cur_dct);
+            else
+                dl = qt_code_luma(e,px,py,cu,TC_BLOCK_8x8_ID,pred,&lb,0);
+            int bits_inter = 1 + 1 + 1 + 1 + 2 + (tc_bs_se_bits(disp.x)+tc_bs_se_bits(disp.y)) + lb;
+            int64_t cost = dl + e->lambda*bits_inter;
+            if (cost < best_cost) { best_cost=cost; b_intra=0;b_skip=0;b_merge=0;b_dct=cur_dct; b_mvdx=disp.x;b_mvdy=disp.y;b_refsel=0;b_bi=0;b_ch=0; b_cmode=0;b_imode=1; }
         }
-        int bits_inter = 1 + 1 + 1 + 1 + 2 + (tc_bs_se_bits(disp.x)+tc_bs_se_bits(disp.y)) + lb;
-        int64_t cost = dl + e->lambda*bits_inter;
-        if (cost < best_cost) { best_cost=cost; b_intra=0;b_skip=0;b_merge=0;b_dct=TC_BLOCK_8x8_ID; b_mvdx=disp.x;b_mvdy=disp.y;b_refsel=0;b_bi=0;b_ch=0; b_cmode=0;b_imode=1; }
+        if (fast_mode) {
+            int bits_inter = 1 + 1 + 1 + 1 + 2 + (tc_bs_se_bits(disp.x)+tc_bs_se_bits(disp.y)) + lb;
+            int64_t cost = dl + e->lambda*bits_inter;
+            if (cost < best_cost) { best_cost=cost; b_intra=0;b_skip=0;b_merge=0;b_dct=TC_BLOCK_8x8_ID; b_mvdx=disp.x;b_mvdy=disp.y;b_refsel=0;b_bi=0;b_ch=0; b_cmode=0;b_imode=1; }
+        }
         if (enc->cfg.preset >= TC_PRESET_MEDIUM) {
             tc_mv_s mm={mvp.x+px*4,mvp.y+py*4}; tc_inter_predict(enc->dpb[0].frame->y,enc->dpb[0].frame->stride_y, enc->cfg.width,enc->cfg.height,mm,pred,cu,cu);
             int64_t dl2 = qt_code_luma(e,px,py,cu,TC_BLOCK_8x8_ID,pred,&lb,0);
