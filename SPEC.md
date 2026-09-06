@@ -131,13 +131,16 @@ direction.
 
 ### 4.3 Chroma Prediction
 
-**Intra blocks**: CfL (Chroma-from-Luma) prediction — uses reconstructed
+**Intra blocks (v0/v1 legacy path)**: CfL (Chroma-from-Luma) prediction — uses reconstructed
 luma pixels to predict chroma. A simple linear model blends the luma
 correlation with a DC prediction derived from neighboring chroma samples:
 ```
 c_pred = c_dc + ((luma_val - luma_avg) >> 3)   // alpha ≈ 0.125
 ```
 This provides modest chroma quality improvement over fixed DC(128).
+**v2 quadtree path**: intra chroma currently uses neighbour-DC or collocated
+MC (`ch_intra` flag), not CfL — porting CfL to v2 is queued work (no syntax
+change needed, prediction-side only; see `docs/HILLCLIMB.md`).
 
 **Inter/skip/merge blocks**: Fixed DC value of 128.
 

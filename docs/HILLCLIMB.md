@@ -55,6 +55,17 @@ checked: λ250 costs 0.012 dB/%; JND-1.5× at 0.092 dB/% rejected).
 | 15 | estimator ×2 / ×1.75 | +0.6%/-0.04, -0.27%/-0.08 | REVERT (knee at ×1.5) |
 | 16 | v2 skip re-trial (calibrated costs) | -40% bytes, -4dB | REVERT — estimator theory disproven; suspect MVP divergence, needs tracing |
 | 17 | v2 perfect-match skip (dskip==0 → force) | probe -0.12%/-0.01; screen med +1.5%/-0.02 | REVERT — skip leaves chroma stale, polluting later CfL/DC refs; v2 RDO is luma-only so unpriced. Skip needs chroma-aware costing |
+| — | JND high 1.25→1.5× (dual gate) | byte-identical on probe AND screen AND QP22 | REVERT — weight never binds at tested QPs; high bands quantize to zero either way |
+| — | SPEC truth pass | v2 never had CfL (legacy-only); corrected §4.3, queued v2-CfL (prediction-only, no syntax needed) | DOC |
+
+## Where the climb stands
+
+Quick-knob phase has converged: every surviving change is real-validated
+(RDO scale, λ200, inter-4×4+outer flag, multiref ref_sel, header deps,
+hardened probe+text patch, gates). All sub-1% tunings exhausted or gated.
+Remaining program is structural (needs design, not trials): v2-CfL,
+WHT transform-type flag, chroma-aware RDO (unblocks skip), B-frame emission,
+decode parallelism, 10-clip corpus validation. See TODO.md/MASTER_PLAN.md.
 | — | ME diamond 4→8 iters | -0.29%, +0.03dB | REVERT |
 
 Cumulative hardened: 29326B@25.49 → 23882B@25.08 (-18.5%, -0.41dB).
