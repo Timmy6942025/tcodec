@@ -88,6 +88,30 @@ near-flat curve on static content is skip-shaped, and v2 skip is parked
 here favors tcodecv2 (26–28 vs 18–19 fps) but both are CLI-timed on small
 files and neither meets the 60/30-fps Tier-1 claim on nature content.
 
+## Nature checkpoint (2026-09-06, park_joy 720p50, 30 frames)
+
+Byte-range prefix of `park_joy_420_720p50.y4m`, first 30 frames; same
+harness/settings as above (`--src` adhoc mode). This is the first
+real-nature measurement of the climbed code — the old 5–8dB deficit
+predates every hill-climb session.
+
+| Codec | QP | Bytes (30fr) | PSNR-Y | SSIM | Enc fps | Dec fps |
+|---|---:|---:|---:|---:|---:|---:|
+| tcodecv2 | 27 | 1,312,333 | 28.25 | 0.8499 | 0.19 | 11.8 |
+| tcodecv2 | 32 | 589,742 | 25.55 | 0.7855 | 0.21 | 16.1 |
+| tcodecv2 | 37 | 210,011 | 23.29 | 0.7221 | 0.23 | 19.5 |
+| x264vf | 27 | 456,234 | 29.86 | 0.8848 | 13.0 | 27.5 |
+| x264vf | 32 | 199,752 | 26.85 | 0.8274 | 13.5 | 31.1 |
+| x264vf | 37 | 86,331 | 24.14 | 0.7494 | 14.1 | 34.7 |
+
+Reading: at matched quality tcodecv2 needs roughly 2.5–3× the bits
+(+150–200% BD-rate vs x264vf, interpolated); at matched rate it trails by
+~2.5–4dB. Better than the pre-climb 5–8dB deficit, still far from
+competitive. Likely drivers, in order: no B-frames, no skip, two
+references only, no affine/global motion, entropy-model gap, luma-only
+RDO. Decode on nature (12–19fps) trails ffmpeg-x264 (27–35fps) and the
+60fps@720p target — D9 open.
+
  ## D8: Multi-codec real-content benchmark (August 2026)
 
  Host: aarch64 Cortex-A72, 4 cores, NEON build, 10 frames of bbb_nature 1280×720,
