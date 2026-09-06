@@ -935,7 +935,11 @@ static void encode_ctu_v2(tc_encoder_t *enc, int row, int col, int qp,
                 no_sao_cost += (int64_t)d0 * d0;
                 sao_cost += (int64_t)d1 * d1;
             }
-            if (sao_cost + (int64_t)tc_lambda(qp) * 10 >= no_sao_cost)
+            /* SAO signaling model is 10 syntax bits (1 present + 5 band +
+             * 4 offset), but x6 keeps more SAO for a true win (screen medium
+             * -17.5% bytes and +0.46dB; see HILLCLIMB session 10). x3 was
+             * measured worse (overshoots on SAO bits). */
+            if (sao_cost + (int64_t)tc_lambda(qp) * 6 >= no_sao_cost)
                 has_sao = 0;
         }
         enc_write_bits(bs, rc, rc_ctx, RC_CTX_SAO_TYPE, (uint32_t)has_sao, 1);

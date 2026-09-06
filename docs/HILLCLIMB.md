@@ -82,6 +82,18 @@ and parallel decoders. Probe color patch finally gives chroma signal.
 | probe | 44714@24.74 → 43646@24.74 (-2.4% bytes, Y flat, Cb/Cr +0.3–0.5dB TRUE WIN) |
 | screen_ui med | 4.13KB@41.67 identical (correct RDO gating — no correlation, no fire) |
 | new `test_v2_cfl` | correlated color, bit-exact recon, Cb PSNR gate |
+
+## Session 10 (SAO model x10→x6 — biggest single tuning win)
+
+Cheaper SAO signaling model enables more Band-Offset filtering. Bracketed:
+x6 wins huge, x3 overshoots (more SAO bits than distortion saved).
+
+| Check | Result |
+|---|---|
+| probe | +0.4% bytes, +0.04dB (neutral; SAO barely fires on synthetic) |
+| screen_ui ultrafast | 16.89KB@41.11 → 16.15KB@41.26 (-4.4%, +0.15dB) |
+| screen_ui medium | 4.11KB@41.82 → 3.39KB@42.28 (-17.5% bytes AND +0.46dB TRUE WIN) |
+| decode | 10/10 exact bytes |
 | — | ME diamond 4→8 iters | -0.29%, +0.03dB | REVERT |
 
 Cumulative hardened: 29326B@25.49 → 23882B@25.08 (-18.5%, -0.41dB).
