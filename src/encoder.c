@@ -189,6 +189,9 @@ typedef struct {
     int              ctu_x, ctu_y;
     int              qp, qp_c;
     int64_t          lambda;
+    /* v2 second reference active (MULTI_REF tool, P-frames): explicit
+     * inter leaves carry a ref_sel bit choosing dpb[0]/dpb[1]. */
+    int              multiref;
     tc_frame_type_t  frame_type;
     int              poc;
     tc_bs_writer_t  *bs;
@@ -477,7 +480,7 @@ static int64_t qt_leaf(qt_enc_t *e, int depth, int cx, int cy, int write)
                 if (e->frame_type==TC_FRAME_BIDIR) { enc_write_bits(e->bs,e->rc,e->rc_ctx,RC_CTX_REF_SEL,nd->ref_sel,1); enc_write_bits(e->bs,e->rc,e->rc_ctx,RC_CTX_BLOCK_MODE,nd->bi,1); }
                 if (nd->skip) { enc_write_bits(e->bs,e->rc,e->rc_ctx,RC_CTX_SKIP_FLAG,1,1); }
                 else if (nd->merge) { enc_write_bits(e->bs,e->rc,e->rc_ctx,RC_CTX_SKIP_FLAG,0,1); enc_write_bits(e->bs,e->rc,e->rc_ctx,RC_CTX_MERGE_FLAG,1,1); }
-                else { enc_write_bits(e->bs,e->rc,e->rc_ctx,RC_CTX_SKIP_FLAG,0,1); enc_write_bits(e->bs,e->rc,e->rc_ctx,RC_CTX_MERGE_FLAG,0,1); enc_write_bits(e->bs,e->rc,e->rc_ctx,RC_CTX_DCT_SIZE,nd->dct_size,1); enc_write_se(e->bs,e->rc,e->rc_ctx,RC_CTX_MVD_X,nd->mvd_x); enc_write_se(e->bs,e->rc,e->rc_ctx,RC_CTX_MVD_Y,nd->mvd_y); }
+                else { enc_write_bits(e->bs,e->rc,e->rc_ctx,RC_CTX_SKIP_FLAG,0,1); enc_write_bits(e->bs,e->rc,e->rc_ctx,RC_CTX_MERGE_FLAG,0,1); if (e->multiref && e->frame_type==TC_FRAME_INTER) enc_write_bits(e->bs,e->rc,e->rc_ctx,RC_CTX_REF_SEL,nd->ref_sel,1); enc_write_bits(e->bs,e->rc,e->rc_ctx,RC_CTX_DCT_SIZE,nd->dct_size,1); enc_write_se(e->bs,e->rc,e->rc_ctx,RC_CTX_MVD_X,nd->mvd_x); enc_write_se(e->bs,e->rc,e->rc_ctx,RC_CTX_MVD_Y,nd->mvd_y); }
             }
             tc_mv_s mvp = qt_mvp(e,cx,cy,e->grid);
             tc_mv_s mv = { mvp.x+px*4+nd->mvd_x, mvp.y+py*4+nd->mvd_y };
@@ -490,14 +493,20 @@ static int64_t qt_leaf(qt_enc_t *e, int depth, int cx, int cy, int write)
                     tc_inter_predict(r1->y,r1->stride_y,enc->cfg.width,enc->cfg.height,mv,t1,cu,cu);
                     tc_mv_s mv2={-mv.x,-mv.y}; tc_inter_predict(r2->y,r2->stride_y,enc->cfg.width,enc->cfg.height,mv2,t2,cu,cu);
                     for (int i=0;i<cu*cu;i++) pred[i]=(tc_pixel_t)((t1[i]+t2[i]+1)>>1);
-                } else { tc_inter_predict(enc->dpb[0].frame->y,enc->dpb[0].frame->stride_y, enc->cfg.width,enc->cfg.height,mv,pred,cu,cu); }
+                } else {
+                    const tc_frame_buf_t *rf = (nd->ref_sel && enc->dpb[1].frame) ?
+                        enc->dpb[1].frame : enc->dpb[0].frame;
+                    tc_inter_predict(rf->y,rf->stride_y, enc->cfg.width,enc->cfg.height,mv,pred,cu,cu);
+                }
                 qt_code_luma(e,px,py,cu,nd->dct_size,pred,&bits_dummy,write == QT_WRITE);
                 if (nd->ch_intra) {
                     tc_intra_chroma_dc(enc->recon->cb,enc->recon->stride_c,px/2,py/2,cu/2,cbuf[0],cu/2);
                     tc_intra_chroma_dc(enc->recon->cr,enc->recon->stride_c,px/2,py/2,cu/2,cbuf[1],cu/2);
                 } else {
-                    tc_inter_predict_chroma(enc->dpb[0].frame->cb,enc->dpb[0].frame->stride_c, enc->cfg.width/2,enc->cfg.height/2,mv,cbuf[0],cu/2,cu/2);
-                    tc_inter_predict_chroma(enc->dpb[0].frame->cr,enc->dpb[0].frame->stride_c, enc->cfg.width/2,enc->cfg.height/2,mv,cbuf[1],cu/2,cu/2);
+                    const tc_frame_buf_t *rcf = (nd->ref_sel && enc->dpb[1].frame) ?
+                        enc->dpb[1].frame : enc->dpb[0].frame;
+                    tc_inter_predict_chroma(rcf->cb,rcf->stride_c, enc->cfg.width/2,enc->cfg.height/2,mv,cbuf[0],cu/2,cu/2);
+                    tc_inter_predict_chroma(rcf->cr,rcf->stride_c, enc->cfg.width/2,enc->cfg.height/2,mv,cbuf[1],cu/2,cu/2);
                 }
                 qt_code_chroma(e,px,py,cu,0,cpred,&bits_dummy,write == QT_WRITE);
             } else {
@@ -570,13 +579,31 @@ static int64_t qt_leaf(qt_enc_t *e, int depth, int cx, int cy, int write)
             else
                 dl = qt_code_luma(e,px,py,cu,TC_BLOCK_8x8_ID,pred,&lb,0);
             int bits_inter = 1 + 1 + 1 + 1 + 2 + (tc_bs_se_bits(disp.x)+tc_bs_se_bits(disp.y)) + lb;
+            if (e->multiref) bits_inter += 1; /* ref_sel bit always present when active */
             int64_t cost = dl + e->lambda*bits_inter;
             if (cost < best_cost) { best_cost=cost; b_intra=0;b_skip=0;b_merge=0;b_dct=cur_dct; b_mvdx=disp.x;b_mvdy=disp.y;b_refsel=0;b_bi=0;b_ch=0; b_cmode=0;b_imode=1; }
         }
         if (fast_mode) {
             int bits_inter = 1 + 1 + 1 + 1 + 2 + (tc_bs_se_bits(disp.x)+tc_bs_se_bits(disp.y)) + lb;
+            if (e->multiref) bits_inter += 1;
             int64_t cost = dl + e->lambda*bits_inter;
             if (cost < best_cost) { best_cost=cost; b_intra=0;b_skip=0;b_merge=0;b_dct=TC_BLOCK_8x8_ID; b_mvdx=disp.x;b_mvdy=disp.y;b_refsel=0;b_bi=0;b_ch=0; b_cmode=0;b_imode=1; }
+        }
+        /* Second-reference candidate (v2 multiref, full-RDO path only):
+         * same MVP center, ME against dpb[1]; honest bits include the
+         * ref_sel bit. Decoder mirrors via dpb[1]. */
+        if (!fast_mode && e->multiref && enc->dpb[1].frame) {
+            tc_sad_t sad1; tc_mv_s bm1 = tc_motion_est(enc->dpb[1].frame->y, enc->dpb[1].frame->stride_y, enc->cfg.width,enc->cfg.height, enc->cur->y+py*enc->cur->stride_y+px, enc->cur->stride_y, center.x>>2, center.y>>2, cu, sr, &sad1);
+            tc_mv_s disp1 = { bm1.x-(mvp.x+px*4), bm1.y-(mvp.y+py*4) };
+            tc_inter_predict(enc->dpb[1].frame->y,enc->dpb[1].frame->stride_y, enc->cfg.width,enc->cfg.height,bm1,pred,cu,cu);
+            uint8_t r1_dct = TC_BLOCK_8x8_ID; int lb1 = 0; int64_t dl1;
+            if (enc->cfg.preset >= TC_PRESET_MEDIUM && cu <= 32)
+                dl1 = qt_code_best(e,px,py,cu,pred,&lb1,&r1_dct);
+            else
+                dl1 = qt_code_luma(e,px,py,cu,TC_BLOCK_8x8_ID,pred,&lb1,0);
+            int bits_r1 = 1 + 1 + 1 + 1 + 2 + 1 + (tc_bs_se_bits(disp1.x)+tc_bs_se_bits(disp1.y)) + lb1;
+            int64_t cost1 = dl1 + e->lambda*bits_r1;
+            if (cost1 < best_cost) { best_cost=cost1; b_intra=0;b_skip=0;b_merge=0;b_dct=r1_dct; b_mvdx=disp1.x;b_mvdy=disp1.y;b_refsel=1;b_bi=0;b_ch=0; b_cmode=0;b_imode=1; }
         }
         if (enc->cfg.preset >= TC_PRESET_MEDIUM) {
             tc_mv_s mm={mvp.x+px*4,mvp.y+py*4}; tc_inter_predict(enc->dpb[0].frame->y,enc->dpb[0].frame->stride_y, enc->cfg.width,enc->cfg.height,mm,pred,cu,cu);
@@ -781,6 +808,11 @@ static void encode_ctu_v2(tc_encoder_t *enc, int row, int col, int qp,
     qt_enc_t e; memset(&e,0,sizeof(e));
     e.enc=enc; e.ctu_x=col*TC_CTU_SIZE; e.ctu_y=row*TC_CTU_SIZE;
     e.qp=qp; e.qp_c=tc_clip(qp+1,0,63); e.lambda=(int64_t)tc_lambda(qp);
+    /* Must match the MULTI_REF tool-flag condition above: when set, the
+     * decoder expects a ref_sel bit on every explicit v2 inter leaf. */
+    e.multiref = (enc->cfg.use_v2 && enc->cfg.preset >= TC_PRESET_MEDIUM &&
+                  enc->cfg.profile >= TC_PROFILE_STREAMING_MAIN &&
+                  frame_type == TC_FRAME_INTER);
     e.frame_type=frame_type; e.poc=poc; e.bs=bs; e.tans=tans; e.rc=rc; e.rc_ctx=rc_ctx;
     e.node=enc->v2_node; e.grid=enc->v2_grid;
     memset(e.node, 0, (size_t)TC_QT_NODES * sizeof(qt_node_t));
@@ -2055,10 +2087,15 @@ static tc_error_t encode_poc_frame(tc_encoder_t *enc,
         tools |= TC_TOOL_JND_WEIGHTING;   /* JND band quantization weighting */
         tools |= TC_TOOL_MEDIAN_MV_PRED;  /* Median MV predictor + MVD coding */
         tools |= TC_TOOL_SIX_TAP_INTERP;  /* 6-tap luma interpolation (always used) */
-        /* Multi-reference: only when SLOW preset AND profile allows it.
+        /* Multi-reference: SLOW preset (legacy path) or v2 medium+ (second
+         * reference candidate with per-leaf ref_sel, gated by this flag).
          * Profile compliance: baseline-mobile decoders must never encounter
          * multi-ref syntax in their bitstreams. */
         if (enc->cfg.preset == TC_PRESET_SLOW &&
+            profile >= TC_PROFILE_STREAMING_MAIN) {
+            tools |= TC_TOOL_MULTI_REF;
+        }
+        if (enc->cfg.use_v2 && enc->cfg.preset >= TC_PRESET_MEDIUM &&
             profile >= TC_PROFILE_STREAMING_MAIN) {
             tools |= TC_TOOL_MULTI_REF;
         }

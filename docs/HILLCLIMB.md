@@ -92,3 +92,18 @@ New gates (hard lessons):
 
 Surviving gains (all real-validated): RDO scale fix, λ200, inter-4×4 RDO +
 outer-flag fix, Makefile header deps, hardened probe, this log.
+
+## Session 5 (2026-09-06, v2 second reference — first TRUE structural win)
+
+Gated on `MULTI_REF` tool (medium+ preset, streaming-main+ profile): explicit
+P-frame inter leaves carry one `ref_sel` bit (after merge flag) choosing
+`dpb[0]`/`dpb[1]`; RDO evaluates both with honest bits; serial + parallel
+decoder paths parse/reconstruct from the selected ref; DPB already shifts.
+
+| Check | Result |
+|---|---|
+| gate-off probe | byte-identical (backward compat) |
+| synthetic textpatch QP32 med | -11.4% bytes, -0.42dB (diagonal — probe pessimism) |
+| `screen_ui` 720p 10fr med QP32 | 4.65KB@41.05 → 4.13KB@41.67dB (-11.2%, +0.62dB TRUE WIN) |
+| decode | 10/10 exact bytes, both paths |
+| new `test_v2_multiref` | in-process RDO + bit-exact recon check |

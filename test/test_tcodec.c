@@ -806,6 +806,64 @@ static void test_multi_ref(void)
     PASS();
 }
 
+/* ── Test: v2 second reference (MULTI_REF tool, P-frames) ────────── */
+
+static void test_v2_multiref(void)
+{
+    TEST(v2_second_reference);
+    int w = 128, h = 128;
+    tc_config_t cfg;
+    tc_config_defaults(&cfg, w, h);
+    cfg.qp = 30;
+    cfg.preset = TC_PRESET_MEDIUM;
+    cfg.profile = TC_PROFILE_STREAMING_MAIN;
+    cfg.use_v2 = 1;
+    cfg.enable_entropy_coded = 1;
+    cfg.threads = 1;
+    cfg.keyframe_interval = 100; /* 1 keyframe, rest P-frames (dpb[1] fills) */
+
+    tc_encoder_t *enc = tc_encoder_create(&cfg);
+    tc_decoder_t *dec = tc_decoder_create(0, 0);
+    ASSERT_NE(enc, NULL, "v2 multiref encoder NULL");
+    ASSERT_NE(dec, NULL, "v2 multiref decoder NULL");
+
+    tc_pixel_t *y  = (tc_pixel_t *)calloc((size_t)(w * h), 1);
+    tc_pixel_t *cb = (tc_pixel_t *)calloc((size_t)(w/2 * h/2), 1);
+    tc_pixel_t *cr = (tc_pixel_t *)calloc((size_t)(w/2 * h/2), 1);
+    ASSERT_NE(y, NULL, "v2 multiref luma alloc failed");
+
+    /* Oscillating shift: even frames match frame f-2 (dpb[1]) better than
+     * f-1, so the RDO should select the second reference sometimes. */
+    for (int f = 0; f < 6; f++) {
+        int shift = (f % 2 == 0) ? 0 : 9;
+        for (int row = 0; row < h; row++)
+            for (int col = 0; col < w; col++)
+                y[row*w+col] = (tc_pixel_t)(((row+shift)*255/h + col*255/w) / 2);
+        memset(cb, 128, (size_t)(w/2 * h/2));
+        memset(cr, 128, (size_t)(w/2 * h/2));
+
+        tc_packet_t pkt;
+        tc_error_t err = tc_encoder_encode(enc, y, w, cb, w/2, cr, w/2, &pkt);
+        ASSERT_EQ(err, TC_OK, "v2 multiref encode failed");
+
+        const tc_pixel_t *dy, *dcb, *dcr;
+        int sy, scb, scr;
+        err = tc_decoder_decode(dec, pkt.data, pkt.size,
+                                &dy, &sy, &dcb, &scb, &dcr, &scr);
+        ASSERT_EQ(err, TC_OK, "v2 multiref decode failed");
+        /* Encoder reconstruction must equal decoder output (bit-exact). */
+        for (int r = 0; r < h; r++)
+            for (int c = 0; c < w; c++)
+                ASSERT_EQ(enc->recon->y[r*enc->recon->stride_y+c],
+                          dy[r*sy+c], "v2 multiref luma mismatch");
+    }
+    printf(" [6 frames, 2nd-ref RDO + bit-exact]");
+    tc_encoder_destroy(enc);
+    tc_decoder_destroy(dec);
+    free(y); free(cb); free(cr);
+    PASS();
+}
+
 /* ── Test: explicit v2 quadtree round-trip ───────────────── */
 
 static void test_v2_roundtrip(void)
@@ -3417,6 +3475,7 @@ int main(void)
     test_deterministic();
     test_motion_quality();
     test_multi_ref();
+    test_v2_multiref();
     test_non_ctu_aligned();
     test_v2_roundtrip();
     test_v2_fast_presets();

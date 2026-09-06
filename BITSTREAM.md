@@ -624,8 +624,12 @@ always a leaf. Nodes wholly outside a partial frame have no syntax.
 A leaf carries one intra flag. Intra leaves carry a 5-bit luma mode, a chroma
 intra flag, optional 3-bit chroma mode, luma transform syntax, and two chroma
 4×4 residual planes. Inter leaves carry skip or merge signaling; explicit
-inter leaves carry a transform-size flag and signed Exp-Golomb MVD x/y. The
-reference is `dpb[0]` for v2 P frames. The MV predictor is the median of the
+inter leaves carry a transform-size flag and signed Exp-Golomb MVD x/y.
+When the `MULTI_REF` tool flag is set (medium+ preset, streaming-main+ profile),
+explicit P-frame inter leaves additionally carry one `ref_sel` bit after the
+merge flag selecting `dpb[0]`/`dpb[1]` for luma and chroma prediction (the MVD
+stays relative to the shared median predictor); merge leaves stay ref0-only.
+Without the flag the syntax is unchanged. The MV predictor is the median of the
 available left, above, and above-right 8×8 MV-grid cells; intra cells are
 unavailable. Merge and skip use the predictor directly; explicit inter adds
 MVD to it. v2 B-frame emission is disabled by the encoder.

@@ -965,6 +965,13 @@ static void qt_dec_leaf(qt_dec_t *d, int depth, int cx, int cy)
             if (mergef) {
                 merge = 1;
             } else {
+                /* v2 second reference (MULTI_REF tool, P-frames): ref_sel
+                 * bit follows the merge flag; selects dpb[0]/dpb[1]. */
+                if (d->frame_type != TC_FRAME_BIDIR &&
+                    (d->dec->last_header.tool_flags & TC_TOOL_MULTI_REF)) {
+                    ref_sel = (int)qt_read_bits(d, RC_CTX_REF_SEL, 1);
+                    if (ref_sel > 1) d->bs->error = 1;
+                }
                 dct_size = (int)qt_read_bits(d, RC_CTX_DCT_SIZE, 1);
                 mvd_x = qt_read_se(d, RC_CTX_MVD_X);
                 mvd_y = qt_read_se(d, RC_CTX_MVD_Y);
@@ -998,7 +1005,11 @@ static void qt_dec_leaf(qt_dec_t *d, int depth, int cx, int cy)
                 memset(pred, 128, (size_t)cu*cu);
             }
         } else {
-            const tc_frame_buf_t *r = dec->dpb[0].frame;
+            /* P-frame second reference: ref_sel indexes dpb; missing dpb[1]
+             * with ref_sel set is a bitstream error (encoder never emits it
+             * when dpb[1] is invalid). */
+            const tc_frame_buf_t *r = ref_sel ? dec->dpb[1].frame : dec->dpb[0].frame;
+            if (ref_sel && !r) d->bs->error = 1;
             uint64_t motion_start = dec->profile_enabled ? dec_now_ns() : 0;
             if (r) tc_inter_predict_decoder(r->y, r->stride_y, dec->width, dec->height, mv, pred, cu, cu);
             else   memset(pred, 128, (size_t)cu * cu);
@@ -1009,8 +1020,9 @@ static void qt_dec_leaf(qt_dec_t *d, int depth, int cx, int cy)
             qt_dec_luma(d, px, py, cu, pred);
             uint64_t chroma_start = dec->profile_enabled ? dec_now_ns() : 0;
             /* Inter CUs never transmit a chroma-intra flag: chroma is
-             * always collocated MC from dpb[0] with the luma MV. */
-            const tc_frame_buf_t *r = dec->dpb[0].frame;
+             * always collocated MC from the selected reference with the
+             * luma MV. */
+            const tc_frame_buf_t *r = ref_sel ? dec->dpb[1].frame : dec->dpb[0].frame;
             if (r) {
                 tc_inter_predict_chroma_decoder(r->cb, r->stride_c, dec->width/2, dec->height/2, mv, cbuf[0], cu/2, cu/2);
                 tc_inter_predict_chroma_decoder(r->cr, r->stride_c, dec->width/2, dec->height/2, mv, cbuf[1], cu/2, cu/2);
@@ -1315,6 +1327,12 @@ static void v2_parse_leaf(v2_parse_ctx_t *p, int depth, int cx, int cy)
         if (!n->skip) {
             n->merge = (uint8_t)v2_parse_bits(p, RC_CTX_MERGE_FLAG, 1);
             if (!n->merge) {
+                if (p->frame_type != TC_FRAME_BIDIR &&
+                    (p->dec->last_header.tool_flags & TC_TOOL_MULTI_REF)) {
+                    n->ref_sel = (uint8_t)v2_parse_bits(p, RC_CTX_REF_SEL, 1);
+                    if (n->ref_sel > 1) p->bs->error = 1;
+                    if (n->ref_sel && !p->dec->dpb[1].frame) p->bs->error = 1;
+                }
                 n->dct_size = (uint8_t)v2_parse_bits(p, RC_CTX_DCT_SIZE, 1);
                 n->mvd_x = v2_parse_se(p, RC_CTX_MVD_X);
                 n->mvd_y = v2_parse_se(p, RC_CTX_MVD_Y);
@@ -1535,7 +1553,7 @@ static void v2_recon_leaf(tc_decoder_t *dec, const v2_cmd_ctu_t *cmd,
         tc_intra_predict(pred, cu, ra + 1, rl + 1, cu,
                          (tc_intra_mode_t)n->intra_mode);
     } else {
-        const tc_frame_buf_t *r = dec->dpb[0].frame;
+        const tc_frame_buf_t *r = n->ref_sel ? dec->dpb[1].frame : dec->dpb[0].frame;
         tc_mv_s mv = { n->mv_x, n->mv_y };
         if (frame_type == TC_FRAME_BIDIR) {
             const tc_frame_buf_t *r1 = n->ref_sel ? dec->dpb[1].frame : dec->dpb[0].frame;
@@ -1578,7 +1596,7 @@ static void v2_recon_leaf(tc_decoder_t *dec, const v2_cmd_ctu_t *cmd,
             }
         }
     } else {
-        const tc_frame_buf_t *r = dec->dpb[0].frame;
+        const tc_frame_buf_t *r = n->ref_sel ? dec->dpb[1].frame : dec->dpb[0].frame;
         if (r) {
             tc_inter_predict_chroma_decoder(r->cb, r->stride_c, r->width / 2, r->height / 2,
                                              (tc_mv_s){ n->mv_x, n->mv_y }, cbuf[0], cu / 2, cu / 2);
