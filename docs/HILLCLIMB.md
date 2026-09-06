@@ -57,6 +57,7 @@ checked: λ250 costs 0.012 dB/%; JND-1.5× at 0.092 dB/% rejected).
 | 17 | v2 perfect-match skip (dskip==0 → force) | probe -0.12%/-0.01; screen med +1.5%/-0.02 | REVERT — same staleness |
 | 18 | v2 chroma-honest skip finalist + bounded-damage gate | -21%/-2.45dB; margin 2x still -2dB; bounded +7%/flat | REVERT — lbch charges ~17b per flat 4×4 block (estimator crud); even exact staleness compounds via refs (disabled-fires control byte-identical). Skip needs fresh chroma + honest bits |
 | — | JND high 1.25→1.5× (dual gate) | byte-identical on probe AND screen AND QP22 | REVERT — weight never binds at tested QPs; high bands quantize to zero either way |
+| — | RDOQ trailing-zero (honest dq² vs recounted lb) | byte-identical (absurd-threshold control proves plumbing; deadzone already optimal) | REVERT |
 | — | SPEC truth pass | v2 never had CfL (legacy-only); corrected §4.3, queued v2-CfL (prediction-only, no syntax needed) | DOC |
 
 ## Where the climb stands (2026-09-06, session 8: v2-CfL)
