@@ -15,6 +15,8 @@ QPS = [27, 32, 37]
 
 def gen_yuv(path):
     w, h = W, H
+    rng = np.random.default_rng(1234)
+    noise = rng.integers(0, 256, (h, w)).astype(np.int16)
     with open(path, "wb") as f:
         for fr in range(NFR):
             y = np.zeros((h, w), dtype=np.uint8)
@@ -27,6 +29,13 @@ def gen_yuv(path):
             y[sy:sy+32, sx:sx+32] = 255
             # moving dark bar (tests skip/merge)
             y[fr*2 % h:(fr*2 % h)+4, :] //= 2
+            # static noise patch 64x48 top-left (texture/deadzone signal)
+            nz = np.clip(noise[:48, :64] + (fr % 3) - 1, 0, 255).astype(np.uint8)
+            y[:48, :64] = nz
+            # checkerboard patch 64x48 top-right (high-freq transform signal)
+            cb = np.fromfunction(lambda r, c: (((r // 4) + (c // 4) + fr // 2) % 2) * 255,
+                                 (48, 64)).astype(np.uint8)
+            y[:48, w-64:] = cb
             cb = np.full((h//2, w//2), 128, dtype=np.uint8)
             cr = np.full((h//2, w//2), 128, dtype=np.uint8)
             # chroma gradient drift

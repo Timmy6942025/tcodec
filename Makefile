@@ -148,7 +148,7 @@ $(MUX_BIN): $(TOOL_DIR)/tcmux.c | $(BUILD_DIR)
 
 # ── Test binary ──────────────────────────────────────────────────
 
-$(TEST_BIN): $(TEST_SRC) $(LIB_STATIC) | $(BUILD_DIR)
+$(TEST_BIN): $(TEST_SRC) $(LIB_STATIC) $(wildcard $(INC_DIR)/*.h) | $(BUILD_DIR)
 	$(CC) $(COMMON_CFLAGS) -o $@ $< $(LIB_STATIC) $(ARCH_LDFLAGS) $(LDFLAGS) -lm
 
 # The default regression is intentionally fast enough for constrained ARM hosts.
@@ -180,13 +180,13 @@ bench: $(ENC_BIN) $(DEC_BIN)
 
 # ── Object files ─────────────────────────────────────────────────
 
-$(BUILD_DIR)/%.o: $(SRC_DIR)/%.c | $(BUILD_DIR)
+$(BUILD_DIR)/%.o: $(SRC_DIR)/%.c $(wildcard $(INC_DIR)/*.h) | $(BUILD_DIR)
 	$(CC) $(COMMON_CFLAGS) -c -o $@ $<
 
-$(BUILD_DIR)/%.o: $(NEON_DIR)/%.c | $(BUILD_DIR)
+$(BUILD_DIR)/%.o: $(NEON_DIR)/%.c $(wildcard $(INC_DIR)/*.h) | $(BUILD_DIR)
 	$(CC) $(COMMON_CFLAGS) -c -o $@ $<
 
-$(BUILD_DIR)/%.o: $(TOOL_DIR)/%.c | $(BUILD_DIR)
+$(BUILD_DIR)/%.o: $(TOOL_DIR)/%.c $(wildcard $(INC_DIR)/*.h) | $(BUILD_DIR)
 	$(CC) $(COMMON_CFLAGS) -c -o $@ $<
 
 # ── Install ──────────────────────────────────────────────────────

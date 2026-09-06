@@ -631,7 +631,9 @@ unavailable. Merge and skip use the predictor directly; explicit inter adds
 MVD to it. v2 B-frame emission is disabled by the encoder.
 
 Luma residuals use either 8×8 or four 4×4 residual transforms, with the shared
-JND-weighted quantizer (`tc_quant_coeff`/`tc_dequant_coeff`). Chroma uses
+JND-weighted quantizer (`tc_quant_coeff`/`tc_dequant_coeff`). Each 8×8 TU
+carries one `DCT_SIZE` flag; a 4×4 TU carries one outer `DCT_SIZE` flag plus
+one sub-flag per 4×4 sub-block (five flags per TU total). Chroma uses
 4:2:0 collocated motion compensation or neighbour-DC intra prediction and
 4×4 residual transforms. Coefficients use the selected entropy path: the
 range coder when `TC_TOOL_ENTROPY_CODED` is set, otherwise the legacy
