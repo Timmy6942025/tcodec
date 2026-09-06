@@ -266,6 +266,21 @@ static int count_coeff_bits(const tc_coeff_t *c, int n)
     return bits;
 }
 
+/* Last-significant-position cost for the bit model, mirroring the range
+ * coder (presence bit + truncated-unary prefix + EG suffix on last_nz).
+ * The old model priced zero for it, biasing RDO toward spread-out nonzeros.
+ * Linear 2..10 trialed first: probe win, screen loss — shape matters, so
+ * mirror the coder. */
+static int lastpos_cost(int last, int n)
+{
+    (void)n;
+    if (last < 0) return 1; /* all-zero: presence bit only */
+    if (last < 4) return 1 + (last + 1) + 1;
+    unsigned v = (unsigned)(last - 4) + 1;
+    int bl = 32 - __builtin_clz(v);
+    return 1 + 5 + (2 * bl - 1);
+}
+
 static tc_mv_s qt_mvp(qt_enc_t *e, int cx, int cy, const qt_mvcell_t *grid)
 {
     tc_mv_s a={0,0}, b={0,0}, c={0,0};
@@ -312,7 +327,7 @@ static int64_t qt_code_chroma(qt_enc_t *e, int px, int py, int cu,
                   * v2 syntax element (range coder when rc!=NULL, EG
                   * otherwise) so encoder and decoder can never drift. */
                  if (write) enc_write_coeffs(e->bs,e->tans,e->rc,e->rc_ctx, c4, 16, TC_BLOCK_4x4_ID);
-                 else bits += 1 + 2*nz + count_coeff_bits(c4,16);
+                 else { int last=-1; for (int i=15;i>=0;i--) if (c4[i]) {last=i;break;} bits += 1 + 2*nz + count_coeff_bits(c4,16) + lastpos_cost(last,16); }
                  tc_coeff_t iq[16];
                  for (int i=0;i<16;i++){ int band=tc_freq_band(i,4); iq[i]=(tc_coeff_t)tc_dequant_coeff(c4[i],eff4_band[band]); }
                 tc_coeff_t recs[16];
@@ -352,7 +367,7 @@ static int64_t qt_code_luma(qt_enc_t *e, int px, int py, int cu,
             int nz=0;
             for (int i=0;i<64;i++){ int band=tc_freq_band(i,8); tu[i]=(tc_coeff_t)tc_quant_coeff(tu[i],eff8_band[band]); coeffs[(ty*ntu+tx)*64+i]=tu[i]; if(tu[i]) nz++; }
             if (write) { enc_write_bits(e->bs,e->rc,e->rc_ctx,RC_CTX_DCT_SIZE,TC_BLOCK_8x8_ID,1); enc_write_coeffs(e->bs,e->tans,e->rc,e->rc_ctx,coeffs+(ty*ntu+tx)*64,64,TC_BLOCK_8x8_ID); }
-            else bits += 1 + 2*nz + count_coeff_bits(coeffs+(ty*ntu+tx)*64,64);
+            else { int last=-1; const tc_coeff_t *cc8=coeffs+(ty*ntu+tx)*64; for (int i=63;i>=0;i--) if (cc8[i]) {last=i;break;} bits += 1 + 2*nz + count_coeff_bits(cc8,64) + lastpos_cost(last,64); }
             tc_coeff_t iq[64];
             for (int i=0;i<64;i++){ int band=tc_freq_band(i,8); iq[i]=(tc_coeff_t)tc_dequant_coeff(coeffs[(ty*ntu+tx)*64+i],eff8_band[band]); }
             tc_idct8x8_res(iq,res8,8);
@@ -375,7 +390,7 @@ static int64_t qt_code_luma(qt_enc_t *e, int px, int py, int cu,
                 int nz=0;
                 for (int i=0;i<16;i++){ int band=tc_freq_band(i,4); c4[i]=(tc_coeff_t)tc_quant_coeff(c4[i],eff4_band[band]); coeffs[base+q*16+i]=c4[i]; if(c4[i]) nz++; }
                 if (write) { enc_write_bits(e->bs,e->rc,e->rc_ctx,RC_CTX_DCT_SIZE,TC_BLOCK_4x4_ID,1); enc_write_coeffs(e->bs,e->tans,e->rc,e->rc_ctx,coeffs+base+q*16,16,TC_BLOCK_4x4_ID); }
-                else bits += 1 + 2*nz + count_coeff_bits(coeffs+base+q*16,16);
+                else { int last=-1; const tc_coeff_t *cc4=coeffs+base+q*16; for (int i=15;i>=0;i--) if (cc4[i]) {last=i;break;} bits += 1 + 2*nz + count_coeff_bits(cc4,16) + lastpos_cost(last,16); }
                 tc_coeff_t iq4[16];
                 for (int i=0;i<16;i++){ int band=tc_freq_band(i,4); iq4[i]=(tc_coeff_t)tc_dequant_coeff(c4[i],eff4_band[band]); }
                 tc_coeff_t rec4[16];
