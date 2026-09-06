@@ -509,7 +509,10 @@ static int64_t qt_leaf(qt_enc_t *e, int depth, int cx, int cy, int write)
 
     tc_pixel_t ra[2*64+1], rl[2*64+1];
     tc_intra_get_ref_v2(enc->recon->y, enc->recon->stride_y, px,py,cu, enc->cfg.width, enc->cfg.height, ra+1, rl+1);
-    int best_cost = 0x7FFFFFFF;
+    int64_t best_cost = (int64_t)1 << 60;
+    /* NOTE: v2 RDO uses raw SSE + tc_lambda*bits (int64). The old
+     * (dl + (lambda<<16)*bits)>>16 form crushed SSE by 65536x and made
+     * every decision bits-only. Fixed by hill-climb audit. */
     uint8_t b_intra=0,b_bi=0,b_refsel=0,b_dct=TC_BLOCK_8x8_ID,b_skip=0,b_merge=0,b_ch=0;
     int b_imode=1,b_cmode=0,b_mvdx=0,b_mvdy=0;
 
@@ -538,13 +541,13 @@ static int64_t qt_leaf(qt_enc_t *e, int depth, int cx, int cy, int write)
             dl = qt_code_luma(e,px,py,cu,TC_BLOCK_8x8_ID,pred,&lb,0);
         }
         int bits_inter = 1 + 1 + 1 + 1 + 2 + (tc_bs_se_bits(disp.x)+tc_bs_se_bits(disp.y)) + lb;
-        int cost = (int)(((dl + e->lambda*bits_inter)>>16)&0x7FFFFFFF);
+        int64_t cost = dl + e->lambda*bits_inter;
         if (cost < best_cost) { best_cost=cost; b_intra=0;b_skip=0;b_merge=0;b_dct=TC_BLOCK_8x8_ID; b_mvdx=disp.x;b_mvdy=disp.y;b_refsel=0;b_bi=0;b_ch=0; b_cmode=0;b_imode=1; }
         if (enc->cfg.preset >= TC_PRESET_MEDIUM) {
             tc_mv_s mm={mvp.x+px*4,mvp.y+py*4}; tc_inter_predict(enc->dpb[0].frame->y,enc->dpb[0].frame->stride_y, enc->cfg.width,enc->cfg.height,mm,pred,cu,cu);
             int64_t dl2 = qt_code_luma(e,px,py,cu,TC_BLOCK_8x8_ID,pred,&lb,0);
             int bits_merge = 1+1+1+1+1+1+lb;
-            int cost2=(int)(((dl2+e->lambda*bits_merge)>>16)&0x7FFFFFFF);
+            int64_t cost2 = dl2 + e->lambda*bits_merge;
             if (cost2<best_cost) { best_cost=cost2;b_intra=0;b_merge=1;b_skip=0;b_mvdx=disp.x;b_mvdy=disp.y; b_dct=TC_BLOCK_8x8_ID;b_ch=0;b_cmode=0;b_imode=1;b_refsel=0;b_bi=0; }
         }
     }
@@ -574,7 +577,7 @@ static int64_t qt_leaf(qt_enc_t *e, int depth, int cx, int cy, int write)
                 dl = qt_code_luma(e,px,py,cu,TC_BLOCK_8x8_ID,pred,&lb,0);
             }
             int bits = 1 + 5 + 1 + 1 + lb;
-            int cost=(int)(((dl+e->lambda*bits)>>16)&0x7FFFFFFF);
+            int64_t cost = dl + e->lambda*bits;
             if (cost<best_cost){ best_cost=cost;b_intra=1;best_imode=m;b_dct=TC_BLOCK_8x8_ID; b_skip=0;b_merge=0;b_mvdx=0;b_mvdy=0;b_ch=0;b_cmode=0;b_refsel=0;b_bi=0; }
         }
         if (b_intra)
@@ -737,7 +740,7 @@ static void encode_ctu_v2(tc_encoder_t *enc, int row, int col, int qp,
 {
     qt_enc_t e; memset(&e,0,sizeof(e));
     e.enc=enc; e.ctu_x=col*TC_CTU_SIZE; e.ctu_y=row*TC_CTU_SIZE;
-    e.qp=qp; e.qp_c=tc_clip(qp+1,0,63); e.lambda=(int64_t)tc_lambda(qp)<<16;
+    e.qp=qp; e.qp_c=tc_clip(qp+1,0,63); e.lambda=(int64_t)tc_lambda(qp);
     e.frame_type=frame_type; e.poc=poc; e.bs=bs; e.tans=tans; e.rc=rc; e.rc_ctx=rc_ctx;
     e.node=enc->v2_node; e.grid=enc->v2_grid;
     memset(e.node, 0, (size_t)TC_QT_NODES * sizeof(qt_node_t));
@@ -801,7 +804,7 @@ static void encode_ctu_v2(tc_encoder_t *enc, int row, int col, int qp,
                 no_sao_cost += (int64_t)d0 * d0;
                 sao_cost += (int64_t)d1 * d1;
             }
-            if (sao_cost + ((int64_t)tc_lambda(qp) * 10 >> 16) >= no_sao_cost)
+            if (sao_cost + (int64_t)tc_lambda(qp) * 10 >= no_sao_cost)
                 has_sao = 0;
         }
         enc_write_bits(bs, rc, rc_ctx, RC_CTX_SAO_TYPE, (uint32_t)has_sao, 1);
