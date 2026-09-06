@@ -622,8 +622,11 @@ raster order `(top-left, top-right, bottom-left, bottom-right)`; depth 3 is
 always a leaf. Nodes wholly outside a partial frame have no syntax.
 
 A leaf carries one intra flag. Intra leaves carry a 5-bit luma mode, a chroma
-intra flag, optional 3-bit chroma mode, luma transform syntax, and two chroma
-4×4 residual planes. Inter leaves carry skip or merge signaling; explicit
+intra flag (`ch_intra`: 0 = collocated MC prediction, 1 = CfL-blended
+neighbour-DC — DC plus `(luma2x2 − tile_avg) >> 3` from the leaf's fresh
+recon luma, averaged per 4×4 chroma tile; the encoder picks the cheaper by
+chroma residual RDO on medium+ presets), optional 3-bit chroma mode, luma
+transform syntax, and two chroma 4×4 residual planes. Inter leaves carry skip or merge signaling; explicit
 inter leaves carry a transform-size flag and signed Exp-Golomb MVD x/y.
 When the `MULTI_REF` tool flag is set (medium+ preset, streaming-main+ profile),
 explicit P-frame inter leaves additionally carry one `ref_sel` bit after the

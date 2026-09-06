@@ -138,9 +138,12 @@ correlation with a DC prediction derived from neighboring chroma samples:
 c_pred = c_dc + ((luma_val - luma_avg) >> 3)   // alpha ≈ 0.125
 ```
 This provides modest chroma quality improvement over fixed DC(128).
-**v2 quadtree path**: intra chroma currently uses neighbour-DC or collocated
-MC (`ch_intra` flag), not CfL — porting CfL to v2 is queued work (no syntax
-change needed, prediction-side only; see `docs/HILLCLIMB.md`).
+**v2 quadtree path**: intra chroma uses an RDO choice per leaf between
+collocated MC (`ch_intra` = 0) and CfL-blended DC (`ch_intra` = 1: neighbour
+DC plus `(luma2x2 − tile_avg) >> 3` from fresh recon luma, per-4×4-tile
+average). Selected with full chroma residual RDO on medium+ presets; fast
+presets stay MC. Ported 2026-09-06 (no syntax change — the flag already
+existed but was always 0; old v2 streams therefore never carry CfL).
 
 **Inter/skip/merge blocks**: Fixed DC value of 128.
 

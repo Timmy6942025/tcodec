@@ -59,14 +59,26 @@ checked: λ250 costs 0.012 dB/%; JND-1.5× at 0.092 dB/% rejected).
 | — | JND high 1.25→1.5× (dual gate) | byte-identical on probe AND screen AND QP22 | REVERT — weight never binds at tested QPs; high bands quantize to zero either way |
 | — | SPEC truth pass | v2 never had CfL (legacy-only); corrected §4.3, queued v2-CfL (prediction-only, no syntax needed) | DOC |
 
-## Where the climb stands
+## Where the climb stands (2026-09-06, session 8: v2-CfL)
 
-Quick-knob phase has converged: every surviving change is real-validated
-(RDO scale, λ200, inter-4×4+outer flag, multiref ref_sel, header deps,
-hardened probe+text patch, gates). All sub-1% tunings exhausted or gated.
-Remaining program is structural (needs design, not trials): v2-CfL,
-WHT transform-type flag, chroma-aware RDO (unblocks skip), B-frame emission,
+Quick-knob phase converged; structural phase opened with two real wins
+(multiref ref_sel, v2-CfL). Remaining structural backlog: WHT
+transform-type flag, chroma-aware RDO (unblocks skip), B-frame emission,
 decode parallelism, 10-clip corpus validation. See TODO.md/MASTER_PLAN.md.
+
+## Session 8 (v2 CfL — first chroma win)
+
+`b_ch` was never set: `ch_intra`=1 path dead encoder-side (v2 intra chroma
+always collocated MC). Activated with per-leaf chroma RDO (MC vs CfL-blended
+DC, header Honest: CfL pays flag+3 cmode bits) on medium+ full-RDO path;
+shared `tc_cfl_blend` helper (predict.c) mirrored in encoder replay, serial
+and parallel decoders. Probe color patch finally gives chroma signal.
+
+| Check | Result |
+|---|---|
+| probe | 44714@24.74 → 43646@24.74 (-2.4% bytes, Y flat, Cb/Cr +0.3–0.5dB TRUE WIN) |
+| screen_ui med | 4.13KB@41.67 identical (correct RDO gating — no correlation, no fire) |
+| new `test_v2_cfl` | correlated color, bit-exact recon, Cb PSNR gate |
 | — | ME diamond 4→8 iters | -0.29%, +0.03dB | REVERT |
 
 Cumulative hardened: 29326B@25.49 → 23882B@25.08 (-18.5%, -0.41dB).

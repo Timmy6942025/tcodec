@@ -464,6 +464,9 @@ static int64_t qt_leaf(qt_enc_t *e, int depth, int cx, int cy, int write)
             if (nd->ch_intra) {
                 tc_intra_chroma_dc(enc->recon->cb,enc->recon->stride_c,px/2,py/2,cu/2,cbuf[0],cu/2);
                 tc_intra_chroma_dc(enc->recon->cr,enc->recon->stride_c,px/2,py/2,cu/2,cbuf[1],cu/2);
+                /* v2 CfL: blend DC with collocated fresh recon luma. */
+                tc_cfl_blend(cbuf[0],cu/2,enc->recon->y,enc->recon->stride_y,px,py,cu/2,cu/2);
+                tc_cfl_blend(cbuf[1],cu/2,enc->recon->y,enc->recon->stride_y,px,py,cu/2,cu/2);
             } else {
                 tc_mv_s mv = qt_mvp(e,cx,cy,e->grid); mv.x+=px*4; mv.y+=py*4;
                 if (enc->dpb[0].frame) {
@@ -644,6 +647,39 @@ static int64_t qt_leaf(qt_enc_t *e, int depth, int cx, int cy, int write)
         }
         if (b_intra)
             b_imode = best_imode;
+        /* Intra chroma choice (full-RDO path only): MC vs CfL-blended DC.
+         * ch_intra was previously always 0 (dead CfL). Code both chroma
+         * options against fresh winner-luma recon and keep the cheaper;
+         * luma costs/splits are untouched, so this is strictly improving.
+         * Fast presets keep MC (zero extra decision cost). */
+        if (b_intra && !fast_intra && enc->cfg.preset >= TC_PRESET_MEDIUM) {
+            tc_intra_predict(pred,cu,ra+1,rl+1,cu,(tc_intra_mode_t)b_imode);
+            int ldc = 0;
+            qt_code_luma(e,px,py,cu,TC_BLOCK_8x8_ID,pred,&ldc,0);
+            tc_pixel_t m0[32*32], m1[32*32], f0[32*32], f1[32*32];
+            int cs = cu/2;
+            tc_mv_s cmv = qt_mvp(e,cx,cy,e->grid); cmv.x+=px*4; cmv.y+=py*4;
+            if (enc->dpb[0].frame) {
+                tc_inter_predict_chroma(enc->dpb[0].frame->cb,enc->dpb[0].frame->stride_c, enc->cfg.width/2,enc->cfg.height/2,cmv,m0,cs,cs);
+                tc_inter_predict_chroma(enc->dpb[0].frame->cr,enc->dpb[0].frame->stride_c, enc->cfg.width/2,enc->cfg.height/2,cmv,m1,cs,cs);
+            } else {
+                tc_intra_chroma_dc(enc->recon->cb,enc->recon->stride_c,px/2,py/2,cs,m0,cs);
+                tc_intra_chroma_dc(enc->recon->cr,enc->recon->stride_c,px/2,py/2,cs,m1,cs);
+            }
+            const tc_pixel_t *mcp[2] = { m0, m1 };
+            int lbmc = 0;
+            int64_t dmc = qt_code_chroma(e,px,py,cu,0,mcp,&lbmc,0);
+            tc_intra_chroma_dc(enc->recon->cb,enc->recon->stride_c,px/2,py/2,cs,f0,cs);
+            tc_intra_chroma_dc(enc->recon->cr,enc->recon->stride_c,px/2,py/2,cs,f1,cs);
+            tc_cfl_blend(f0,cs,enc->recon->y,enc->recon->stride_y,px,py,cs,cs);
+            tc_cfl_blend(f1,cs,enc->recon->y,enc->recon->stride_y,px,py,cs,cs);
+            const tc_pixel_t *fcp[2] = { f0, f1 };
+            int lbcfl = 0;
+            int64_t dcfl = qt_code_chroma(e,px,py,cu,0,fcp,&lbcfl,0);
+            /* ch_intra header: 1 bit flag + 3 cmode bits when set (MC: flag
+             * only). Compare full costs including headers. */
+            if (dcfl + e->lambda*(lbcfl+4) < dmc + e->lambda*(lbmc+1)) b_ch = 1;
+        }
     }
 
     /* NOTE: v2 skip trialed 4x (full RDO x1.0/x1.5, perfect-match,

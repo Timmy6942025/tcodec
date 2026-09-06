@@ -378,6 +378,46 @@ void tc_intra_chroma_dc(const tc_pixel_t *recon_c, int stride,
             dst[r * dst_stride + c] = (tc_pixel_t)dc;
 }
 
+/* ── Chroma-from-luma blend (bitstream v2) ───────────────────────
+ *
+ * Blends an existing DC chroma prediction (in dst) with collocated
+ * reconstructed luma: c += (luma2x2 - tile_avg) >> 3 (alpha ≈ 0.125,
+ * matching the legacy CfL model). Tile average is per 4x4 chroma tile
+ * over 2x2-subsampled luma. Identical on encoder and decoder (both run
+ * on the same reconstruction).
+ * ══════════════════════════════════════════════════════════════ */
+
+void tc_cfl_blend(tc_pixel_t *TCODEC_RESTRICT dst, int dst_stride,
+                  const tc_pixel_t *recon_y, int y_stride,
+                  int lx, int ly, int cw, int ch)
+{
+    for (int ty = 0; ty < ch; ty += 4) {
+        for (int tx = 0; tx < cw; tx += 4) {
+            int tye = ty + 4 < ch ? ty + 4 : ch;
+            int txe = tx + 4 < cw ? tx + 4 : cw;
+            int sum = 0, n = 0;
+            for (int y = ty; y < tye; y++)
+                for (int x = tx; x < txe; x++) {
+                    int la = (recon_y[(ly + 2*y) * y_stride + lx + 2*x] +
+                              recon_y[(ly + 2*y) * y_stride + lx + 2*x + 1] +
+                              recon_y[(ly + 2*y + 1) * y_stride + lx + 2*x] +
+                              recon_y[(ly + 2*y + 1) * y_stride + lx + 2*x + 1] + 2) >> 2;
+                    sum += la; n++;
+                }
+            int avg = n ? (sum + n / 2) / n : 128;
+            for (int y = ty; y < tye; y++)
+                for (int x = tx; x < txe; x++) {
+                    int la = (recon_y[(ly + 2*y) * y_stride + lx + 2*x] +
+                              recon_y[(ly + 2*y) * y_stride + lx + 2*x + 1] +
+                              recon_y[(ly + 2*y + 1) * y_stride + lx + 2*x] +
+                              recon_y[(ly + 2*y + 1) * y_stride + lx + 2*x + 1] + 2) >> 2;
+                    int v = (int)dst[y * dst_stride + x] + ((la - avg) >> 3);
+                    dst[y * dst_stride + x] = (tc_pixel_t)tc_clip(v, 0, 255);
+                }
+        }
+    }
+}
+
 /* ── Reference sample collection, bitstream v2 ──────────────────
  *
  * Same layout as tc_intra_get_ref() (index -1 = above-left corner,

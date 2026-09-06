@@ -933,6 +933,9 @@ static void qt_dec_leaf(qt_dec_t *d, int depth, int cx, int cy)
         if (ch_intra) {
             tc_intra_chroma_dc(dec->cur->cb, dec->cur->stride_c, px/2, py/2, cu/2, cbuf[0], cu/2);
             tc_intra_chroma_dc(dec->cur->cr, dec->cur->stride_c, px/2, py/2, cu/2, cbuf[1], cu/2);
+            /* v2 CfL (mirrors encoder replay). */
+            tc_cfl_blend(cbuf[0],cu/2,dec->cur->y,dec->cur->stride_y,px,py,cu/2,cu/2);
+            tc_cfl_blend(cbuf[1],cu/2,dec->cur->y,dec->cur->stride_y,px,py,cu/2,cu/2);
         } else {
             /* Intra luma CUs carry collocated chroma motion compensation
              * from dpb[0] using the MVP-derived MV (v2 design); falls
@@ -1584,6 +1587,9 @@ static void v2_recon_leaf(tc_decoder_t *dec, const v2_cmd_ctu_t *cmd,
         if (n->ch_intra) {
             tc_intra_chroma_dc(dec->cur->cb, dec->cur->stride_c, px / 2, py / 2, cu / 2, cbuf[0], cu / 2);
             tc_intra_chroma_dc(dec->cur->cr, dec->cur->stride_c, px / 2, py / 2, cu / 2, cbuf[1], cu / 2);
+            /* v2 CfL (mirrors encoder replay; luma recon is fresh above). */
+            tc_cfl_blend(cbuf[0],cu/2,dec->cur->y,dec->cur->stride_y,px,py,cu/2,cu/2);
+            tc_cfl_blend(cbuf[1],cu/2,dec->cur->y,dec->cur->stride_y,px,py,cu/2,cu/2);
         } else {
             const tc_frame_buf_t *r = dec->dpb[0].frame;
             tc_mv_s mv = { n->mv_x, n->mv_y };

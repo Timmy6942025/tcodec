@@ -864,6 +864,83 @@ static void test_v2_multiref(void)
     PASS();
 }
 
+/* ── Test: v2 CfL chroma (correlated color forces ch_intra=1) ─── */
+
+static void test_v2_cfl(void)
+{
+    TEST(v2_cfl_chroma);
+    int w = 128, h = 128;
+    tc_config_t cfg;
+    tc_config_defaults(&cfg, w, h);
+    cfg.qp = 30;
+    cfg.preset = TC_PRESET_MEDIUM;
+    cfg.profile = TC_PROFILE_STREAMING_MAIN;
+    cfg.use_v2 = 1;
+    cfg.enable_entropy_coded = 1;
+    cfg.threads = 1;
+    cfg.keyframe_interval = 100; /* keyframe-only-ish: intra chroma path */
+
+    tc_encoder_t *enc = tc_encoder_create(&cfg);
+    tc_decoder_t *dec = tc_decoder_create(0, 0);
+    ASSERT_NE(enc, NULL, "v2 cfl encoder NULL");
+    ASSERT_NE(dec, NULL, "v2 cfl decoder NULL");
+
+    tc_pixel_t *y  = (tc_pixel_t *)calloc((size_t)(w * h), 1);
+    tc_pixel_t *cb = (tc_pixel_t *)calloc((size_t)(w/2 * h/2), 1);
+    tc_pixel_t *cr = (tc_pixel_t *)calloc((size_t)(w/2 * h/2), 1);
+    ASSERT_NE(y, NULL, "v2 cfl luma alloc failed");
+
+    double tot_cb = 0;
+    for (int f = 0; f < 4; f++) {
+        /* Luma-correlated chroma: Cb tracks luma, so CfL-blended DC beats
+         * plain DC/MC and the RDO must select ch_intra=1 somewhere. */
+        for (int row = 0; row < h; row++)
+            for (int col = 0; col < w; col++) {
+                int v = ((row * 5 + col * 3 + f * 2) & 255);
+                y[row*w+col] = (tc_pixel_t)v;
+            }
+        for (int row = 0; row < h/2; row++)
+            for (int col = 0; col < w/2; col++) {
+                int lv = y[(row*2)*w + col*2];
+                cb[row*(w/2)+col] = (tc_pixel_t)tc_clip(128 + (lv - 128) / 2, 0, 255);
+                cr[row*(w/2)+col] = (tc_pixel_t)tc_clip(128 - (lv - 128) / 3, 0, 255);
+            }
+
+        tc_packet_t pkt;
+        tc_error_t err = tc_encoder_encode(enc, y, w, cb, w/2, cr, w/2, &pkt);
+        ASSERT_EQ(err, TC_OK, "v2 cfl encode failed");
+
+        const tc_pixel_t *dy, *dcb, *dcr;
+        int sy, scb, scr;
+        err = tc_decoder_decode(dec, pkt.data, pkt.size,
+                                &dy, &sy, &dcb, &scb, &dcr, &scr);
+        ASSERT_EQ(err, TC_OK, "v2 cfl decode failed");
+        for (int r = 0; r < h; r++)
+            for (int c = 0; c < w; c++)
+                ASSERT_EQ(enc->recon->y[r*enc->recon->stride_y+c],
+                          dy[r*sy+c], "v2 cfl luma mismatch");
+        for (int r = 0; r < h/2; r++)
+            for (int c = 0; c < w/2; c++)
+                ASSERT_EQ(enc->recon->cb[r*enc->recon->stride_c+c],
+                          dcb[r*scb+c], "v2 cfl Cb mismatch");
+        /* Chroma must be reasonable on correlated content. */
+        double mse = 0;
+        for (int i = 0; i < (w/2)*(h/2); i++) {
+            double d = (double)cb[i] - dcb[(i/(w/2))*scb + (i%(w/2))];
+            mse += d*d;
+        }
+        mse /= (double)((w/2)*(h/2));
+        double psnr = mse > 0 ? 10*log10(255*255/mse) : 100.0;
+        tot_cb += psnr;
+    }
+    printf(" [avgCbPSNR=%.1fdB]", tot_cb / 4);
+    ASSERT_RANGE(tot_cb / 4, 25.0, 100.0, "v2 cfl Cb PSNR out of range");
+    tc_encoder_destroy(enc);
+    tc_decoder_destroy(dec);
+    free(y); free(cb); free(cr);
+    PASS();
+}
+
 /* ── Test: explicit v2 quadtree round-trip ───────────────── */
 
 static void test_v2_roundtrip(void)
@@ -3476,6 +3553,7 @@ int main(void)
     test_motion_quality();
     test_multi_ref();
     test_v2_multiref();
+    test_v2_cfl();
     test_non_ctu_aligned();
     test_v2_roundtrip();
     test_v2_fast_presets();
