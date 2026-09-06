@@ -612,11 +612,6 @@ static int64_t qt_leaf(qt_enc_t *e, int depth, int cx, int cy, int write)
             int64_t cost2 = dl2 + e->lambda*bits_merge;
             if (cost2<best_cost) { best_cost=cost2;b_intra=0;b_merge=1;b_skip=0;b_mvdx=disp.x;b_mvdy=disp.y; b_dct=TC_BLOCK_8x8_ID;b_ch=0;b_cmode=0;b_imode=1;b_refsel=0;b_bi=0; }
         }
-        /* NOTE: v2 skip was trialed 3x (full RDO x1.0/x1.5, perfect-match):
-         * all lose (-47%/-6.6dB, -40%/-4dB, +1.5%/-0.02dB). Root cause: skip
-         * leaves chroma stale (no chroma residual), polluting later CUs'
-         * CfL/DC chroma references, and v2 RDO is luma-only so the damage is
-         * unpriced at decision time. Skip needs chroma-aware costing. */
     }
 
     /* Keyframes have no reference frame; always provide an intra
@@ -650,6 +645,13 @@ static int64_t qt_leaf(qt_enc_t *e, int depth, int cx, int cy, int write)
         if (b_intra)
             b_imode = best_imode;
     }
+
+    /* NOTE: v2 skip trialed 4x (full RDO x1.0/x1.5, perfect-match,
+     * bounded-damage + chroma-honest finalist): all lose (-47%/-6.6dB,
+     * -40%/-4dB, +1.5%/-0.02dB, +7%/flat). Disabled-fires control is
+     * byte-identical, so losses are decision effects: even near-exact
+     * staleness compounds through references. Skip needs chroma-aware
+     * costing AND fresh (not stale) skip chroma. Parked. */
 
     nd->intra=b_intra; nd->skip=b_skip; nd->merge=b_merge; nd->bi=b_bi;
     nd->intra_mode=(uint8_t)b_imode; nd->intra_cmode=(uint8_t)b_cmode;

@@ -54,7 +54,8 @@ checked: λ250 costs 0.012 dB/%; JND-1.5× at 0.092 dB/% rejected).
 | 14 | `lb` estimator ×1.5 (was undershooting range coder) | 23882B @ 25.08dB (-2.1%, +0.06dB — true win) | KEEP |
 | 15 | estimator ×2 / ×1.75 | +0.6%/-0.04, -0.27%/-0.08 | REVERT (knee at ×1.5) |
 | 16 | v2 skip re-trial (calibrated costs) | -40% bytes, -4dB | REVERT — estimator theory disproven; suspect MVP divergence, needs tracing |
-| 17 | v2 perfect-match skip (dskip==0 → force) | probe -0.12%/-0.01; screen med +1.5%/-0.02 | REVERT — skip leaves chroma stale, polluting later CfL/DC refs; v2 RDO is luma-only so unpriced. Skip needs chroma-aware costing |
+| 17 | v2 perfect-match skip (dskip==0 → force) | probe -0.12%/-0.01; screen med +1.5%/-0.02 | REVERT — same staleness |
+| 18 | v2 chroma-honest skip finalist + bounded-damage gate | -21%/-2.45dB; margin 2x still -2dB; bounded +7%/flat | REVERT — lbch charges ~17b per flat 4×4 block (estimator crud); even exact staleness compounds via refs (disabled-fires control byte-identical). Skip needs fresh chroma + honest bits |
 | — | JND high 1.25→1.5× (dual gate) | byte-identical on probe AND screen AND QP22 | REVERT — weight never binds at tested QPs; high bands quantize to zero either way |
 | — | SPEC truth pass | v2 never had CfL (legacy-only); corrected §4.3, queued v2-CfL (prediction-only, no syntax needed) | DOC |
 
