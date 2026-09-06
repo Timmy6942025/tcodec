@@ -58,6 +58,36 @@ Sintel Action, 1280×720, 2 frames, one thread, v2 p0, QPs 27/32/37.
 The quality ranges do not overlap, so BD-rate is **N/A** and no competitive
 win is claimed.
 
+## Hill-climb era checkpoint (2026-09-06, post sessions 1-10)
+
+Screen content (`screen_ui` 720p, 10 frames, one thread, v2 medium p2 with
+entropy + streaming-main profile for tcodecv2). Reproduced via
+`tools/rd_bench.py --clips screen_ui --codecs tcodecv2,x264vf
+--qps 27,32,37 --frames 10 --tc-preset 2 --tc-extra "--entropy --profile 1"`.
+
+| Codec | QP | Bytes (10fr) | PSNR-Y | SSIM | Enc fps | Dec fps |
+|---|---:|---:|---:|---:|---:|---:|
+| tcodecv2 | 27 | 6,510 | 45.16 | 0.9944 | 0.37 | 20.9 |
+| tcodecv2 | 32 | 3,515 | 42.28 | 0.9918 | 0.39 | 20.4 |
+| tcodecv2 | 37 | 2,111 | 38.00 | 0.9871 | 0.40 | 22.9 |
+| x264vf | 27 | 2,815 | 55.83 | 0.9993 | 10.8 | 9.8 |
+| x264vf | 32 | 2,572 | 50.49 | 0.9982 | 11.2 | 15.5 |
+| x264vf | 37 | 2,359 | 47.21 | 0.9967 | 10.3 | 16.2 |
+
+Current-code note: the tcodecv2 row already includes sessions 1–10
+(RDO fix, λ200, inter-4×4, multiref, CfL, intra pruning, SAO×6) —
+vs the first scoreboard run it improved −8/−18/−11% bytes at
++0.16/+0.61/+0.29dB across QP27/32/37.
+
+Reading: at matched rate (~2.4–2.8KB) tcodecv2 trails x264vf by ~9dB;
+at matched quality the bitrate ratio is several-to-one against tcodecv2.
+The gap narrowed vs the pre-climb era (fixed RDO alone took screen_ui
+ultrafast from 102KB@38dB to 17KB@41dB) but remains large: x264's
+near-flat curve on static content is skip-shaped, and v2 skip is parked
+(see `docs/HILLCLIMB.md`). No BD-rate win claimed; D8 still open. Decode
+here favors tcodecv2 (26–28 vs 18–19 fps) but both are CLI-timed on small
+files and neither meets the 60/30-fps Tier-1 claim on nature content.
+
  ## D8: Multi-codec real-content benchmark (August 2026)
 
  Host: aarch64 Cortex-A72, 4 cores, NEON build, 10 frames of bbb_nature 1280×720,
