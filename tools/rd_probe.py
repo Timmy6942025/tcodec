@@ -51,10 +51,22 @@ def gen_yuv(path):
                     x0c, x1c = max(x0, tx), min(x1, tx + tw)
                     if x1c > x0c:
                         y[yy:yy+3, x0c:x1c] = 20  # ink
+            # chroma-correlated patch bottom-right (CfL signal: DC fails,
+            # luma-correlation wins; validates future v2-CfL work)
+            px, py, pw, ph = w-112, h-64, 96, 48
+            yp = np.fromfunction(lambda r, c: ((r * 5 + c * 3 + fr * 2) % 256),
+                                 (ph, pw)).astype(np.int16)
+            y[py:py+ph, px:px+pw] = np.clip(yp, 0, 255).astype(np.uint8)
             cb = np.full((h//2, w//2), 128, dtype=np.uint8)
             cr = np.full((h//2, w//2), 128, dtype=np.uint8)
             # chroma gradient drift
             cb += np.uint8(fr * 2)
+            # correlate chroma with the luma patch (subsampled): DC fails here
+            ysmall = np.clip(yp, 0, 255).astype(np.int16)[::2, ::2]
+            cbp = np.clip(128 + (ysmall - 128) // 2, 0, 255).astype(np.uint8)
+            crp = np.clip(128 - (ysmall - 128) // 3, 0, 255).astype(np.uint8)
+            cb[py//2:py//2+ph//2, px//2:px//2+pw//2] = cbp
+            cr[py//2:py//2+ph//2, px//2:px//2+pw//2] = crp
             f.write(y.tobytes()); f.write(cb.tobytes()); f.write(cr.tobytes())
 
 def psnr(a, b):
@@ -74,11 +86,14 @@ def run_one(src, qp, tag):
     if r.returncode != 0:
         raise RuntimeError("tcdec failed: " + r.stdout + r.stderr)
     nb = os.path.getsize(bit)
-    # read luma planes
-    fl = W*H
-    src_y = np.fromfile(src, dtype=np.uint8)[:NFR*fl*3//2].reshape(NFR, fl*3//2)[:, :fl]
-    dec_y = np.fromfile(dec, dtype=np.uint8)[:NFR*fl*3//2].reshape(NFR, fl*3//2)[:, :fl]
-    p = float(np.mean([psnr(src_y[i], dec_y[i]) for i in range(NFR)]))
+    # read luma + chroma planes
+    fl = W*H; fq = fl//4
+    src_a = np.fromfile(src, dtype=np.uint8)[:NFR*fl*3//2].reshape(NFR, fl*3//2)
+    dec_a = np.fromfile(dec, dtype=np.uint8)[:NFR*fl*3//2].reshape(NFR, fl*3//2)
+    p = float(np.mean([psnr(src_a[i,:fl], dec_a[i,:fl]) for i in range(NFR)]))
+    pcb = float(np.mean([psnr(src_a[i,fl:fl+fq], dec_a[i,fl:fl+fq]) for i in range(NFR)]))
+    pcr = float(np.mean([psnr(src_a[i,fl+fq:], dec_a[i,fl+fq:]) for i in range(NFR)]))
+    print(f"qp{qp}: {nb:7d} B  PSNR-Y {p:5.2f} Cb {pcb:5.2f} Cr {pcr:5.2f}")
     return nb, p
 
 def main():
@@ -92,7 +107,6 @@ def main():
         nb, p = run_one(src, qp, tag)
         total_b += nb
         psnrs.append(p)
-        print(f"qp{qp}: {nb:7d} B  PSNR-Y {p:5.2f}")
     avg_p = sum(psnrs)/len(psnrs)
     print(f"TOTAL_BYTES={total_b} AVG_PSNR={avg_p:.2f}")
     print(f"SCORE={total_b}")
