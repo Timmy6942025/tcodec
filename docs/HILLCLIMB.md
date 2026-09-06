@@ -57,3 +57,38 @@ checked: λ250 costs 0.012 dB/%; JND-1.5× at 0.092 dB/% rejected).
 | — | ME diamond 4→8 iters | -0.29%, +0.03dB | REVERT |
 
 Cumulative hardened: 29326B@25.49 → 23882B@25.08 (-18.5%, -0.41dB).
+
+## Session 4 (2026-09-06, overfit reckoning — READ THIS BEFORE CLIMBING)
+
+Real-content A/B (`screen_ui` 720p, QP32) exposed probe overfit. Screen numbers:
+
+| Code | ultrafast 10fr | medium 10fr |
+|---|---|---|
+| pre-climb | 102.46KB @ 38.01dB | — |
+| session-1 (RDO+λ200+4×4) | 16.89KB @ 41.11dB | — |
+| +deadzone/8+λ250+est×1.5 | 18.77KB @ 39.83dB | — |
+| dz/3+λ250 (ablation) | 17.27KB @ 41.15dB | — |
+| dz/3+λ200+est×1.5 | 16.89KB @ 41.11dB | 4.39KB @ 40.85dB |
+| dz/3+λ200+est×1.0 | — | 4.65KB @ 41.05dB |
+
+Findings:
+- Deadzone/8 (a -14.7% probe win) costs +8.7%/-1.3dB on structured content.
+  Random-noise patches reward killing coefficients that text/edges need.
+  REVERTED to /3.
+- λ250 beats λ200 on probe (-2.5%/-0.03) but loses on screen (+2.2%/+0.04).
+  REVERTED to 200 (conservative middle; optimum is content-dependent).
+- Estimator ×1.5: probe-true-win (-3.5%/+0.24) but -0.2dB for -5.6% on screen
+  medium. REVERTED — kept steps must be real-content-neutral-or-better.
+- Ultrafast bypasses the estimator (SAD-proxy screening, fixed lb), so it
+  cannot validate estimator changes; medium preset required.
+
+New gates (hard lessons):
+1. Every kept tuning must pass BOTH hardened probe AND `screen_ui` medium
+   10fr QP32 A/B (53s — affordable, no excuses).
+2. Random-noise probe patches discriminate poorly for structured content;
+   a pseudo-text patch was added (bottom-left); a deadzone/8 negative control
+   shows the same exchange rate as noise, so the screen A/B gate stays primary.
+3. Exchange-rate rule: reject trades worse than ~0.03 dB per %byte.
+
+Surviving gains (all real-validated): RDO scale fix, λ200, inter-4×4 RDO +
+outer-flag fix, Makefile header deps, hardened probe, this log.

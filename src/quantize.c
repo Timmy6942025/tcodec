@@ -286,7 +286,7 @@ void tc_recon_add_dc4x4(const tc_pixel_t *pred, int pred_stride, int dc,
 int tc_lambda(int qp)
 {
     int64_t s = tc_qscale(qp);
-    int64_t l = (s * s * 250) >> 10;
+    int64_t l = (s * s * 200) >> 10;
     if (l < 1) l = 1;
     if (l > (int64_t)1 << 30) l = (int64_t)1 << 30;
     return (int)l;

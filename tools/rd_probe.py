@@ -36,6 +36,21 @@ def gen_yuv(path):
             cb = np.fromfunction(lambda r, c: (((r // 4) + (c // 4) + fr // 2) % 2) * 255,
                                  (48, 64)).astype(np.uint8)
             y[:48, w-64:] = cb
+            # pseudo-text patch 96x48 bottom-left (structured edges: the
+            # random-noise patch overfits deadzone tuning, so text-like
+            # high-contrast strokes gate structured-content regressions)
+            tx, ty, tw, th = 16, h-64, 96, 48
+            y[ty:ty+th, tx:tx+tw] = 200  # paper
+            for ln in range(6):
+                yy = ty + 4 + ln * 7
+                # words: runs of dark segments with gaps, scrolling 1px/fr
+                off = (fr * 1) % 8
+                for seg in range(4):
+                    x0 = tx + 4 + seg * 24 + ((ln * 5 + seg * 3) % 5) - off
+                    x1 = x0 + 12 + ((ln + seg) % 3) * 2
+                    x0c, x1c = max(x0, tx), min(x1, tx + tw)
+                    if x1c > x0c:
+                        y[yy:yy+3, x0c:x1c] = 20  # ink
             cb = np.full((h//2, w//2), 128, dtype=np.uint8)
             cr = np.full((h//2, w//2), 128, dtype=np.uint8)
             # chroma gradient drift

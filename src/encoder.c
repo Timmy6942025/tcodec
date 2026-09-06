@@ -381,10 +381,10 @@ static int64_t qt_code_luma(qt_enc_t *e, int px, int py, int cu,
             }
         }
     }
-    /* Calibrated residual-bit estimate: the 1+2*nz+count model undershoots
-     * the real range-coder cost by ~1.5x (hill-climbed: x1.5 is a true win
-     * on bytes and PSNR; x2 overshoots). Write pass recomputes exactly. */
-    *bits_out = bits + bits / 2;
+    /* Residual-bit estimate kept at model rate (x1.5 trialed: probe-true-win
+     * but -0.2dB on real screen content at medium preset; reverted 2026-09-06
+     * per real-content gate. See docs/HILLCLIMB.md sessions 3-5.) */
+    *bits_out = bits;
     return distortion;
 }
 

@@ -231,7 +231,7 @@ TCODEC_INLINE int tc_eff_scale(int qp, int band, int pos)
 
 TCODEC_INLINE int tc_quant_coeff(int c, int eff)
 {
-    int offset = eff / 8;
+    int offset = eff / 3;
     if (c > 0) return  (c + offset) / eff;
     if (c < 0) return -((-c + offset) / eff);
     return 0;
