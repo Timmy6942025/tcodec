@@ -558,6 +558,12 @@ typedef struct tc_ratectl {
     double        buffer_size;        /* VBV buffer size in bits */
     int32_t       fps_num;
     int32_t       fps_den;
+    /* CRF-lite reactive state (CQP mode): base QP from config, running
+     * average frame size, and last frame size. Frame_start adapts QP
+     * ±2 around base from content complexity (see tc_ratectl_frame_start);
+     * CBR/VBR paths are untouched. */
+    int32_t       base_qp;
+    int64_t       last_bits;
 } tc_ratectl_t;
 
 void tc_ratectl_init(tc_ratectl_t *rc, const tc_config_t *cfg);

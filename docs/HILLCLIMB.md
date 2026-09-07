@@ -61,6 +61,7 @@ checked: λ250 costs 0.012 dB/%; JND-1.5× at 0.092 dB/% rejected).
 | — | CfL alpha >>3→>>2 | flat bytes, Cr −0.41dB at qp37 (fixed alpha can't serve ± correlation) | REVERT — needs per-leaf alpha signaling (v2.1 syntax batch) |
 | 19 | last-pos bit-model term (linear 2..10) | probe -1.5%/+0.06 TRUE WIN; screen med +2.1%/-0.05 | shape miscalibrated — replaced by coder mirror |
 | 20 | last-pos term mirroring range coder (presence + trunc-unary + EG) | probe -2.3%/-0.02; screen med identical bytes, -0.02dB (neutral) | KEEP — strictly-better model, real-neutral |
+| 21 | CRF-lite reactive QP (CQP ±2 from trailing complexity, keyframes reset) | park nature -0.7/-1.2/-1.8% at flat PSNR+SSIM across QP27/32/37 | KEEP — first temporal win; CBR/VBR untouched; suite 52/52 |
 
 ## Validation state
 

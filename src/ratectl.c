@@ -61,6 +61,8 @@ void tc_ratectl_init(tc_ratectl_t *rc, const tc_config_t *cfg)
     rc->qp             = tc_clip(cfg->qp, TC_QP_MIN, TC_QP_MAX);
     rc->fps_num        = cfg->fps_num > 0 ? cfg->fps_num : 60;
     rc->fps_den        = cfg->fps_den > 0 ? cfg->fps_den : 1;
+    rc->base_qp        = rc->qp;
+    rc->last_bits      = 0;
     rc->total_frames   = 0;
     rc->total_bits     = 0;
     rc->buffer_level   = 0.5;
@@ -84,10 +86,33 @@ void tc_ratectl_init(tc_ratectl_t *rc, const tc_config_t *cfg)
 
 void tc_ratectl_frame_start(tc_ratectl_t *rc, tc_frame_type_t type)
 {
-    TCODEC_UNUSED(type);
-
     if (rc->method == TC_RC_CQP) {
-        /* Constant QP: no adjustment */
+        /* CRF-lite: adapt QP ±2 around base from trailing content
+         * complexity. Easy frames (small last size vs average) earn finer
+         * QP; hard frames go coarser. Keyframes always use base QP and
+         * reset the average (scene-cut safety). Warmup: 4 frames. Fully
+         * deterministic (content-only); CBR/VBR untouched. */
+        if (type == TC_FRAME_KEY) {
+            rc->qp = rc->base_qp;
+            rc->total_bits = 0;
+            rc->total_frames = 0;
+            rc->last_bits = 0;
+            return;
+        }
+        if (rc->total_frames >= 4 && rc->total_frames > 0) {
+            double avg = (double)rc->total_bits / (double)rc->total_frames;
+            if (avg > 0) {
+                double r = (double)rc->last_bits / avg;
+                int qp = rc->base_qp;
+                if (r < 0.5) qp = rc->base_qp - 2;
+                else if (r < 0.8) qp = rc->base_qp - 1;
+                else if (r > 2.0) qp = rc->base_qp + 2;
+                else if (r > 1.3) qp = rc->base_qp + 1;
+                rc->qp = tc_clip(qp, TC_QP_MIN, TC_QP_MAX);
+                return;
+            }
+        }
+        rc->qp = rc->base_qp;
         return;
     }
 
@@ -128,6 +153,7 @@ int tc_ratectl_get_qp(tc_ratectl_t *rc)
 void tc_ratectl_frame_end(tc_ratectl_t *rc, int64_t bits_used)
 {
     rc->frame_bits_actual = bits_used;
+    rc->last_bits = bits_used;
     rc->total_bits += bits_used;
     rc->total_frames++;
 
