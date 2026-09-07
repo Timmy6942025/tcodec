@@ -722,8 +722,11 @@ static int64_t qt_leaf(qt_enc_t *e, int depth, int cx, int cy, int write)
      * bounded-damage + chroma-honest finalist): all lose (-47%/-6.6dB,
      * -40%/-4dB, +1.5%/-0.02dB, +7%/flat). Disabled-fires control is
      * byte-identical, so losses are decision effects: even near-exact
-     * staleness compounds through references. Skip needs chroma-aware
-     * costing AND fresh (not stale) skip chroma. Parked. */
+     * staleness compounds through references. A 5th trial (fresh skip
+     * chroma, merge-only conversion) also lost (+10%/-0.14dB): zeroing
+     * merge's epsilon starves future references — needs propagation
+     * awareness (mb-tree-lite). Skip needs chroma-aware costing AND fresh
+     * skip chroma AND propagation. Parked. */
 
     nd->intra=b_intra; nd->skip=b_skip; nd->merge=b_merge; nd->bi=b_bi;
     nd->intra_mode=(uint8_t)b_imode; nd->intra_cmode=(uint8_t)b_cmode;
