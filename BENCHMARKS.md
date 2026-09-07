@@ -133,6 +133,24 @@ content (screen: closing, nature: ~3×, grain: ~6×) shows a single global
 operating point cannot serve all classes; per-class adaptive encoding
 is the strategic answer, not more global knobs.
 
+## Fine-detail checkpoint (2026-09-07, in_to_tree 720p50, 30 frames)
+
+Dolly shot over fine detail (leaves/bark); stresses prediction granularity.
+
+| Codec | QP | Bytes (30fr) | PSNR-Y | SSIM | Enc fps | Dec fps |
+|---|---:|---:|---:|---:|---:|---:|
+| tcodecv2 | 27 | 514,575 | 29.82 | 0.7743 | 0.20 | 17.9 |
+| tcodecv2 | 32 | 162,240 | 28.16 | 0.7198 | 0.24 | 22.0 |
+| tcodecv2 | 37 | 50,223 | 26.65 | 0.6964 | 0.28 | 30.9 |
+| x264vf | 27 | 77,871 | 33.48 | 0.8521 | 20.8 | 40.9 |
+| x264vf | 32 | 34,083 | 31.24 | 0.8010 | 19.2 | 47.8 |
+| x264vf | 37 | 18,262 | 29.32 | 0.7567 | 18.4 | 35.4 |
+
+Reading: ~10× the bits at matched quality — worst class yet. Diagnosis:
+v2 min prediction unit is 8×8 (4×4 transforms exist inside, but prediction
+is per-8×8 minimum); x264 predicts down to 4×4. Fine detail needs finer
+prediction granularity (v2.1: depth+1 quadtree to 4×4 CUs, 85→341 nodes).
+
  ## D8: Multi-codec real-content benchmark (August 2026)
 
  Host: aarch64 Cortex-A72, 4 cores, NEON build, 10 frames of bbb_nature 1280×720,
