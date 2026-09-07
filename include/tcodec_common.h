@@ -620,6 +620,11 @@ typedef struct tc_encoder {
     int32_t           num_ctu_rows;
     int32_t           frame_count;
     int32_t           force_keyframe;
+    /* Scene-cut detection state: previous input frame's luma histogram
+     * (ORIG vs ORIG — never recon, whose QP-dependent error caused false
+     * cuts on dark content). */
+    int               prev_hist[16];
+    int               prev_hist_valid;
     /* Bitstream v2 quadtree scratch (per-encoder, not static) */
     qt_node_t        *v2_node;         /* TC_QT_NODES decision records */
     qt_mvcell_t      *v2_grid;         /* TC_MVGRID_STRIDE² MV grid */

@@ -94,43 +94,15 @@ static int block_variance(const tc_pixel_t *y, int stride, int blk_size)
 
 /* ── Scene cut detection ───────────────────────────────────────
  *
- * Compare current frame histogram against previous frame.
- * Large histogram change indicates a scene cut → force keyframe.
- * Uses a simple chi-squared distance on 16-bin luma histograms.
+ * Compares the current input frame histogram against the previous INPUT
+ * frame histogram (stored 16-bin state, not recon). Large histogram change
+ * indicates a scene cut → force keyframe. Chi-squared distance; the
+ * inline computation at the call site keeps ORIG-vs-ORIG semantics
+ * (an ORIG-vs-RECON comparison false-triggered on dark content).
  * ══════════════════════════════════════════════════════════════ */
 
 #define HIST_BINS 16
 #define SCENE_CUT_THRESHOLD 0.5
-
-static double histogram_distance(const tc_pixel_t *cur, int cur_stride,
-                                  const tc_pixel_t *prev, int prev_stride,
-                                  int width, int height)
-{
-    int hist_cur[HIST_BINS] = {0};
-    int hist_prev[HIST_BINS] = {0};
-    int total = width * height;
-
-    for (int row = 0; row < height; row++) {
-        for (int col = 0; col < width; col++) {
-            int bin_c = cur[row * cur_stride + col] * HIST_BINS / 256;
-            int bin_p = prev[row * prev_stride + col] * HIST_BINS / 256;
-            if (bin_c >= HIST_BINS) bin_c = HIST_BINS - 1;
-            if (bin_p >= HIST_BINS) bin_p = HIST_BINS - 1;
-            hist_cur[bin_c]++;
-            hist_prev[bin_p]++;
-        }
-    }
-
-    double dist = 0.0;
-    for (int i = 0; i < HIST_BINS; i++) {
-        double expected = (hist_prev[i] + hist_cur[i]) / 2.0;
-        if (expected > 0) {
-            double diff = (double)hist_cur[i] - (double)hist_prev[i];
-            dist += (diff * diff) / expected;
-        }
-    }
-    return dist / (double)total;
-}
 
 /* ── DPB reference lookup by POC (B-frames) ─────────────────────
  * B-frames reference the nearest decoded frames on each side of
@@ -2082,14 +2054,34 @@ static tc_error_t encode_poc_frame(tc_encoder_t *enc,
         if (!is_key && (enc->frame_count % keyframe_interval == 0)) {
             is_key = 1;
         }
-        if (!is_key && enc->frame_count > 0 && enc->dpb[0].frame != NULL) {
-            double cut_dist = histogram_distance(
-                frame->y, frame->stride_y,
-                enc->dpb[0].frame->y, enc->dpb[0].frame->stride_y,
-                enc->cfg.width, enc->cfg.height);
-            if (cut_dist > SCENE_CUT_THRESHOLD) {
-                is_key = 1;
+        if (!is_key && enc->frame_count > 0) {
+            /* Scene-cut on ORIG vs ORIG histograms (QP-independent). The old
+             * ORIG-vs-RECON comparison false-triggered on dark content where
+             * quant noise dominates tiny histogram counts (all-keyframes at
+             * QP32 on frozen input). */
+            int cur_hist[HIST_BINS] = {0};
+            for (int row = 0; row < enc->cfg.height; row++)
+                for (int col = 0; col < enc->cfg.width; col++) {
+                    int b = frame->y[row * frame->stride_y + col] * HIST_BINS / 256;
+                    if (b >= HIST_BINS) b = HIST_BINS - 1;
+                    cur_hist[b]++;
+                }
+            if (enc->prev_hist_valid) {
+                double dist = 0.0;
+                double total = (double)enc->cfg.width * enc->cfg.height;
+                for (int i = 0; i < HIST_BINS; i++) {
+                    double expected = (enc->prev_hist[i] + cur_hist[i]) / 2.0;
+                    if (expected > 0) {
+                        double diff = (double)cur_hist[i] - (double)enc->prev_hist[i];
+                        dist += (diff * diff) / expected;
+                    }
+                }
+                if (dist / total > SCENE_CUT_THRESHOLD) {
+                    is_key = 1;
+                }
             }
+            memcpy(enc->prev_hist, cur_hist, sizeof(cur_hist));
+            enc->prev_hist_valid = 1;
         }
     }
     enc->force_keyframe = 0;
