@@ -625,6 +625,12 @@ typedef struct tc_encoder {
      * cuts on dark content). */
     int               prev_hist[16];
     int               prev_hist_valid;
+    /* Global translational motion estimate (quarter-pel units), refreshed
+     * per inter frame from downsampled recon matching. Encoder-only ME
+     * hint (extra search center); never signaled, decoder unaffected. */
+    int               glob_mv_x;
+    int               glob_mv_y;
+    int               glob_mv_valid;
     /* Bitstream v2 quadtree scratch (per-encoder, not static) */
     qt_node_t        *v2_node;         /* TC_QT_NODES decision records */
     qt_mvcell_t      *v2_grid;         /* TC_MVGRID_STRIDE² MV grid */

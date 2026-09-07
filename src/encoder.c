@@ -109,6 +109,42 @@ static int block_variance(const tc_pixel_t *y, int stride, int blk_size)
  * their display position: forward = max POC < cur, backward = min
  * POC > cur. Both encoder and decoder resolve references the same
  * way from the DPB ring, so no explicit ref index is transmitted. */
+/* Global translational motion estimate (encoder-only ME hint): coarse
+ * full-frame match on downsampled luma, hierarchical ±32 full-pel search.
+ * Quarter-pel output. Extra ME center per leaf; never signaled. */
+static void estimate_global_mv(tc_encoder_t *enc, const tc_frame_buf_t *ref)
+{
+    enc->glob_mv_valid = 0;
+    if (!ref || !enc->cur) return;
+    int w = enc->cfg.width, h = enc->cfg.height;
+    int cw = w / 4, ch = h / 4;
+    int best_dx = 0, best_dy = 0;
+    int64_t best = (int64_t)1 << 60;
+    for (int pass = 0; pass < 2; pass++) {
+        int step = pass ? 1 : 2;
+        int range = pass ? 1 : 8;
+        int improved = 0;
+        for (int dy = -range; dy <= range; dy += step)
+            for (int dx = -range; dx <= range; dx += step) {
+                int64_t s = 0;
+                for (int y = 0; y < ch; y += 2)
+                    for (int x = 0; x < cw; x += 2) {
+                        int rx = x * 4 + best_dx + dx * 4;
+                        int ry = y * 4 + best_dy + dy * 4;
+                        if (rx < 0 || ry < 0 || rx >= w || ry >= h) { s += 255 * 4; continue; }
+                        int o = enc->cur->y[(y * 4) * enc->cur->stride_y + x * 4];
+                        int r = ref->y[ry * ref->stride_y + rx];
+                        int d = o - r; s += d < 0 ? -d : d;
+                    }
+                if (s < best) { best = s; best_dx += dx * 4; best_dy += dy * 4; improved = 1; }
+            }
+        if (!improved && pass) break;
+    }
+    enc->glob_mv_x = best_dx * 4;
+    enc->glob_mv_y = best_dy * 4;
+    enc->glob_mv_valid = 1;
+}
+
 static const tc_frame_buf_t *dpb_find_poc_lt(const tc_ref_entry_t *dpb, int poc)
 {
     const tc_frame_buf_t *best = NULL;
@@ -595,6 +631,31 @@ static int64_t qt_leaf(qt_enc_t *e, int depth, int cx, int cy, int write)
             int bits_r1 = 1 + 1 + 1 + 1 + 2 + 1 + (tc_bs_se_bits(disp1.x)+tc_bs_se_bits(disp1.y)) + lb1;
             int64_t cost1 = dl1 + e->lambda*bits_r1;
             if (cost1 < best_cost) { best_cost=cost1; b_intra=0;b_skip=0;b_merge=0;b_dct=r1_dct; b_mvdx=disp1.x;b_mvdy=disp1.y;b_refsel=1;b_bi=0;b_ch=0; b_cmode=0;b_imode=1; }
+        }
+        /* Global-motion extra center (full-RDO path): extra search diversity
+         * beyond the mvp center; RDO picks. MVD stays relative to mvp
+         * (decoder sees ordinary explicit inter). Magnitude gate skips
+         * static scenes (coincidence/need gates trialed: neutral-to-worse,
+         * more parts for nothing). */
+        if (!fast_mode && enc->glob_mv_valid &&
+            (enc->glob_mv_x > 16 || enc->glob_mv_x < -16 ||
+             enc->glob_mv_y > 16 || enc->glob_mv_y < -16)) {
+            tc_mv_s gc = { px*4 + enc->glob_mv_x, py*4 + enc->glob_mv_y };
+            tc_sad_t sadg; tc_mv_s bmg = tc_motion_est(enc->dpb[0].frame->y, enc->dpb[0].frame->stride_y, enc->cfg.width,enc->cfg.height, enc->cur->y+py*enc->cur->stride_y+px, enc->cur->stride_y, gc.x>>2, gc.y>>2, cu, sr, &sadg);
+            /* Skip if identical to the mvp-center result (common). */
+            if (bmg.x != bm.x || bmg.y != bm.y) {
+                tc_mv_s dispg = { bmg.x-(mvp.x+px*4), bmg.y-(mvp.y+py*4) };
+                tc_inter_predict(enc->dpb[0].frame->y,enc->dpb[0].frame->stride_y, enc->cfg.width,enc->cfg.height,bmg,pred,cu,cu);
+                uint8_t gdct = TC_BLOCK_8x8_ID; int lbg = 0; int64_t dlg;
+                if (enc->cfg.preset >= TC_PRESET_MEDIUM && cu <= 32)
+                    dlg = qt_code_best(e,px,py,cu,pred,&lbg,&gdct);
+                else
+                    dlg = qt_code_luma(e,px,py,cu,TC_BLOCK_8x8_ID,pred,&lbg,0);
+                int bits_g = 1 + 1 + 1 + 1 + 2 + (tc_bs_se_bits(dispg.x)+tc_bs_se_bits(dispg.y)) + lbg;
+                if (e->multiref) bits_g += 1;
+                int64_t costg = dlg + e->lambda*bits_g;
+                if (costg < best_cost) { best_cost=costg; b_intra=0;b_skip=0;b_merge=0;b_dct=gdct; b_mvdx=dispg.x;b_mvdy=dispg.y;b_refsel=0;b_bi=0;b_ch=0; b_cmode=0;b_imode=1; }
+            }
         }
         if (enc->cfg.preset >= TC_PRESET_MEDIUM) {
             tc_mv_s mm={mvp.x+px*4,mvp.y+py*4}; tc_inter_predict(enc->dpb[0].frame->y,enc->dpb[0].frame->stride_y, enc->cfg.width,enc->cfg.height,mm,pred,cu,cu);
@@ -2225,6 +2286,13 @@ static tc_error_t encode_poc_frame(tc_encoder_t *enc,
             }
         }
     }
+
+    /* Global motion hint for inter frames (encoder-only; feeds an extra
+     * ME center per leaf when camera motion is significant). */
+    if (frame_type == TC_FRAME_INTER && enc->dpb[0].frame)
+        estimate_global_mv(enc, enc->dpb[0].frame);
+    else
+        enc->glob_mv_valid = 0;
 
     /* Encode CTU rows with WPP parallelism or sequential fallback */
     enc_row_ctx_t rctx;
