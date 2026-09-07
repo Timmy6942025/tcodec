@@ -632,10 +632,16 @@ When the `MULTI_REF` tool flag is set (medium+ preset, streaming-main+ profile),
 explicit P-frame inter leaves additionally carry one `ref_sel` bit after the
 merge flag selecting `dpb[0]`/`dpb[1]` for luma and chroma prediction (the MVD
 stays relative to the shared median predictor); merge leaves stay ref0-only.
-Without the flag the syntax is unchanged. The MV predictor is the median of the
+Without the flag the syntax is unchanged (the reference is `dpb[0]` for
+plain v2 P frames). B-frames (`--bframes`, GOP4 reorder): explicit leaves
+carry `ref_sel` (0 = forward max-POC-below, 1 = backward min-POC-above)
+plus a `bi` bit; `bi` = 1 averages forward prediction with the mirrored
+backward prediction (luma and chroma, single shared MVD), `bi` = 0 uses
+the selected single ref. Merge/skip on B-frames use the averaged
+prediction with the median predictor. The MV predictor is the median of the
 available left, above, and above-right 8×8 MV-grid cells; intra cells are
 unavailable. Merge and skip use the predictor directly; explicit inter adds
-MVD to it. v2 B-frame emission is disabled by the encoder.
+MVD to it.
 
 Luma residuals use either 8×8 or four 4×4 residual transforms, with the shared
 JND-weighted quantizer (`tc_quant_coeff`/`tc_dequant_coeff`). Each 8×8 TU

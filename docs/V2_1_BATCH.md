@@ -57,16 +57,21 @@ perfectly flat (skip exact-copies). Skip fundamentally needs:
 (a) chroma-aware RDO, (b) fresh skip chroma, (c) PROPAGATION awareness
 (don't zero residuals that future frames need as reference).
 
-## 6. Per-CTU/CU QP deltas + mb-tree-lite (unblocks adaptive allocation)
+## 6. Per-CTU QP deltas + mb-tree-lite (unblocks adaptive allocation)
 
 Frame-QP heuristics (bit-ratio ±, quality servo) all move diagonally —
-adaptation without lookahead/propagation can't win. Real win needs
-per-region QP driven by future-reference value (mb-tree-lite). Requires:
-(a) 2-bit QP-delta syntax per leaf/CTU (tool-gated), (b) backward
-propagation estimate (stable-background detector: low residual over N
-frames ⇒ high future value ⇒ finer QP), (c) lookahead for scene complexity
-(bf 8-frame buffer exists). Encoder + both decoders + eff-table plumbing.
-This is the project that unblocks skip (#5) and proper CRF.
+adaptation without lookahead/propagation can't win. Concrete design
+(scoped 2026-09-07):
+- Syntax: 2-bit `ctu_qp_delta` at CTU start (before split flag), values
+  {−1, 0, +1, +2} (00/01/10/11), tool-gated by new `TC_TOOL_QP_DELTA`
+  (bit 15 free). Applies to all leaves in the CTU (eff tables already
+  built per-CTU in all 3 decode paths). ~60B/frame overhead at 720p.
+- Heuristic (no RDO, 1 pass): per-CTU stability from residual-energy
+  history (240 int64s in enc state); stable background → −1 (protect
+  references), changing → 0/+1. Key uses: static UI vs scroll regions
+  (screen), outer-B +2 refinement.
+- Must earn ~2% overhead; validate screen (static regions) + park
+  (uniform-motion control). This unblocks skip (#5) and proper CRF.
 
 ## Compatibility plan
 

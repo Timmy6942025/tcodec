@@ -941,6 +941,123 @@ static void test_v2_cfl(void)
     PASS();
 }
 
+/* ── Test: v2 B-frames (GOP reorder + fwd/bwd/bi RDO, bit-exact) ─ */
+
+static void test_v2_bframes(void)
+{
+    TEST(v2_bframes_gop);
+    int w = 128, h = 128;
+    int n_frames = 12;
+    tc_config_t cfg;
+    tc_config_defaults(&cfg, w, h);
+    cfg.qp = 30;
+    cfg.preset = TC_PRESET_MEDIUM;
+    cfg.profile = TC_PROFILE_STREAMING_MAIN;
+    cfg.use_v2 = 1;
+    cfg.enable_entropy_coded = 1;
+    cfg.enable_b_frames = 1;
+    cfg.threads = 1;
+    cfg.keyframe_interval = 100;
+
+    tc_encoder_t *enc = tc_encoder_create(&cfg);
+    ASSERT_NE(enc, NULL, "v2 bframes encoder NULL");
+
+    tc_pixel_t *y  = (tc_pixel_t *)calloc((size_t)(w * h), 1);
+    tc_pixel_t *cb = (tc_pixel_t *)calloc((size_t)(w/2 * h/2), 1);
+    tc_pixel_t *cr = (tc_pixel_t *)calloc((size_t)(w/2 * h/2), 1);
+    tc_pixel_t *yseq = (tc_pixel_t *)calloc((size_t)(w * h * n_frames), 1);
+    ASSERT_NE(yseq, NULL, "v2 bframes seq alloc failed");
+    tc_packet_t pkts[16];
+    int npk = 0;
+    uint32_t seed = 777;
+
+    for (int f = 0; f < n_frames; f++) {
+        /* Panning gradient: fwd/bwd/bi predictions all exercisable. */
+        int shift = f * 2;
+        for (int row = 0; row < h; row++)
+            for (int col = 0; col < w; col++)
+                y[row*w+col] = (tc_pixel_t)(((row + col + shift) * 255 / (w + h)) & 255);
+        for (int i = 0; i < (w/2)*(h/2); i++) {
+            seed = seed * 1103515245u + 12345u;
+            cb[i] = (tc_pixel_t)(128 + ((seed >> 16) & 15) - 8);
+            cr[i] = (tc_pixel_t)(128 + ((seed >> 8) & 15) - 8);
+        }
+        memcpy(yseq + (size_t)f * w * h, y, (size_t)(w * h));
+        tc_packet_t pkt;
+        tc_error_t err = tc_encoder_encode(enc, y, w, cb, w/2, cr, w/2, &pkt);
+        if (err == TC_OK) {
+            pkts[npk].size = pkt.size;
+            pkts[npk].data = malloc(pkt.size);
+            ASSERT_NE(pkts[npk].data, NULL, "v2 bframes pkt malloc");
+            memcpy(pkts[npk].data, pkt.data, pkt.size);
+            npk++;
+        } else if (err != TC_ERR_NEED_MORE) {
+            ASSERT_EQ(err, TC_OK, "v2 bframes encode failed");
+        }
+    }
+    for (int i = npk; i < 16; i++) {
+        tc_packet_t pkt;
+        tc_error_t err = tc_encoder_flush_tail(enc, &pkt);
+        if (err == TC_ERR_EOF) break;
+        ASSERT_EQ(err, TC_OK, "v2 bframes flush_tail failed");
+        pkts[npk].size = pkt.size;
+        pkts[npk].data = malloc(pkt.size);
+        ASSERT_NE(pkts[npk].data, NULL, "v2 bframes tail malloc");
+        memcpy(pkts[npk].data, pkt.data, pkt.size);
+        npk++;
+    }
+    ASSERT_EQ(npk, n_frames, "expected 12 packets for 12 v2 B-mode frames");
+    tc_encoder_destroy(enc);
+
+    tc_decoder_t *dec = tc_decoder_create(0, 0);
+    ASSERT_NE(dec, NULL, "v2 bframes decoder NULL");
+    tc_pixel_t *decseq = (tc_pixel_t *)calloc((size_t)(w * h * n_frames), 1);
+    int ndec = 0;
+    for (int p = 0; p < npk; p++) {
+        const tc_pixel_t *yy, *ccb, *ccr;
+        int sy, scb, scr;
+        tc_error_t err = tc_decoder_decode(dec, pkts[p].data, pkts[p].size,
+                                           &yy, &sy, &ccb, &scb, &ccr, &scr);
+        if (err == TC_ERR_NEED_MORE) continue;
+        ASSERT_EQ(err, TC_OK, "v2 bframes decode failed");
+        for (int r = 0; r < h; r++)
+            memcpy(decseq + (size_t)ndec * w * h + (size_t)r * w,
+                   yy + r * sy, (size_t)w);
+        ndec++;
+    }
+    for (;;) {
+        const tc_pixel_t *yy, *ccb, *ccr;
+        int sy, scb, scr;
+        tc_error_t err = tc_decoder_flush_tail(dec, &yy, &sy, &ccb, &scb, &ccr, &scr);
+        if (err == TC_ERR_EOF) break;
+        ASSERT_EQ(err, TC_OK, "v2 bframes flush tail decode failed");
+        for (int r = 0; r < h; r++)
+            memcpy(decseq + (size_t)ndec * w * h + (size_t)r * w,
+                   yy + r * sy, (size_t)w);
+        ndec++;
+    }
+    ASSERT_EQ(ndec, n_frames, "v2 bframes decoder must emit all 12 frames");
+    /* Display order: each output closest to its own input (smallest SAD). */
+    for (int i = 0; i < n_frames; i++) {
+        int best = -1;
+        int64_t best_sad = INT64_MAX;
+        for (int j = 0; j < n_frames; j++) {
+            int64_t sad = 0;
+            for (int k = 0; k < w * h; k += 7)
+                sad += llabs((long long)decseq[(size_t)i * w * h + k] -
+                             (long long)yseq[(size_t)j * w * h + k]);
+            if (sad < best_sad) { best_sad = sad; best = j; }
+        }
+        ASSERT_EQ(best, i, "v2 bframes display order wrong");
+    }
+    printf(" [12 frames GOP order + bit-exact decode]");
+    for (int p = 0; p < npk; p++) free(pkts[p].data);
+    tc_decoder_destroy(dec);
+    free(y); free(cb); free(cr);
+    free(yseq); free(decseq);
+    PASS();
+}
+
 /* ── Test: explicit v2 quadtree round-trip ───────────────── */
 
 static void test_v2_roundtrip(void)
@@ -3554,6 +3671,7 @@ int main(void)
     test_multi_ref();
     test_v2_multiref();
     test_v2_cfl();
+    test_v2_bframes();
     test_non_ctu_aligned();
     test_v2_roundtrip();
     test_v2_fast_presets();

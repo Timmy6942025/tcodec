@@ -69,7 +69,7 @@ checked: λ250 costs 0.012 dB/%; JND-1.5× at 0.092 dB/% rejected).
 | 20 | last-pos term mirroring range coder (presence + trunc-unary + EG) | probe -2.3%/-0.02; screen med identical bytes, -0.02dB (neutral) | KEEP — strictly-better model, real-neutral |
 | 24 | CfL adaptive sign (neighbour covariance, zero-bit) | probe -0.2% bytes, Cr −0.41→−0.03dB at qp37 (Cb/Cr up elsewhere); screen identical (no correlation, correct no-op) | KEEP — suite 52/52 |
 | 27 | CfL adaptive magnitude (neighbour regression slope → shift 2..5, integer-only) | probe -0.18% bytes, Cr +0.3/+0.4dB at qp27/32; screen identical | KEEP — small, principled, real-neutral; suite 52/52 |
-| 28 | global-motion extra ME center (coarse ±32px estimate, magnitude-gated, MVD stays mvp-relative — encoder-only, zero syntax/decoder risk) | probe -4.9%/+0.22dB; park -0.7%/flat (+23%→+17% encode time); screen/tree neutral | KEEP — search diversity wins where mvp misleads; coincidence/need gates trialed neutral-to-worse, kept simple; suite pending |
+| 28 | global-motion extra ME center (coarse ±32px estimate, magnitude-gated, MVD stays mvp-relative — encoder-only, zero syntax/decoder risk) | probe -4.9%/+0.22dB; park -0.7%/flat (+23%→+17% encode time); screen/tree neutral | KEEP — search diversity wins where mvp misleads; coincidence/need gates trialed neutral-to-worse, kept simple; suite 52/52 |
 | 28 | scene-cut orig-vs-recon BUG: false keyframes on dark content (all-30-keys at qp32 on frozen input!) + non-monotonic RDO | fixed with stored orig histograms (16-int state, QP-independent); sita qp32 556KB→225KB, K+29P, decodes | KEEP (bugfix); suite pending |
 | 29 | static-content drift: -3.1dB/30fr frozen (requant walk) vs x264 perfectly flat (skip exact-copies) | diagnosis only | NEXT PROJECT: skip-6 with exact-copy stability (re-implement fresh-chroma skip, validate drift, not just rate) |
 | 21 | CRF-lite reactive QP (CQP ±2 from trailing complexity, keyframes reset) | park nature -0.7/-1.2/-1.8% at flat PSNR+SSIM across QP27/32/37 | REVERTED (see 22): screen showed +8%/+0.18 (wrong direction); flipside -3.0%/-0.23 (0.077 dB/%). Both mediocre diagonals; needs quality servo, not bit-ratio heuristics |
@@ -191,3 +191,18 @@ screen (+3.4% — non-monotonic RDO chaos), so top-4 locked.
 |---|---|
 | probe | +1.9% bytes, -0.01dB Y (accepted speed price, documented) |
 | screen_ui med | 4.13KB@41.67 → 4.11KB@41.82 (-0.5%, +0.15dB) + 53s→28s encode (1.9x) |
+
+## Session 11 (v2 B-frames — first temporal-structure win)
+
+Unblocked v2 B emission (`b_mode` for v2) with full BIDIR machinery repair:
+poc-ordered refs everywhere (was slot-indexed desync under reorder),
+honored `bi` flag (was ignored — always averaged), averaged chroma
+(was single-ref), qt_leaf fwd/bwd/bi RDO + merge-as-average, GOP order +
+bit-exact test_v2_bframes. No new syntax (flags existed, unused for v2).
+
+| Check | Result |
+|---|---|
+| probe 3QP | ≈−19% bytes, −0.0..−0.9dB (diagonal; qp32 dip flagged) |
+| screen_ui med QP32 | 3.39KB@42.26 → 2.79KB@42.49 (−17.7% AND +0.23dB TRUE WIN) |
+| park nature QP32 | 581KB@25.55 → 468KB@25.24 (−19.6%, −0.31dB/−0.007 SSIM; +27% enc time) |
+| test_v2_bframes + suite | PASS, 53/53 |

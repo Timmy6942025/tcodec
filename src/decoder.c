@@ -954,10 +954,10 @@ static void qt_dec_leaf(qt_dec_t *d, int depth, int cx, int cy)
         qt_dec_chroma(d, px, py, cu, cpred);
         dec_profile_add(dec, &dec->profile_chroma_ns, chroma_start);
     } else {
-        int ref_sel = 0;
+        int ref_sel = 0, bi = 0;
         if (d->frame_type == TC_FRAME_BIDIR) {
             ref_sel = (int)qt_read_bits(d, RC_CTX_REF_SEL, 1);
-            (void)qt_read_bits(d, RC_CTX_BLOCK_MODE, 1);  /* bi flag (reserved) */
+            bi = (int)qt_read_bits(d, RC_CTX_BLOCK_MODE, 1);
             if (ref_sel > 1) d->bs->error = 1;
         }
         uint32_t skipf = qt_read_bits(d, RC_CTX_SKIP_FLAG, 1);
@@ -987,25 +987,31 @@ static void qt_dec_leaf(qt_dec_t *d, int depth, int cx, int cy)
         tc_mv_s mv = { mvp.x + px*4, mvp.y + py*4 };
         if (!skip && !merge) { mv.x += mvd_x; mv.y += mvd_y; }
 
-        /* Luma inter prediction: BIDIR frames average forward+mirrored
-         * backward references (reserved syntax for v2 — the v2 encoder
-         * does not emit B-frames); otherwise single dpb[0] prediction. */
+        /* Luma inter prediction. BIDIR: poc-ordered fwd/bwd refs; bi=1
+         * averages (mirrored MV), bi=0 uses ref_sel single ref. Merge/skip
+         * carry no bi flag semantics of their own here — merge/skip on
+         * BIDIR use the averaged prediction with the mvp MV (matching the
+         * encoder), explicit leaves honor bi. */
             if (d->frame_type == TC_FRAME_BIDIR) {
-            const tc_frame_buf_t *r1 = ref_sel ? dec->dpb[1].frame : dec->dpb[0].frame;
-            const tc_frame_buf_t *r2 = ref_sel ? dec->dpb[0].frame : dec->dpb[1].frame;
-            if (r1 && r2) {
+            const tc_frame_buf_t *rf = dpb_find_poc_lt(dec->dpb, d->poc);
+            const tc_frame_buf_t *rb = dpb_find_poc_gt(dec->dpb, d->poc);
+            int do_avg = bi || merge || skip;
+            if (do_avg && rf && rb) {
                 tc_pixel_t *t1 = dec->v2_bipred_a;
                 tc_pixel_t *t2 = dec->v2_bipred_b;
                 uint64_t motion_start = dec->profile_enabled ? dec_now_ns() : 0;
-                tc_inter_predict_decoder(r1->y, r1->stride_y, dec->width, dec->height, mv, t1, cu, cu);
+                tc_inter_predict_decoder(rf->y, rf->stride_y, dec->width, dec->height, mv, t1, cu, cu);
                 tc_mv_s mv2 = { -mv.x, -mv.y };
-                tc_inter_predict_decoder(r2->y, r2->stride_y, dec->width, dec->height, mv2, t2, cu, cu);
+                tc_inter_predict_decoder(rb->y, rb->stride_y, dec->width, dec->height, mv2, t2, cu, cu);
                 for (int i=0;i<cu*cu;i++) pred[i]=(tc_pixel_t)((t1[i]+t2[i]+1)>>1);
                 dec_profile_add(dec, &dec->profile_motion_ns, motion_start);
-            } else if (r1) {
-                tc_inter_predict_decoder(r1->y, r1->stride_y, dec->width, dec->height, mv, pred, cu, cu);
             } else {
-                memset(pred, 128, (size_t)cu*cu);
+                const tc_frame_buf_t *r = bi ? rf : (ref_sel ? rb : rf);
+                if (!r) r = rf ? rf : rb;
+                uint64_t motion_start = dec->profile_enabled ? dec_now_ns() : 0;
+                if (r) tc_inter_predict_decoder(r->y, r->stride_y, dec->width, dec->height, mv, pred, cu, cu);
+                else { d->bs->error = 1; memset(pred, 128, (size_t)cu*cu); }
+                dec_profile_add(dec, &dec->profile_motion_ns, motion_start);
             }
         } else {
             /* P-frame second reference: ref_sel indexes dpb; missing dpb[1]
@@ -1023,15 +1029,44 @@ static void qt_dec_leaf(qt_dec_t *d, int depth, int cx, int cy)
             qt_dec_luma(d, px, py, cu, pred);
             uint64_t chroma_start = dec->profile_enabled ? dec_now_ns() : 0;
             /* Inter CUs never transmit a chroma-intra flag: chroma is
-             * always collocated MC from the selected reference with the
-             * luma MV. */
+             * always collocated MC from the selected reference(s) with the
+             * luma MV. BIDIR mirrors luma: bi/merge average fwd+bwd (poc),
+             * explicit single uses its ref. */
+            if (d->frame_type == TC_FRAME_BIDIR && (bi || merge)) {
+                const tc_frame_buf_t *cf = dpb_find_poc_lt(dec->dpb, d->poc);
+                const tc_frame_buf_t *cbw = dpb_find_poc_gt(dec->dpb, d->poc);
+                if (cf && cbw) {
+                    tc_pixel_t t0[32*32], t1[32*32], u0[32*32], u1[32*32];
+                    tc_mv_s cmv2 = { -mv.x, -mv.y };
+                    tc_inter_predict_chroma_decoder(cf->cb, cf->stride_c, dec->width/2, dec->height/2, mv, t0, cu/2, cu/2);
+                    tc_inter_predict_chroma_decoder(cf->cr, cf->stride_c, dec->width/2, dec->height/2, mv, u0, cu/2, cu/2);
+                    tc_inter_predict_chroma_decoder(cbw->cb, cbw->stride_c, dec->width/2, dec->height/2, cmv2, t1, cu/2, cu/2);
+                    tc_inter_predict_chroma_decoder(cbw->cr, cbw->stride_c, dec->width/2, dec->height/2, cmv2, u1, cu/2, cu/2);
+                    for (int i2 = 0; i2 < (cu/2)*(cu/2); i2++) {
+                        cbuf[0][i2] = (tc_pixel_t)((t0[i2] + t1[i2] + 1) >> 1);
+                        cbuf[1][i2] = (tc_pixel_t)((u0[i2] + u1[i2] + 1) >> 1);
+                    }
+                } else {
+                    const tc_frame_buf_t *r = cf ? cf : cbw;
+                    if (r) {
+                        tc_inter_predict_chroma_decoder(r->cb, r->stride_c, dec->width/2, dec->height/2, mv, cbuf[0], cu/2, cu/2);
+                        tc_inter_predict_chroma_decoder(r->cr, r->stride_c, dec->width/2, dec->height/2, mv, cbuf[1], cu/2, cu/2);
+                    } else {
+                        tc_intra_chroma_dc(dec->cur->cb, dec->cur->stride_c, px/2, py/2, cu/2, cbuf[0], cu/2);
+                        tc_intra_chroma_dc(dec->cur->cr, dec->cur->stride_c, px/2, py/2, cu/2, cbuf[1], cu/2);
+                    }
+                }
+            } else {
             const tc_frame_buf_t *r = ref_sel ? dec->dpb[1].frame : dec->dpb[0].frame;
+            if (d->frame_type == TC_FRAME_BIDIR)
+                r = ref_sel ? dpb_find_poc_gt(dec->dpb, d->poc) : dpb_find_poc_lt(dec->dpb, d->poc);
             if (r) {
                 tc_inter_predict_chroma_decoder(r->cb, r->stride_c, dec->width/2, dec->height/2, mv, cbuf[0], cu/2, cu/2);
                 tc_inter_predict_chroma_decoder(r->cr, r->stride_c, dec->width/2, dec->height/2, mv, cbuf[1], cu/2, cu/2);
             } else {
                 tc_intra_chroma_dc(dec->cur->cb, dec->cur->stride_c, px/2, py/2, cu/2, cbuf[0], cu/2);
                 tc_intra_chroma_dc(dec->cur->cr, dec->cur->stride_c, px/2, py/2, cu/2, cbuf[1], cu/2);
+            }
             }
             qt_dec_chroma(d, px, py, cu, cpred);
             dec_profile_add(dec, &dec->profile_chroma_ns, chroma_start);
@@ -1200,7 +1235,7 @@ static void decode_row_wpp(void *ctx, int row)
 
 typedef struct {
     uint8_t valid, split, intra, ch_intra, skip, merge, ref_sel;
-    uint8_t dct_size, intra_mode;
+    uint8_t dct_size, intra_mode, bi;
     uint16_t luma_flag_count;
     int32_t mvd_x, mvd_y, mv_x, mv_y;
     uint16_t luma_off, luma_count, chroma_off, chroma_count;
@@ -1323,7 +1358,7 @@ static void v2_parse_leaf(v2_parse_ctx_t *p, int depth, int cx, int cy)
     } else {
         if (p->frame_type == TC_FRAME_BIDIR) {
             n->ref_sel = (uint8_t)v2_parse_bits(p, RC_CTX_REF_SEL, 1);
-            (void)v2_parse_bits(p, RC_CTX_BLOCK_MODE, 1);
+            n->bi = (uint8_t)v2_parse_bits(p, RC_CTX_BLOCK_MODE, 1);
             if (n->ref_sel > 1) p->bs->error = 1;
         }
         n->skip = (uint8_t)v2_parse_bits(p, RC_CTX_SKIP_FLAG, 1);
@@ -1556,20 +1591,29 @@ static void v2_recon_leaf(tc_decoder_t *dec, const v2_cmd_ctu_t *cmd,
         tc_intra_predict(pred, cu, ra + 1, rl + 1, cu,
                          (tc_intra_mode_t)n->intra_mode);
     } else {
-        const tc_frame_buf_t *r = n->ref_sel ? dec->dpb[1].frame : dec->dpb[0].frame;
         tc_mv_s mv = { n->mv_x, n->mv_y };
         if (frame_type == TC_FRAME_BIDIR) {
-            const tc_frame_buf_t *r1 = n->ref_sel ? dec->dpb[1].frame : dec->dpb[0].frame;
-            const tc_frame_buf_t *r2 = n->ref_sel ? dec->dpb[0].frame : dec->dpb[1].frame;
-            if (r1 && r2) {
-                tc_inter_predict_decoder(r1->y, r1->stride_y, r1->width, r1->height, mv, bip_a, cu, cu);
+            /* Mirror serial path: bi/merge average poc-ordered refs
+             * (mirrored MV); explicit single uses its ref. */
+            const tc_frame_buf_t *rf = dpb_find_poc_lt(dec->dpb, poc);
+            const tc_frame_buf_t *rb = dpb_find_poc_gt(dec->dpb, poc);
+            int do_avg = n->bi || n->merge || n->skip;
+            if (do_avg && rf && rb) {
+                tc_inter_predict_decoder(rf->y, rf->stride_y, rf->width, rf->height, mv, bip_a, cu, cu);
                 tc_mv_s mv2 = { -mv.x, -mv.y };
-                tc_inter_predict_decoder(r2->y, r2->stride_y, r2->width, r2->height, mv2, bip_b, cu, cu);
+                tc_inter_predict_decoder(rb->y, rb->stride_y, rb->width, rb->height, mv2, bip_b, cu, cu);
                 for (int i = 0; i < cu * cu; i++) pred[i] = (tc_pixel_t)((bip_a[i] + bip_b[i] + 1) >> 1);
-            } else if (r1) tc_inter_predict_decoder(r1->y, r1->stride_y, r1->width, r1->height, mv, pred, cu, cu);
+            } else {
+                const tc_frame_buf_t *r = n->bi ? rf : (n->ref_sel ? rb : rf);
+                if (!r) r = rf ? rf : rb;
+                if (r) tc_inter_predict_decoder(r->y, r->stride_y, r->width, r->height, mv, pred, cu, cu);
+                else memset(pred, 128, (size_t)cu * cu);
+            }
+        } else {
+            const tc_frame_buf_t *r = n->ref_sel ? dec->dpb[1].frame : dec->dpb[0].frame;
+            if (r) tc_inter_predict_decoder(r->y, r->stride_y, r->width, r->height, mv, pred, cu, cu);
             else memset(pred, 128, (size_t)cu * cu);
-        } else if (r) tc_inter_predict_decoder(r->y, r->stride_y, r->width, r->height, mv, pred, cu, cu);
-        else memset(pred, 128, (size_t)cu * cu);
+        }
         dec_profile_add(dec, &dec->profile_motion_ns, motion_start);
     }
     if (n->skip) {
@@ -1602,7 +1646,37 @@ static void v2_recon_leaf(tc_decoder_t *dec, const v2_cmd_ctu_t *cmd,
             }
         }
     } else {
+        /* Mirror serial path: bi/merge average poc-ordered chroma;
+         * explicit single uses its ref. */
+        if (frame_type == TC_FRAME_BIDIR && (n->bi || n->merge)) {
+            const tc_frame_buf_t *cf = dpb_find_poc_lt(dec->dpb, poc);
+            const tc_frame_buf_t *cbw = dpb_find_poc_gt(dec->dpb, poc);
+            tc_mv_s cmv = { n->mv_x, n->mv_y };
+            tc_mv_s cmv2 = { -cmv.x, -cmv.y };
+            if (cf && cbw) {
+                tc_pixel_t t0[32*32], t1[32*32], u0[32*32], u1[32*32];
+                tc_inter_predict_chroma_decoder(cf->cb, cf->stride_c, cf->width / 2, cf->height / 2, cmv, t0, cu / 2, cu / 2);
+                tc_inter_predict_chroma_decoder(cf->cr, cf->stride_c, cf->width / 2, cf->height / 2, cmv, u0, cu / 2, cu / 2);
+                tc_inter_predict_chroma_decoder(cbw->cb, cbw->stride_c, cbw->width / 2, cbw->height / 2, cmv2, t1, cu / 2, cu / 2);
+                tc_inter_predict_chroma_decoder(cbw->cr, cbw->stride_c, cbw->width / 2, cbw->height / 2, cmv2, u1, cu / 2, cu / 2);
+                for (int i2 = 0; i2 < (cu/2)*(cu/2); i2++) {
+                    cbuf[0][i2] = (tc_pixel_t)((t0[i2] + t1[i2] + 1) >> 1);
+                    cbuf[1][i2] = (tc_pixel_t)((u0[i2] + u1[i2] + 1) >> 1);
+                }
+            } else {
+                const tc_frame_buf_t *r = cf ? cf : cbw;
+                if (r) {
+                    tc_inter_predict_chroma_decoder(r->cb, r->stride_c, r->width / 2, r->height / 2, cmv, cbuf[0], cu / 2, cu / 2);
+                    tc_inter_predict_chroma_decoder(r->cr, r->stride_c, r->width / 2, r->height / 2, cmv, cbuf[1], cu / 2, cu / 2);
+                } else {
+                    tc_intra_chroma_dc(dec->cur->cb, dec->cur->stride_c, px / 2, py / 2, cu / 2, cbuf[0], cu / 2);
+                    tc_intra_chroma_dc(dec->cur->cr, dec->cur->stride_c, px / 2, py / 2, cu / 2, cbuf[1], cu / 2);
+                }
+            }
+        } else {
         const tc_frame_buf_t *r = n->ref_sel ? dec->dpb[1].frame : dec->dpb[0].frame;
+        if (frame_type == TC_FRAME_BIDIR)
+            r = n->ref_sel ? dpb_find_poc_gt(dec->dpb, poc) : dpb_find_poc_lt(dec->dpb, poc);
         if (r) {
             tc_inter_predict_chroma_decoder(r->cb, r->stride_c, r->width / 2, r->height / 2,
                                              (tc_mv_s){ n->mv_x, n->mv_y }, cbuf[0], cu / 2, cu / 2);
@@ -1611,6 +1685,7 @@ static void v2_recon_leaf(tc_decoder_t *dec, const v2_cmd_ctu_t *cmd,
         } else {
             tc_intra_chroma_dc(dec->cur->cb, dec->cur->stride_c, px / 2, py / 2, cu / 2, cbuf[0], cu / 2);
             tc_intra_chroma_dc(dec->cur->cr, dec->cur->stride_c, px / 2, py / 2, cu / 2, cbuf[1], cu / 2);
+        }
         }
     }
     v2_recon_chroma(dec, cmd, n, px, py, cu, eff_c, cpred);

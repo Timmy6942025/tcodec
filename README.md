@@ -19,7 +19,7 @@ not yet met.
 | Filtering | Deblocking plus v2 luma SAO Band Offset |
 | Rate control | CQP, CBR, and VBR prototype modes |
 | ARM path | NEON dispatch and scalar/NEON parity checks |
-| Regression suite | 53 codec tests plus container/integration tests |
+| Regression suite | 54 codec tests plus container/integration tests |
 
 Implemented does not mean competitive: see `BENCHMARKS.md` and
 `docs/FINISH_Tier1.md` for measured limitations and gate status.
@@ -29,8 +29,8 @@ Implemented does not mean competitive: see `BENCHMARKS.md` and
 ```sh
 make                         # release library and CLI tools
 make clean && make -j2       # reproducible clean build
-make test                    # bounded 52-test regression + containers
-make test-full               # all 53 codec tests, including 300-frame long run (slow)
+make test                    # bounded 53-test regression + containers
+make test-full               # all 54 codec tests, including 300-frame long run (slow)
 make soak-1080p              # external 300-frame exact-byte soak
 make test-mp4                # only the FFmpeg compatibility bridge test
 make cross-test              # AArch64/NEON compile-only checks
@@ -102,13 +102,13 @@ It reports throughput but does not claim the unmet Tier-1 60-fps@720p or
 
 ## Tests
 
-`test/test_tcodec.c` currently registers 53 tests covering color conversion,
+`test/test_tcodec.c` currently registers 54 tests covering color conversion,
 round trips, QP behavior, motion, multi-reference, v0/v1 compatibility, v2
 quadtree raw/range paths, malformed streams, bit flips, B-frame reorder, WPP
 parity, transforms, SAO, rate control, and deterministic output.
 
-`make test` is the bounded default: it runs 52 tests and explicitly reports the
-single skipped 300-frame in-process long run. `make test-full` runs all 53.
+`make test` is the bounded default: it runs 53 tests and explicitly reports the
+single skipped 300-frame in-process long run. `make test-full` runs all 54.
 Both targets additionally run malformed-input and exact-round-trip tests for
 TCMX/TCMF, native private `tcv1` MP4 carriage, and the H.264 MP4/fMP4
 compatibility bridge. `make soak-1080p` is the separate reproducible 300-frame

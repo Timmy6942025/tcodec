@@ -513,12 +513,30 @@ static int64_t qt_leaf(qt_enc_t *e, int depth, int cx, int cy, int write)
             if (nd->merge || nd->skip) { mv=mvp; mv.x+=px*4; mv.y+=py*4; }
             if (!nd->skip) {
                 if (e->frame_type==TC_FRAME_BIDIR) {
-                    const tc_frame_buf_t *r1 = nd->ref_sel?enc->dpb[1].frame:enc->dpb[0].frame;
-                    const tc_frame_buf_t *r2 = nd->ref_sel?enc->dpb[0].frame:enc->dpb[1].frame;
-                    tc_pixel_t t1[64*64],t2[64*64];
-                    tc_inter_predict(r1->y,r1->stride_y,enc->cfg.width,enc->cfg.height,mv,t1,cu,cu);
-                    tc_mv_s mv2={-mv.x,-mv.y}; tc_inter_predict(r2->y,r2->stride_y,enc->cfg.width,enc->cfg.height,mv2,t2,cu,cu);
-                    for (int i=0;i<cu*cu;i++) pred[i]=(tc_pixel_t)((t1[i]+t2[i]+1)>>1);
+                    /* Mirror decoder serial path exactly: bi/merge average
+                     * poc-ordered refs (mirrored MV); explicit single uses
+                     * its ref. Merge/skip carry no MVD (mv already mvp). */
+                    const tc_frame_buf_t *rf = dpb_find_poc_lt(enc->dpb, e->poc);
+                    const tc_frame_buf_t *rb = dpb_find_poc_gt(enc->dpb, e->poc);
+                    if (nd->bi || nd->merge) {
+                        if (rf && rb) {
+                            tc_pixel_t t1[64*64],t2[64*64];
+                            tc_inter_predict(rf->y,rf->stride_y,enc->cfg.width,enc->cfg.height,mv,t1,cu,cu);
+                            tc_mv_s mv2={-mv.x,-mv.y}; tc_inter_predict(rb->y,rb->stride_y,enc->cfg.width,enc->cfg.height,mv2,t2,cu,cu);
+                            for (int i=0;i<cu*cu;i++) pred[i]=(tc_pixel_t)((t1[i]+t2[i]+1)>>1);
+                        } else if (rf) {
+                            tc_inter_predict(rf->y,rf->stride_y,enc->cfg.width,enc->cfg.height,mv,pred,cu,cu);
+                        } else if (rb) {
+                            tc_inter_predict(rb->y,rb->stride_y,enc->cfg.width,enc->cfg.height,mv,pred,cu,cu);
+                        } else {
+                            memset(pred, 128, (size_t)cu*cu);
+                        }
+                    } else {
+                        const tc_frame_buf_t *rr = nd->ref_sel ? rb : rf;
+                        if (!rr) rr = rf ? rf : rb;
+                        if (rr) tc_inter_predict(rr->y,rr->stride_y,enc->cfg.width,enc->cfg.height,mv,pred,cu,cu);
+                        else memset(pred, 128, (size_t)cu*cu);
+                    }
                 } else {
                     const tc_frame_buf_t *rf = (nd->ref_sel && enc->dpb[1].frame) ?
                         enc->dpb[1].frame : enc->dpb[0].frame;
@@ -528,15 +546,65 @@ static int64_t qt_leaf(qt_enc_t *e, int depth, int cx, int cy, int write)
                 if (nd->ch_intra) {
                     tc_intra_chroma_dc(enc->recon->cb,enc->recon->stride_c,px/2,py/2,cu/2,cbuf[0],cu/2);
                     tc_intra_chroma_dc(enc->recon->cr,enc->recon->stride_c,px/2,py/2,cu/2,cbuf[1],cu/2);
+                } else if (e->frame_type == TC_FRAME_BIDIR && (nd->bi || nd->merge)) {
+                    /* Mirror decoder: average poc-ordered chroma. */
+                    const tc_frame_buf_t *cf = dpb_find_poc_lt(enc->dpb, e->poc);
+                    const tc_frame_buf_t *cbw = dpb_find_poc_gt(enc->dpb, e->poc);
+                    if (cf && cbw) {
+                        tc_pixel_t t0[32*32], t1[32*32], u0[32*32], u1[32*32];
+                        tc_mv_s cmv2 = { -mv.x, -mv.y };
+                        tc_inter_predict_chroma(cf->cb,cf->stride_c, enc->cfg.width/2,enc->cfg.height/2,mv,t0,cu/2,cu/2);
+                        tc_inter_predict_chroma(cf->cr,cf->stride_c, enc->cfg.width/2,enc->cfg.height/2,mv,u0,cu/2,cu/2);
+                        tc_inter_predict_chroma(cbw->cb,cbw->stride_c, enc->cfg.width/2,enc->cfg.height/2,cmv2,t1,cu/2,cu/2);
+                        tc_inter_predict_chroma(cbw->cr,cbw->stride_c, enc->cfg.width/2,enc->cfg.height/2,cmv2,u1,cu/2,cu/2);
+                        for (int i2 = 0; i2 < (cu/2)*(cu/2); i2++) {
+                            cbuf[0][i2] = (tc_pixel_t)((t0[i2] + t1[i2] + 1) >> 1);
+                            cbuf[1][i2] = (tc_pixel_t)((u0[i2] + u1[i2] + 1) >> 1);
+                        }
+                    } else {
+                        const tc_frame_buf_t *r = cf ? cf : cbw;
+                        if (r) {
+                            tc_inter_predict_chroma(r->cb,r->stride_c, enc->cfg.width/2,enc->cfg.height/2,mv,cbuf[0],cu/2,cu/2);
+                            tc_inter_predict_chroma(r->cr,r->stride_c, enc->cfg.width/2,enc->cfg.height/2,mv,cbuf[1],cu/2,cu/2);
+                        } else {
+                            tc_intra_chroma_dc(enc->recon->cb,enc->recon->stride_c,px/2,py/2,cu/2,cbuf[0],cu/2);
+                            tc_intra_chroma_dc(enc->recon->cr,enc->recon->stride_c,px/2,py/2,cu/2,cbuf[1],cu/2);
+                        }
+                    }
                 } else {
-                    const tc_frame_buf_t *rcf = (nd->ref_sel && enc->dpb[1].frame) ?
-                        enc->dpb[1].frame : enc->dpb[0].frame;
+                    const tc_frame_buf_t *rcf = enc->dpb[0].frame;
+                    if (e->frame_type == TC_FRAME_BIDIR)
+                        rcf = (nd->ref_sel ? dpb_find_poc_gt(enc->dpb, e->poc)
+                                           : dpb_find_poc_lt(enc->dpb, e->poc));
+                    else if (nd->ref_sel && enc->dpb[1].frame)
+                        rcf = enc->dpb[1].frame;
+                    if (!rcf) rcf = enc->dpb[0].frame;
                     tc_inter_predict_chroma(rcf->cb,rcf->stride_c, enc->cfg.width/2,enc->cfg.height/2,mv,cbuf[0],cu/2,cu/2);
                     tc_inter_predict_chroma(rcf->cr,rcf->stride_c, enc->cfg.width/2,enc->cfg.height/2,mv,cbuf[1],cu/2,cu/2);
                 }
                 qt_code_chroma(e,px,py,cu,0,cpred,&bits_dummy,write == QT_WRITE);
             } else {
-                tc_inter_predict(enc->dpb[0].frame->y,enc->dpb[0].frame->stride_y, enc->cfg.width,enc->cfg.height,mv,pred,cu,cu);
+                /* Skip copies its prediction straight to recon. On BIDIR
+                 * the prediction is the poc-averaged mvp MC (mirroring the
+                 * decoder); otherwise single-ref MC. */
+                if (e->frame_type == TC_FRAME_BIDIR) {
+                    const tc_frame_buf_t *rf = dpb_find_poc_lt(enc->dpb, e->poc);
+                    const tc_frame_buf_t *rb = dpb_find_poc_gt(enc->dpb, e->poc);
+                    if (rf && rb) {
+                        tc_pixel_t t1[64*64],t2[64*64];
+                        tc_inter_predict(rf->y,rf->stride_y,enc->cfg.width,enc->cfg.height,mv,t1,cu,cu);
+                        tc_mv_s mv2={-mv.x,-mv.y}; tc_inter_predict(rb->y,rb->stride_y,enc->cfg.width,enc->cfg.height,mv2,t2,cu,cu);
+                        for (int i=0;i<cu*cu;i++) pred[i]=(tc_pixel_t)((t1[i]+t2[i]+1)>>1);
+                    } else if (rf) {
+                        tc_inter_predict(rf->y,rf->stride_y,enc->cfg.width,enc->cfg.height,mv,pred,cu,cu);
+                    } else if (rb) {
+                        tc_inter_predict(rb->y,rb->stride_y,enc->cfg.width,enc->cfg.height,mv,pred,cu,cu);
+                    } else {
+                        memset(pred, 128, (size_t)cu*cu);
+                    }
+                } else {
+                    tc_inter_predict(enc->dpb[0].frame->y,enc->dpb[0].frame->stride_y, enc->cfg.width,enc->cfg.height,mv,pred,cu,cu);
+                }
                 for (int i=0;i<cu*cu;i++) enc->recon->y[(py+i/cu)*enc->recon->stride_y+(px+i%cu)]=pred[i];
             }
         }
@@ -578,7 +646,91 @@ static int64_t qt_leaf(qt_enc_t *e, int depth, int cx, int cy, int write)
     int b_imode=1,b_cmode=0,b_mvdx=0,b_mvdy=0;
 
     b_skip=0; b_merge=0;  /* keyframes are intra-only */
-    if (e->frame_type != TC_FRAME_KEY) {
+    if (e->frame_type == TC_FRAME_BIDIR) {
+        /* Bidirectional RDO: fwd-only, bwd-only, and mirrored-average
+         * candidates (plus merge-as-average and shared intra below).
+         * Refs are poc-ordered; MVD stays mvp-relative; bi=1 averages.
+         * Gated candidates skip cleanly when a ref is missing. */
+        tc_mv_s mvp = qt_mvp(e,cx,cy,e->grid);
+        int sr = (enc->cfg.preset <= TC_PRESET_FAST) ? 16 : 32;
+        const tc_frame_buf_t *fwdf = dpb_find_poc_lt(enc->dpb, e->poc);
+        const tc_frame_buf_t *bwdf = dpb_find_poc_gt(enc->dpb, e->poc);
+        /* Forward-only candidate. */
+        if (fwdf) {
+            tc_mv_s center = { mvp.x+px*4, mvp.y+py*4 };
+            tc_sad_t sad; tc_mv_s bm = tc_motion_est(fwdf->y, fwdf->stride_y, enc->cfg.width,enc->cfg.height, enc->cur->y+py*enc->cur->stride_y+px, enc->cur->stride_y, center.x>>2, center.y>>2, cu, sr, &sad);
+            tc_mv_s disp = { bm.x-(mvp.x+px*4), bm.y-(mvp.y+py*4) };
+            tc_inter_predict(fwdf->y,fwdf->stride_y, enc->cfg.width,enc->cfg.height,bm,pred,cu,cu);
+            uint8_t f_dct = TC_BLOCK_8x8_ID;
+            int lb = 0;
+            int64_t dl;
+            if (fast_mode) {
+                int64_t sad_proxy = tc_sad(enc->cur->y + py * enc->cur->stride_y + px,
+                                           enc->cur->stride_y, pred, cu, cu);
+                dl = (sad_proxy * sad_proxy) / (int64_t)(cu * cu);
+                lb = 1 + 2;
+            } else {
+                if (enc->cfg.preset >= TC_PRESET_MEDIUM && cu <= 32)
+                    dl = qt_code_best(e,px,py,cu,pred,&lb,&f_dct);
+                else
+                    dl = qt_code_luma(e,px,py,cu,TC_BLOCK_8x8_ID,pred,&lb,0);
+            }
+            int bits_f = 1 + 1 + 1 + 1 + 1 + 1 + (tc_bs_se_bits(disp.x)+tc_bs_se_bits(disp.y)) + lb;
+            int64_t costf = dl + e->lambda*bits_f;
+            if (costf < best_cost) { best_cost=costf; b_intra=0;b_skip=0;b_merge=0;b_dct=f_dct; b_mvdx=disp.x;b_mvdy=disp.y;b_refsel=0;b_bi=0;b_ch=0; b_cmode=0;b_imode=1; }
+            /* Bi-average candidate reuses the fwd MV (mirrored bwd). */
+            if (bwdf && !fast_mode) {
+                tc_pixel_t pa[64*64], pb[64*64];
+                tc_mv_s mvb = { -bm.x, -bm.y };
+                tc_inter_predict(bwdf->y,bwdf->stride_y, enc->cfg.width,enc->cfg.height,mvb,pb,cu,cu);
+                for (int i2 = 0; i2 < cu*cu; i2++) pa[i2] = pred[i2];
+                for (int i2 = 0; i2 < cu*cu; i2++) pred[i2]=(tc_pixel_t)((pa[i2]+pb[i2]+1)>>1);
+                uint8_t bi_dct = TC_BLOCK_8x8_ID; int lbb = 0; int64_t dlb;
+                if (enc->cfg.preset >= TC_PRESET_MEDIUM && cu <= 32)
+                    dlb = qt_code_best(e,px,py,cu,pred,&lbb,&bi_dct);
+                else
+                    dlb = qt_code_luma(e,px,py,cu,TC_BLOCK_8x8_ID,pred,&lbb,0);
+                int bits_bi = 1 + 1 + 1 + 1 + 1 + 1 + (tc_bs_se_bits(disp.x)+tc_bs_se_bits(disp.y)) + lbb;
+                int64_t costbi = dlb + e->lambda*bits_bi;
+                if (costbi < best_cost) { best_cost=costbi; b_intra=0;b_skip=0;b_merge=0;b_dct=bi_dct; b_mvdx=disp.x;b_mvdy=disp.y;b_refsel=0;b_bi=1;b_ch=0; b_cmode=0;b_imode=1; }
+            }
+        }
+        /* Backward-only candidate. */
+        if (bwdf) {
+            tc_mv_s center = { mvp.x+px*4, mvp.y+py*4 };
+            tc_sad_t sad; tc_mv_s bm = tc_motion_est(bwdf->y, bwdf->stride_y, enc->cfg.width,enc->cfg.height, enc->cur->y+py*enc->cur->stride_y+px, enc->cur->stride_y, center.x>>2, center.y>>2, cu, sr, &sad);
+            tc_mv_s disp = { bm.x-(mvp.x+px*4), bm.y-(mvp.y+py*4) };
+            tc_inter_predict(bwdf->y,bwdf->stride_y, enc->cfg.width,enc->cfg.height,bm,pred,cu,cu);
+            uint8_t b_dct2 = TC_BLOCK_8x8_ID; int lb2 = 0; int64_t dlb2;
+            if (fast_mode) {
+                int64_t sad_proxy = tc_sad(enc->cur->y + py * enc->cur->stride_y + px,
+                                           enc->cur->stride_y, pred, cu, cu);
+                dlb2 = (sad_proxy * sad_proxy) / (int64_t)(cu * cu);
+                lb2 = 1 + 2;
+            } else {
+                if (enc->cfg.preset >= TC_PRESET_MEDIUM && cu <= 32)
+                    dlb2 = qt_code_best(e,px,py,cu,pred,&lb2,&b_dct2);
+                else
+                    dlb2 = qt_code_luma(e,px,py,cu,TC_BLOCK_8x8_ID,pred,&lb2,0);
+            }
+            int bits_b = 1 + 1 + 1 + 1 + 1 + 1 + (tc_bs_se_bits(disp.x)+tc_bs_se_bits(disp.y)) + lb2;
+            int64_t costb = dlb2 + e->lambda*bits_b;
+            if (costb < best_cost) { best_cost=costb; b_intra=0;b_skip=0;b_merge=0;b_dct=b_dct2; b_mvdx=disp.x;b_mvdy=disp.y;b_refsel=1;b_bi=0;b_ch=0; b_cmode=0;b_imode=1; }
+        }
+        /* Merge-as-average candidate (mvp, zero MVD). */
+        if (enc->cfg.preset >= TC_PRESET_MEDIUM && fwdf && bwdf && !fast_mode) {
+            tc_mv_s mm={mvp.x+px*4,mvp.y+py*4};
+            tc_pixel_t ma[64*64], mb[64*64];
+            tc_inter_predict(fwdf->y,fwdf->stride_y, enc->cfg.width,enc->cfg.height,mm,ma,cu,cu);
+            tc_mv_s mm2={-mm.x,-mm.y}; tc_inter_predict(bwdf->y,bwdf->stride_y, enc->cfg.width,enc->cfg.height,mm2,mb,cu,cu);
+            for (int i2 = 0; i2 < cu*cu; i2++) pred[i2]=(tc_pixel_t)((ma[i2]+mb[i2]+1)>>1);
+            int lbm = 0;
+            int64_t dlm = qt_code_luma(e,px,py,cu,TC_BLOCK_8x8_ID,pred,&lbm,0);
+            int bits_m = 1+1+1+1+1+1+lbm;
+            int64_t costm = dlm + e->lambda*bits_m;
+            if (costm<best_cost) { best_cost=costm;b_intra=0;b_merge=1;b_skip=0;b_mvdx=0;b_mvdy=0; b_dct=TC_BLOCK_8x8_ID;b_ch=0;b_cmode=0;b_imode=1;b_refsel=0;b_bi=1; }
+        }
+    } else if (e->frame_type != TC_FRAME_KEY) {
         tc_mv_s mvp = qt_mvp(e,cx,cy,e->grid);
         /* v2 presets deliberately trade RDO breadth for predictable ARM
          * encode time. Fast uses a compact search; medium retains the
@@ -1949,12 +2101,10 @@ tc_encoder_t *tc_encoder_create(const tc_config_t *config)
     /* Init entropy coding mode */
     enc->use_entropy_coded = config->enable_entropy_coded ? 1 : 0;
 
-    /* B-frame reorder state.  The v2 quadtree path does not implement
-     * B-frame reference selection (its RDO only searches dpb[0] and the
-     * BIDIR write path would dereference dpb[1] unconditionally), so
-     * B-frames are disabled for v2 streams.  This is a documented
-     * limitation; v2 syntax still reserves the ref_sel/bi bits. */
-    enc->bf.b_mode = (config->enable_b_frames && !config->use_v2) ? 1 : 0;
+    /* B-frame reorder state (hierarchical GOP4). v2 quadtree path
+     * implements fwd/bwd/bi RDO with poc-ordered refs (see qt_leaf);
+     * v1 path uses its legacy B machinery. */
+    enc->bf.b_mode = config->enable_b_frames ? 1 : 0;
 
     /* Bitstream v2 quadtree scratch (per-encoder, no shared statics) */
     if (config->use_v2) {
