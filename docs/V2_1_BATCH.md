@@ -25,10 +25,11 @@ decisions never evaluate B candidates. Latent issues found by audit:
 ## 2. WHT transform-type flag (small: +1–3% on edges)
 
 v2 `qt_code_luma` hardcodes DCT-II; legacy RDO picks WHT vs DCT per block.
-Add 1 bit per TU (same pattern as `ref_sel`: unconditional when a new
-`TC_TOOL_TRANSFORM_TYPE`-style gate is set... or fold into a v2.1 header
-version bump). Encoder evaluates both (2× transform cost in decision,
-medium+ only). Decoders already contain both kernels (parity-tested).
+TRIALED 2026-09-06 as per-TU type bit (tool-gated): +2.2%/-0.68dB loss —
+the +1b/TU floor (~2-3%) exceeds WHT wins on balanced content, encoder and
+decoder agreed exactly (pure economics, no desync). Viable shape, if ever:
+per-LEAF/CU type (amortize the flag over 64–4096 px) rather than per-TU.
+Parked; all trial code reverted.
 
 ## 3. Per-leaf CfL alpha signaling (small)
 

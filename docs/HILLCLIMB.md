@@ -72,6 +72,7 @@ checked: λ250 costs 0.012 dB/%; JND-1.5× at 0.092 dB/% rejected).
   checkpoint recorded in BENCHMARKS.md.
 | — | full coder-faithful coeff model (sig/gt/sign/UE counts) | probe +0.9%/+0.10; screen med +4.7%/-0.20 | REVERT — fidelity without probability-skew awareness misranks; effective models need adaptive scaling |
 | — | MVD bits ×0.75 (ctx-coded cheaper than EG) | probe +0.8%/+0.01 | REVERT — EG model fine at tested motion ranges |
+| — | v2 WHT/DCT per-TU type bit (TRANSFORM_TYPE concept) | probe +2.2%/-0.68dB; encoder==decoder PSNR (no desync, pure economics) | REVERT — +1b/TU floor (~2-3%) exceeds WHT wins on balanced content. Viable shape is per-LEAF/CU type (see V2_1_BATCH) |
 | — | search range 32→48 (color probe) | +0.9%, flat | REVERT (MV cost > gain on small motion) |
 | — | search range 32→24 (color probe) | +0.2%, +0.25dB | REVERT — tempting but asymmetric risk: clips true motion >24px catastrophically on unseen content |
 | — | SPEC truth pass | v2 never had CfL (legacy-only); corrected §4.3, queued v2-CfL (prediction-only, no syntax needed) | DOC |
