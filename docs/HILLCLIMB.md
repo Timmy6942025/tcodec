@@ -91,6 +91,7 @@ checked: λ250 costs 0.012 dB/%; JND-1.5× at 0.092 dB/% rejected).
 | — | search range 32→48 (color probe) | +0.9%, flat | REVERT (MV cost > gain on small motion) |
 | — | search range 32→24 (color probe) | +0.2%, +0.25dB | REVERT — tempting but asymmetric risk: clips true motion >24px catastrophically on unseen content |
 | — | qpel refinement to convergence (3 iters) | probe +0.4%/+0.04; park −0.15%/flat | REVERT — single pass already converges; no signal |
+| — | fast-preset intra to 32px CUs | screen fast byte-identical | REVERT — no effect on tested content |
 | — | SATD-based ME refinement | not built — reasoned rejection: RDO already evaluates exact SSE+bits post-ME, so SATD's typical SAD-pipeline gains don't apply here | PARKED |
 | — | SPEC truth pass | v2 never had CfL (legacy-only); corrected §4.3, queued v2-CfL (prediction-only, no syntax needed) | DOC |
 
