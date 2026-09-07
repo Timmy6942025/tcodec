@@ -358,17 +358,17 @@ Phase 3 (entropy coding changes will modify the bitstream format).
 
 | ID | Deliverable | Status | Evidence |
 |---|---|---|---|
-| D1 | `make test-full` passes (51/51 incl. long-run) | ✅ Done | 51/51 passed Aug 2026 |
+| D1 | `make test-full` passes (53/53 incl. long-run) | ✅ Done | 53/53 passed Sep 2026 (incl. v2 multiref + v2 CfL tests) |
 | D2 | Range coder with separate MV x/y contexts, DC/low/high freq models | ✅ Done | DC-specific contexts (6 new RC_CTX_*) added; BD-rate −66.4% |
-| D3 | Sanitizer clean + fuzz coverage documented | ⚠️ Partial | ASAN/UBSan crash on allocator (4GB ulimit); 43/43 unit tests pass |
-| D5 | DCT-II transforms | ✅ Done | 4×4/8×8 DCT-II + WHT RDO-lite selection |
-| D6 | SAO + deblocking | ✅ Done | SAO band/offset, deblocking CTU |
-| D7 | RDO-lite BD-rate vs SAD-only | ✅ Done | BD-rate = −66.4% (5-QP curve, bbb_nature 720p) |
-| D8 | Real-content BD-rate vs x264/x265/SVT-AV1 | ⚠️ Partial | 1 clip, 5 QPs, 4 codecs benchmarked; 10+ clip matrix not done |
-| D9 | ARM decode ≥60fps@720p / ≥30fps@1080p | ❌ Not met | 8–32 fps@720p, ~3–14 fps@1080p (one thread) |
+| D3 | Sanitizer clean + fuzz coverage documented | ⚠️ Partial | ASAN/UBSan crash on allocator (4GB ulimit); fuzz tests pass in-suite |
+| D5 | DCT-II transforms | ✅ Done | 4×4/8×8 DCT-II + WHT RDO-lite selection (WHT since rejected for v2: genuinely worse, see HILLCLIMB) |
+| D6 | SAO + deblocking | ✅ Done | SAO band/offset (model x6 tuned), deblocking CTU, scalar/NEON parity |
+| D7 | RDO-lite BD-rate vs SAD-only | ✅ Done | BD-rate = −66.4% (5-QP curve, bbb_nature 720p); v2 RDO scale bug fixed since (−8.9% more) |
+| D8 | Real-content BD-rate vs x264/x265/SVT-AV1 | ⚠️ Partial | 4 clips (screen/nature/grain/detail/static) × 3 QPs × 2 codecs Sep 2026, see BENCHMARKS.md; x265/SVT-AV1 + 10-clip matrix not done |
+| D9 | ARM decode ≥60fps@720p / ≥30fps@1080p | ❌ Not met | screen 20–30fps, nature 12–19fps@720p (one thread); profile says deblock/coeff/motion dominate |
 | D10 | Container/transport (tcmux, MP4 bridge, HLS) | ✅ Done | test_tcmux.sh and test_tcmux_mp4.sh pass |
-| D11 | Docs complete (SPEC/BITSTREAM/PROFILES/BENCHMARKS/README) | ⚠️ Partial | BENCHMARKS.md updated; SPEC/BITSTREAM/PROFILES need truth pass |
-| D12 | Repo hygiene, commits, final report | ⚠️ Partial | 5 commits ahead of origin/main; docs/FINISH_Tier1.md present |
+| D11 | Docs complete (SPEC/BITSTREAM/PROFILES/BENCHMARKS/README) | ⚠️ Partial | SPEC/BITSTREAM truth-passed for v2 multiref/CfL/ch_intra; BENCHMARKS has 5 new checkpoints; HILLCLIMB + V2_1_BATCH record the program |
+| D12 | Repo hygiene, commits, final report | ⚠️ Partial | ~35 commits ahead of origin/main; docs/FINISH_Tier1.md predates hill-climb era |
 
 **Tier-1 completion blockers:** D8 (full 10+ clip corpus benchmark), D9 (decode real-time),
 D3 (sanitizer under ulimit), D11/D12 (doc truth pass + final report).

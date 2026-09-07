@@ -169,18 +169,30 @@ All work should be judged by hard metrics.
 
 ## Current State Summary
 
-Current repository status, at a high level:
+Current repository status, at a high level (September 2026, post hill-climb era):
 
 - Working research prototype with versioned v0/v1/v2 bitstreams, intra/inter modes,
   v2 quadtree coding, transforms, quantization, deblocking, and luma BO SAO
 - NEON-oriented implementation direction with scalar/NEON parity coverage
-- 51 codec regression tests plus native TCMX/TCMF and playable MP4/fMP4 bridge tests
-- Range-coded entropy is implemented and selected by tool flag; deeper compression
-  gains and broad competitive measurements remain open
+  (parity harness green: transform, IDCT, deblock, motion, e2e both entropies)
+- 53 codec regression tests plus native TCMX/TCMF and playable MP4/fMP4 bridge tests
+- Autonomous hill-climb program since Sep 2026, all real-validated, logged in
+  `docs/HILLCLIMB.md`: fixed v2 RDO scale bug, λ200, inter-4×4 (+outer-flag fix),
+  MULTI_REF-gated second reference (−11% screen), v2 CfL with zero-bit adaptive
+  sign+magnitude, medium intra top-4 pruning (1.9× encode), SAO model ×6
+  (−17.5% screen), last-position bit model, scene-cut orig-vs-orig fix,
+  B-frame QP ladder fix, slow-preset fix. ~25 reverted trials documented.
+- Measured standing (BENCHMARKS.md): screen closing, nature ~2.5–3× x264vf bits,
+  grain ~6×, detail ~10×, static ~10–20× (skip prize). Still far from competitive;
+  remaining program is structural (v2.1 batch: B-emission, per-CTU QP + mb-tree,
+  chroma SAO, per-leaf alpha; see `docs/V2_1_BATCH.md`).
 - WPP infrastructure and B-frame reorder exist, but real-time ARM decode targets
-  are not met by the current measured implementation
+  are not met (screen 20–30fps, nature 12–19fps@720p single-thread);
+  legacy B-frames measured ~zero value on current engine (v2-B needs B-RDO first).
 - Motion estimation, mode decision, rate control, and filtering remain
-  research/prototype-grade despite the implemented baseline features
+  research/prototype-grade despite the implemented baseline features;
+  frame-QP heuristics (bit-ratio, quality servo) both move diagonally and were
+  reverted — adaptation needs lookahead/propagation.
 - The MP4 integration currently has two explicit paths: packet-preserving private
   TCMX/TCMF transport plus native private `tcv1` ISO-BMFF carriage, and a separate
   H.264-in-ISO-BMFF compatibility bridge. Native `tcv1` carriage round-trips
