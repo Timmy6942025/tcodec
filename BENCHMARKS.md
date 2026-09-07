@@ -112,6 +112,27 @@ references only, no affine/global motion, entropy-model gap, luma-only
 RDO. Decode on nature (12–19fps) trails ffmpeg-x264 (27–35fps) and the
 60fps@720p target — D9 open.
 
+## Grain checkpoint (2026-09-06, ducks_take_off 720p50, 30 frames)
+
+Byte-range prefix of `ducks_take_off_420_720p50.y4m`, first 30 frames;
+water/grain is the hardest entropy content class (see MASTER_PLAN film
+grain strategy — not implemented).
+
+| Codec | QP | Bytes (30fr) | PSNR-Y | SSIM | Enc fps | Dec fps |
+|---|---:|---:|---:|---:|---:|---:|
+| tcodecv2 | 27 | 1,603,957 | 26.65 | 0.8109 | 0.22 | 12.4 |
+| tcodecv2 | 32 | 745,359 | 23.74 | 0.6946 | 0.23 | 14.9 |
+| tcodecv2 | 37 | 290,400 | 21.04 | 0.5829 | 0.23 | 18.9 |
+| x264vf | 27 | 428,201 | 30.27 | 0.8799 | 15.0 | 36.8 |
+| x264vf | 32 | 203,251 | 27.49 | 0.8202 | 16.2 | 38.2 |
+| x264vf | 37 | 97,950 | 24.74 | 0.7285 | 18.1 | 38.1 |
+
+Reading: ~6× the bits at matched quality — worst class, as predicted
+(no grain handling, contextless high-freq coding). The spread across
+content (screen: closing, nature: ~3×, grain: ~6×) shows a single global
+operating point cannot serve all classes; per-class adaptive encoding
+is the strategic answer, not more global knobs.
+
  ## D8: Multi-codec real-content benchmark (August 2026)
 
  Host: aarch64 Cortex-A72, 4 cores, NEON build, 10 frames of bbb_nature 1280×720,
