@@ -151,6 +151,28 @@ v2 min prediction unit is 8×8 (4×4 transforms exist inside, but prediction
 is per-8×8 minimum); x264 predicts down to 4×4. Fine detail needs finer
 prediction granularity (v2.1: depth+1 quadtree to 4×4 CUs, 85→341 nodes).
 
+## Static-animation checkpoint (2026-09-07, sita 720p24, 30 frames)
+
+First 30 frames are pixel-identical (frozen leader). x264 skips everything
+(16–35KB total); any per-CU syntax tax shows brutally here.
+
+| Codec | QP | Bytes (30fr) | PSNR-Y | SSIM | Enc fps | Dec fps |
+|---|---:|---:|---:|---:|---:|---:|
+| tcodecv2 | 27 | 462,252 | 29.95 | 0.9266 | 0.34 | 21.7 |
+| tcodecv2 | 32 | 230,815 | 26.62 | 0.9059 | 0.34 | 23.4 |
+| tcodecv2 | 37 | 101,195 | 23.63 | 0.8938 | 0.35 | 25.9 |
+| x264vf | 27 | 35,003 | 39.86 | 0.9963 | 23.2 | 35.7 |
+| x264vf | 32 | 24,442 | 35.75 | 0.9920 | 30.0 | 43.8 |
+| x264vf | 37 | 16,389 | 31.88 | 0.9851 | 28.2 | 43.3 |
+
+History: pre-scene-cut-fix, qp32 emitted 30 keyframes (556KB, non-monotonic
+vs qp27) — false cuts from ORIG-vs-RECON comparison on dark content, fixed
+2026-09-07 (stored input histograms). Post-fix curve is monotonic.
+Remaining gap (~10–20× + drift −3.1dB/30fr vs x264 perfectly flat) is the
+skip prize quantified: zero-residual exact-copy CUs at ~2 bits vs our
+merge+residual floor. See HILLCLIMB skip saga (5 trials); needs
+propagation-aware costing (mb-tree-lite).
+
  ## D8: Multi-codec real-content benchmark (August 2026)
 
  Host: aarch64 Cortex-A72, 4 cores, NEON build, 10 frames of bbb_nature 1280×720,
