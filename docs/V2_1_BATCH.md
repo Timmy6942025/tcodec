@@ -9,18 +9,21 @@ hill-climb audits. Order by value/effort.
 State: frame machinery (GOP4 reorder, scheduler, DPB poc logic) and leaf
 BIDIR syntax (ref_sel/bi bits, parse+recon both decoder paths, grid rules)
 exist, but `b_mode` is blocked for v2 (`encoder.c`: `!use_v2`) and v2 leaf
-decisions never evaluate B candidates. Latent issues found by audit:
-- Encoder replay chroma for BIDIR uses single ref-indexed MC, while luma
-  averages fwd+bwd — decoder serial BIDIR chroma uses `dpb[0]` always.
-  These three must be reconciled (recommend: average chroma like luma).
-- Grid stores one MV (mvp+mvd); mirrored second MV derived, never stored —
-  consistent on both sides, no change needed.
-- `bf_sched_qp_off` returns 0; hierarchical QP lift (+1 mid, +2 outer)
-  wanted with hill validation.
-- Decision design: fwd (`dpb_find_poc_lt`), bwd (`dpb_find_poc_gt`),
-  bi-average candidates with honest RDO; chroma follows luma choice.
-- Tests: v2 GOP encode/decode roundtrip + display-order check (extend
-  `test_b_frames` pattern), both entropy paths.
+decisions never evaluate B candidates. Legacy B measured ~parity with P
+(+0.35%/−0.04dB; ladder fix −12.5%/−0.41dB diagonal) — v2-B needs B-RDO
+maturity, not just emission. Audit 2026-09-07 found three latent v2-BIDIR
+bugs (all unreachable today since emission is blocked):
+- Encoder replay + both decoders resolve BIDIR refs by DPB SLOT
+  (`ref_sel ? dpb[1] : dpb[0]`) instead of POC order (`dpb_find_poc_lt/gt`
+  like legacy) — wrong under GOP reorder. Fix to poc-based first.
+- The `bi` flag is written and parsed but IGNORED in replay/recon (always
+  averages); single-dir B decodes as average. Must branch properly.
+- BIDIR chroma is single-ref MC while luma averages — must average chroma
+  like luma.
+Plan: (1) poc-based refs everywhere, (2) honor bi flag + averaged chroma,
+(3) qt_leaf BIDIR branch (fwd/bwd/bi RDO + merge-as-bi-average),
+(4) unblock b_mode for v2 (hierarchical QP already fixed),
+(5) test_v2_bframes (GOP roundtrip + order), validate park/screen/probe.
 
 ## 2. ~~WHT transform-type flag~~ REJECTED 2026-09-06
 
