@@ -389,8 +389,32 @@ void tc_intra_chroma_dc(const tc_pixel_t *recon_c, int stride,
 
 void tc_cfl_blend(tc_pixel_t *TCODEC_RESTRICT dst, int dst_stride,
                   const tc_pixel_t *recon_y, int y_stride,
-                  int lx, int ly, int cw, int ch)
+                  const tc_pixel_t *recon_c, int c_stride,
+                  int lx, int ly, int cx, int cy, int cw, int ch)
 {
+    /* Neighbour covariance sign: above row + left column of (luma 2x2avg,
+     * chroma) pairs. Falls back to +1 at frame edges. */
+    int64_t sum_l = 0, sum_c = 0, sum_lc = 0;
+    int64_t n = 0;
+    if (ly > 0 && cy > 0) {
+        for (int x = 0; x < cw; x++) {
+            int la = (recon_y[(ly - 1) * y_stride + lx + 2*x] +
+                      recon_y[(ly - 1) * y_stride + lx + 2*x + 1] + 1) >> 1;
+            int c = recon_c[(cy - 1) * c_stride + cx + x];
+            sum_l += la; sum_c += c; sum_lc += (int64_t)la * c; n++;
+        }
+    }
+    if (lx > 0 && cx > 0) {
+        for (int y = 0; y < ch; y++) {
+            int la = (recon_y[(ly + 2*y) * y_stride + lx - 2] +
+                      recon_y[(ly + 2*y) * y_stride + lx - 1] +
+                      recon_y[(ly + 2*y + 1) * y_stride + lx - 2] +
+                      recon_y[(ly + 2*y + 1) * y_stride + lx - 1] + 2) >> 2;
+            int c = recon_c[(cy + y) * c_stride + cx - 1];
+            sum_l += la; sum_c += c; sum_lc += (int64_t)la * c; n++;
+        }
+    }
+    int sign = (n == 0 || n * sum_lc >= sum_l * sum_c) ? +1 : -1;
     for (int ty = 0; ty < ch; ty += 4) {
         for (int tx = 0; tx < cw; tx += 4) {
             int tye = ty + 4 < ch ? ty + 4 : ch;
@@ -411,7 +435,7 @@ void tc_cfl_blend(tc_pixel_t *TCODEC_RESTRICT dst, int dst_stride,
                               recon_y[(ly + 2*y) * y_stride + lx + 2*x + 1] +
                               recon_y[(ly + 2*y + 1) * y_stride + lx + 2*x] +
                               recon_y[(ly + 2*y + 1) * y_stride + lx + 2*x + 1] + 2) >> 2;
-                    int v = (int)dst[y * dst_stride + x] + ((la - avg) >> 3);
+                    int v = (int)dst[y * dst_stride + x] + sign * ((la - avg) >> 3);
                     dst[y * dst_stride + x] = (tc_pixel_t)tc_clip(v, 0, 255);
                 }
         }

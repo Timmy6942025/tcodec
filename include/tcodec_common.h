@@ -514,11 +514,14 @@ void tc_intra_chroma_dc(const tc_pixel_t *recon_c, int stride,
                         tc_pixel_t *TCODEC_RESTRICT dst, int dst_stride);
 
 /* Chroma-from-luma blend over a DC prediction using collocated recon luma.
- * (lx,ly) is the luma origin, (cw,ch) the chroma size. Must be called for
- * the same leaves on encoder and decoder. */
+ * (lx,ly) is the luma origin, (cw,ch) the chroma size. The correlation
+ * SIGN adapts per leaf from above/left neighbour covariance (both sides
+ * hold identical recon, so no signaling): positive adds, negative
+ * subtracts. Must be called for the same leaves on encoder and decoder. */
 void tc_cfl_blend(tc_pixel_t *TCODEC_RESTRICT dst, int dst_stride,
                   const tc_pixel_t *recon_y, int y_stride,
-                  int lx, int ly, int cw, int ch);
+                  const tc_pixel_t *recon_c, int c_stride,
+                  int lx, int ly, int cx, int cy, int cw, int ch);
 
 /* ── Deblocking filter ───────────────────────────────────────── */
 

@@ -62,6 +62,7 @@ checked: λ250 costs 0.012 dB/%; JND-1.5× at 0.092 dB/% rejected).
 | — | CfL alpha >>3→>>2 | flat bytes, Cr −0.41dB at qp37 (fixed alpha can't serve ± correlation) | REVERT — needs per-leaf alpha signaling (v2.1 syntax batch) |
 | 19 | last-pos bit-model term (linear 2..10) | probe -1.5%/+0.06 TRUE WIN; screen med +2.1%/-0.05 | shape miscalibrated — replaced by coder mirror |
 | 20 | last-pos term mirroring range coder (presence + trunc-unary + EG) | probe -2.3%/-0.02; screen med identical bytes, -0.02dB (neutral) | KEEP — strictly-better model, real-neutral |
+| 24 | CfL adaptive sign (neighbour covariance, zero-bit) | probe -0.2% bytes, Cr −0.41→−0.03dB at qp37 (Cb/Cr up elsewhere); screen identical (no correlation, correct no-op) | KEEP — suite 52/52 |
 | 21 | CRF-lite reactive QP (CQP ±2 from trailing complexity, keyframes reset) | park nature -0.7/-1.2/-1.8% at flat PSNR+SSIM across QP27/32/37 | REVERTED (see 22): screen showed +8%/+0.18 (wrong direction); flipside -3.0%/-0.23 (0.077 dB/%). Both mediocre diagonals; needs quality servo, not bit-ratio heuristics |
 | 22 | CRF-lite direction flip (easy-coarse) on screen | -3.0%/-0.23dB | REVERTED with 21 — back to fixed CQP; true quality-targeted servo queued |
 | 23 | Quality servo (hold PSNR flat ±0.75dB, ±1 step, ±2 range) | park +0.7/+2.6/+5.2% bytes for +0.10/+0.09/+0.06dB | REVERTED — buys quality at poor rates; variance benefit unproven. Frame-QP heuristics can't beat fixed-QP without lookahead/propagation |

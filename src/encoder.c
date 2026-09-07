@@ -480,8 +480,8 @@ static int64_t qt_leaf(qt_enc_t *e, int depth, int cx, int cy, int write)
                 tc_intra_chroma_dc(enc->recon->cb,enc->recon->stride_c,px/2,py/2,cu/2,cbuf[0],cu/2);
                 tc_intra_chroma_dc(enc->recon->cr,enc->recon->stride_c,px/2,py/2,cu/2,cbuf[1],cu/2);
                 /* v2 CfL: blend DC with collocated fresh recon luma. */
-                tc_cfl_blend(cbuf[0],cu/2,enc->recon->y,enc->recon->stride_y,px,py,cu/2,cu/2);
-                tc_cfl_blend(cbuf[1],cu/2,enc->recon->y,enc->recon->stride_y,px,py,cu/2,cu/2);
+                tc_cfl_blend(cbuf[0],cu/2,enc->recon->y,enc->recon->stride_y,enc->recon->cb,enc->recon->stride_c,px,py,px/2,py/2,cu/2,cu/2);
+                tc_cfl_blend(cbuf[1],cu/2,enc->recon->y,enc->recon->stride_y,enc->recon->cr,enc->recon->stride_c,px,py,px/2,py/2,cu/2,cu/2);
             } else {
                 tc_mv_s mv = qt_mvp(e,cx,cy,e->grid); mv.x+=px*4; mv.y+=py*4;
                 if (enc->dpb[0].frame) {
@@ -707,8 +707,8 @@ static int64_t qt_leaf(qt_enc_t *e, int depth, int cx, int cy, int write)
             int64_t dmc = qt_code_chroma(e,px,py,cu,0,mcp,&lbmc,0);
             tc_intra_chroma_dc(enc->recon->cb,enc->recon->stride_c,px/2,py/2,cs,f0,cs);
             tc_intra_chroma_dc(enc->recon->cr,enc->recon->stride_c,px/2,py/2,cs,f1,cs);
-            tc_cfl_blend(f0,cs,enc->recon->y,enc->recon->stride_y,px,py,cs,cs);
-            tc_cfl_blend(f1,cs,enc->recon->y,enc->recon->stride_y,px,py,cs,cs);
+            tc_cfl_blend(f0,cs,enc->recon->y,enc->recon->stride_y,enc->recon->cb,enc->recon->stride_c,px,py,px/2,py/2,cs,cs);
+            tc_cfl_blend(f1,cs,enc->recon->y,enc->recon->stride_y,enc->recon->cr,enc->recon->stride_c,px,py,px/2,py/2,cs,cs);
             const tc_pixel_t *fcp[2] = { f0, f1 };
             int lbcfl = 0;
             int64_t dcfl = qt_code_chroma(e,px,py,cu,0,fcp,&lbcfl,0);
