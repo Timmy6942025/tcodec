@@ -392,16 +392,18 @@ void tc_cfl_blend(tc_pixel_t *TCODEC_RESTRICT dst, int dst_stride,
                   const tc_pixel_t *recon_c, int c_stride,
                   int lx, int ly, int cx, int cy, int cw, int ch)
 {
-    /* Neighbour covariance sign: above row + left column of (luma 2x2avg,
-     * chroma) pairs. Falls back to +1 at frame edges. */
-    int64_t sum_l = 0, sum_c = 0, sum_lc = 0;
+    /* Neighbour covariance sign + magnitude: above row + left column of
+     * (luma 2x2avg, chroma) pairs. Regression slope |cov|/varl sets the
+     * shift (2..5, default 3); sign from covariance. Falls back to +>>3
+     * at frame edges or flat luma. Integer-only, identical both sides. */
+    int64_t sum_l = 0, sum_c = 0, sum_lc = 0, sum_l2 = 0;
     int64_t n = 0;
     if (ly > 0 && cy > 0) {
         for (int x = 0; x < cw; x++) {
             int la = (recon_y[(ly - 1) * y_stride + lx + 2*x] +
                       recon_y[(ly - 1) * y_stride + lx + 2*x + 1] + 1) >> 1;
             int c = recon_c[(cy - 1) * c_stride + cx + x];
-            sum_l += la; sum_c += c; sum_lc += (int64_t)la * c; n++;
+            sum_l += la; sum_c += c; sum_lc += (int64_t)la * c; sum_l2 += (int64_t)la * la; n++;
         }
     }
     if (lx > 0 && cx > 0) {
@@ -411,10 +413,27 @@ void tc_cfl_blend(tc_pixel_t *TCODEC_RESTRICT dst, int dst_stride,
                       recon_y[(ly + 2*y + 1) * y_stride + lx - 2] +
                       recon_y[(ly + 2*y + 1) * y_stride + lx - 1] + 2) >> 2;
             int c = recon_c[(cy + y) * c_stride + cx - 1];
-            sum_l += la; sum_c += c; sum_lc += (int64_t)la * c; n++;
+            sum_l += la; sum_c += c; sum_lc += (int64_t)la * c; sum_l2 += (int64_t)la * la; n++;
         }
     }
     int sign = (n == 0 || n * sum_lc >= sum_l * sum_c) ? +1 : -1;
+    /* Magnitude: shift = floor(log2(varl/|cov|)) so 2^shift ≈ 1/slope.
+     * slope 1/8 → 3 (legacy), 1/4 → 2, 1/16 → 4; clamp 2..5. Flat or
+     * uncorrelated neighbours keep 3. */
+    int ashift = 3;
+    {
+        int64_t cov = n * sum_lc - sum_l * sum_c;
+        int64_t vl = n * sum_l2 - sum_l * sum_l;
+        /* q ≈ 1/slope; shift = floor(log2(q)). All quantities fit 64
+         * bits comfortably (n ≤ 64, samples ≤ 255). */
+        if (n > 0 && vl > 0 && cov != 0) {
+            uint64_t acov = cov < 0 ? (uint64_t)(-cov) : (uint64_t)cov;
+            uint64_t q = (uint64_t)vl / acov;
+            int s = (q < 1) ? 2 : (q > 0xFFFFFFFFu) ? 5 : 31 - __builtin_clz((unsigned)q);
+            if (s < 2) s = 2; else if (s > 5) s = 5;
+            ashift = s;
+        }
+    }
     for (int ty = 0; ty < ch; ty += 4) {
         for (int tx = 0; tx < cw; tx += 4) {
             int tye = ty + 4 < ch ? ty + 4 : ch;
@@ -435,7 +454,7 @@ void tc_cfl_blend(tc_pixel_t *TCODEC_RESTRICT dst, int dst_stride,
                               recon_y[(ly + 2*y) * y_stride + lx + 2*x + 1] +
                               recon_y[(ly + 2*y + 1) * y_stride + lx + 2*x] +
                               recon_y[(ly + 2*y + 1) * y_stride + lx + 2*x + 1] + 2) >> 2;
-                    int v = (int)dst[y * dst_stride + x] + sign * ((la - avg) >> 3);
+                    int v = (int)dst[y * dst_stride + x] + sign * ((la - avg) >> ashift);
                     dst[y * dst_stride + x] = (tc_pixel_t)tc_clip(v, 0, 255);
                 }
         }
