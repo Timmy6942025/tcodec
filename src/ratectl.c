@@ -86,32 +86,13 @@ void tc_ratectl_init(tc_ratectl_t *rc, const tc_config_t *cfg)
 
 void tc_ratectl_frame_start(tc_ratectl_t *rc, tc_frame_type_t type)
 {
+    TCODEC_UNUSED(type);
+
     if (rc->method == TC_RC_CQP) {
-        /* CRF-lite: adapt QP ±2 around base from trailing content
-         * complexity. Easy frames (small last size vs average) earn finer
-         * QP; hard frames go coarser. Keyframes always use base QP and
-         * reset the average (scene-cut safety). Warmup: 4 frames. Fully
-         * deterministic (content-only); CBR/VBR untouched. */
-        if (type == TC_FRAME_KEY) {
-            rc->qp = rc->base_qp;
-            rc->total_bits = 0;
-            rc->total_frames = 0;
-            rc->last_bits = 0;
-            return;
-        }
-        if (rc->total_frames >= 4 && rc->total_frames > 0) {
-            double avg = (double)rc->total_bits / (double)rc->total_frames;
-            if (avg > 0) {
-                double r = (double)rc->last_bits / avg;
-                int qp = rc->base_qp;
-                if (r < 0.5) qp = rc->base_qp - 2;
-                else if (r < 0.8) qp = rc->base_qp - 1;
-                else if (r > 2.0) qp = rc->base_qp + 2;
-                else if (r > 1.3) qp = rc->base_qp + 1;
-                rc->qp = tc_clip(qp, TC_QP_MIN, TC_QP_MAX);
-                return;
-            }
-        }
+        /* Constant QP: no adjustment. (Reactive CRF-lite trialed 2026-09-06
+         * in both directions: easy-fine spent +8% on screen, easy-coarse
+         * cost -0.23dB for -3%; both mediocre diagonal moves. A true
+         * quality-targeted servo is future work — see HILLCLIMB.) */
         rc->qp = rc->base_qp;
         return;
     }
