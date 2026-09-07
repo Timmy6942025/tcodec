@@ -2397,8 +2397,14 @@ static int bf_schedule_poc(int emit_pos)
 
 static int bf_sched_qp_off(int emit_pos)
 {
-    (void)emit_pos;
-    return 0;  /* D4 tunable: B frames at anchor QP */
+    /* Hierarchical QP ladder (TRIAL): anchors at base, mid-B +1, outer-B
+     * +2. B-frames are less referenced (outer never), so they earn coarser
+     * QP; the bits move to anchors. Classic GOP4 pyramid. */
+    if (emit_pos == 0) return 0;
+    int c = (emit_pos - 1) % 4;
+    if (c == 1) return 1;          /* mid-B (poc 4k+2) */
+    if (c == 2 || c == 3) return 2; /* outer-B (poc 4k+1, 4k+3) */
+    return 0;                       /* anchors (poc 4k) */
 }
 
 static void bf_push(tc_encoder_t *enc, const tc_frame_buf_t *frame, int poc)
