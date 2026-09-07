@@ -64,6 +64,7 @@ checked: λ250 costs 0.012 dB/%; JND-1.5× at 0.092 dB/% rejected).
 | 20 | last-pos term mirroring range coder (presence + trunc-unary + EG) | probe -2.3%/-0.02; screen med identical bytes, -0.02dB (neutral) | KEEP — strictly-better model, real-neutral |
 | 21 | CRF-lite reactive QP (CQP ±2 from trailing complexity, keyframes reset) | park nature -0.7/-1.2/-1.8% at flat PSNR+SSIM across QP27/32/37 | REVERTED (see 22): screen showed +8%/+0.18 (wrong direction); flipside -3.0%/-0.23 (0.077 dB/%). Both mediocre diagonals; needs quality servo, not bit-ratio heuristics |
 | 22 | CRF-lite direction flip (easy-coarse) on screen | -3.0%/-0.23dB | REVERTED with 21 — back to fixed CQP; true quality-targeted servo queued |
+| 23 | Quality servo (hold PSNR flat ±0.75dB, ±1 step, ±2 range) | park +0.7/+2.6/+5.2% bytes for +0.10/+0.09/+0.06dB | REVERTED — buys quality at poor rates; variance benefit unproven. Frame-QP heuristics can't beat fixed-QP without lookahead/propagation |
 | — | legacy B vs P on park (v1+--bframes) | +0.35% bytes, -0.04dB — B buys nothing on current engine | v2-B PARKED indefinitely (needs B-RDO maturity first, not just emission) |
 
 ## Validation state
