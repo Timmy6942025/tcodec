@@ -47,6 +47,24 @@ Four failed trials documented in HILLCLIMB sessions 4–8. Needs BOTH:
 skip chroma instead of stale (syntax-neutral change, but alters old
 streams — batch here).
 
+Update 2026-09-07 (5th trial + static-content forensics): even fresh-chroma
+skip loses (+10%/−0.14dB) because zeroing merge's epsilon starves future
+references — frozen-content drift is −3.1dB/30fr (requant walk) vs x264
+perfectly flat (skip exact-copies). Skip fundamentally needs:
+(a) chroma-aware RDO, (b) fresh skip chroma, (c) PROPAGATION awareness
+(don't zero residuals that future frames need as reference).
+
+## 6. Per-CTU/CU QP deltas + mb-tree-lite (unblocks adaptive allocation)
+
+Frame-QP heuristics (bit-ratio ±, quality servo) all move diagonally —
+adaptation without lookahead/propagation can't win. Real win needs
+per-region QP driven by future-reference value (mb-tree-lite). Requires:
+(a) 2-bit QP-delta syntax per leaf/CTU (tool-gated), (b) backward
+propagation estimate (stable-background detector: low residual over N
+frames ⇒ high future value ⇒ finer QP), (c) lookahead for scene complexity
+(bf 8-frame buffer exists). Encoder + both decoders + eff-table plumbing.
+This is the project that unblocks skip (#5) and proper CRF.
+
 ## Compatibility plan
 
 - v2.1 = new payload version OR tool-gated optional syntax per item.
