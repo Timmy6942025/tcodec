@@ -60,6 +60,7 @@ checked: λ250 costs 0.012 dB/%; JND-1.5× at 0.092 dB/% rejected).
 | — | JND high 1.25→1.5× (dual gate) | byte-identical on probe AND screen AND QP22 | REVERT — weight never binds at tested QPs; high bands quantize to zero either way |
 | — | RDOQ trailing-zero (honest dq² vs recounted lb) | byte-identical (absurd-threshold control proves plumbing; deadzone already optimal) | REVERT |
 | — | CfL alpha >>3→>>2 | flat bytes, Cr −0.41dB at qp37 (fixed alpha can't serve ± correlation) | REVERT — needs per-leaf alpha signaling (v2.1 syntax batch) |
+| — | activity masking (variance-weighted RDO, x264-AQ direction) | probe +0.7%/-0.02dB | REVERT without perceptual (SSIM/VMAF) harness to overrule PSNR; SSIM-gated retry needs libvmaf first |
 | 19 | last-pos bit-model term (linear 2..10) | probe -1.5%/+0.06 TRUE WIN; screen med +2.1%/-0.05 | shape miscalibrated — replaced by coder mirror |
 | 20 | last-pos term mirroring range coder (presence + trunc-unary + EG) | probe -2.3%/-0.02; screen med identical bytes, -0.02dB (neutral) | KEEP — strictly-better model, real-neutral |
 | 24 | CfL adaptive sign (neighbour covariance, zero-bit) | probe -0.2% bytes, Cr −0.41→−0.03dB at qp37 (Cb/Cr up elsewhere); screen identical (no correlation, correct no-op) | KEEP — suite 52/52 |
