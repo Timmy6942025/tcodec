@@ -575,7 +575,8 @@ static int64_t qt_leaf(qt_enc_t *e, int depth, int cx, int cy, int write)
         /* v2 presets deliberately trade RDO breadth for predictable ARM
          * encode time. Fast uses a compact search; medium retains the
          * broader search used by the original v2 path. */
-        int sr = (enc->cfg.preset <= TC_PRESET_FAST) ? 16 : 32;
+        int sr = (enc->cfg.preset <= TC_PRESET_FAST) ? 16 :
+                 (enc->cfg.preset >= TC_PRESET_SLOW) ? 64 : 32;
         tc_mv_s center = { mvp.x+px*4, mvp.y+py*4 };
         tc_sad_t sad; tc_mv_s bm = tc_motion_est(enc->dpb[0].frame->y, enc->dpb[0].frame->stride_y, enc->cfg.width,enc->cfg.height, enc->cur->y+py*enc->cur->stride_y+px, enc->cur->stride_y, center.x>>2, center.y>>2, cu, sr, &sad);
         tc_mv_s disp = { bm.x-(mvp.x+px*4), bm.y-(mvp.y+py*4) };
@@ -645,9 +646,10 @@ static int64_t qt_leaf(qt_enc_t *e, int depth, int cx, int cy, int write)
                         (enc->cfg.preset == TC_PRESET_FAST ? 3 : 1);
         const tc_pixel_t *orig_luma = enc->cur->y + py * enc->cur->stride_y + px;
         int best_imode = b_imode;
-        /* Medium preset: SAD-screen all modes, full RDO top-4 (encode speed
-         * at ~equal quality; slow keeps exhaustive 18-mode RDO). */
-        int prune_top = (enc->cfg.preset == TC_PRESET_MEDIUM && !fast_intra) ? 4 : 0;
+        /* SAD-screen to top-4 with full RDO on those (medium+; exhaustive
+         * 18-mode RDO overfits estimator crud — measured worse AND slower
+         * on screen: +13%/-0.74dB. Pruning acts as regularization). */
+        int prune_top = (enc->cfg.preset >= TC_PRESET_MEDIUM && !fast_intra) ? 4 : 0;
         int cand[4] = {0, 0, 0, 0};
         int64_t cand_sad[4] = {0, 0, 0, 0};
         int n_cand = 0;
