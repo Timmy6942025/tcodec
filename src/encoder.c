@@ -28,18 +28,47 @@ void tc_encoder_destroy(tc_encoder_t *enc);
  * This avoids duplicating encode_block for the two paths.
  * ══════════════════════════════════════════════════════════════ */
 
+/* Byte-breakdown diagnostics (TC_BYTEBREAK=1): purely observational
+ * byte accounting at the three write sinks. Zero behavior change when
+ * unset (single cached env check). Buckets: flags (all enc_write_bits),
+ * se (MVDs in v2), residual by plane. Range-coder output lags symbols
+ * by a few bytes of buffering; shares over full frames are exact-ish. */
+static long long brk_flags = 0, brk_se = 0, brk_resid[3] = {0,0,0};
+static void brk_report(void)
+{
+    long long tot = brk_flags + brk_se + brk_resid[0] + brk_resid[1] + brk_resid[2];
+    fprintf(stderr, "BYTEBREAK flags=%lld se(mvd)=%lld resid_luma=%lld resid_chroma=%lld resid_legacy=%lld sum=%lld\n",
+            brk_flags, brk_se, brk_resid[0], brk_resid[1], brk_resid[2], tot);
+}
+static int brk_on = -1;
+static TCODEC_FORCEINLINE int brk_active(void)
+{
+    if (brk_on < 0) {
+        brk_on = (getenv("TC_BYTEBREAK") != 0) ? 1 : 0;
+        if (brk_on) atexit(brk_report);
+    }
+    return brk_on;
+}
+
 static TCODEC_FORCEINLINE void enc_write_bits(
     tc_bs_writer_t *bs, tc_rc_enc_t *rc, tc_rc_ctx_t *ctx,
     int base_ctx, uint32_t val, int nbits)
 {
+    size_t b0 = 0;
+    int brk = brk_active();
+    if (brk && bs) b0 = tc_bs_writer_bytes(bs);
     if (rc) tc_rc_enc_bits(rc, ctx, base_ctx, val, nbits);
     else if (bs) tc_bs_writer_write_bits(bs, val, nbits);
+    if (brk && bs) brk_flags += (long long)tc_bs_writer_bytes(bs) - (long long)b0;
 }
 
 static TCODEC_FORCEINLINE void enc_write_se(
     tc_bs_writer_t *bs, tc_rc_enc_t *rc, tc_rc_ctx_t *ctx,
     int base_ctx, int32_t val)
 {
+    size_t b0 = 0;
+    int brk = brk_active();
+    if (brk && bs) b0 = tc_bs_writer_bytes(bs);
     if (rc) {
         /* Map signed to unsigned, then context-coded EG */
         uint32_t mapped;
@@ -50,15 +79,21 @@ static TCODEC_FORCEINLINE void enc_write_se(
     } else if (bs) {
         tc_bs_writer_write_se(bs, val);
     }
+    if (brk && bs) brk_se += (long long)tc_bs_writer_bytes(bs) - (long long)b0;
 }
 
 static TCODEC_FORCEINLINE void enc_write_coeffs(
     tc_bs_writer_t *bs, tc_tans_enc_t *tans,
     tc_rc_enc_t *rc, tc_rc_ctx_t *rc_ctx,
-    const tc_coeff_t *coeffs, int n, tc_block_size_t dct_size)
+    const tc_coeff_t *coeffs, int n, tc_block_size_t dct_size, int brk_plane)
 {
+    size_t b0 = 0;
+    int brk = brk_active();
+    if (brk && bs) b0 = tc_bs_writer_bytes(bs);
     if (rc) tc_rc_enc_coeffs(rc, rc_ctx, coeffs, n, dct_size);
     else if (tans) tc_tans_enc_coeffs(tans, coeffs, n, dct_size);
+    if (brk && bs && brk_plane >= 0 && brk_plane < 3)
+        brk_resid[brk_plane] += (long long)tc_bs_writer_bytes(bs) - (long long)b0;
     (void)bs;
 }
 
@@ -262,6 +297,36 @@ static void qt_paste_rect(uint8_t *dst, int dst_stride, int x, int y,
                src + (size_t)r * src_stride, (size_t)w);
 }
 
+/* RDOQ-lite (trial 39): keep-vs-zero for |q|==1 levels. End-to-end
+ * coeff→pixel energy is ~unitary (measured 0.91/0.99, see gaincheck),
+ * so coeff-domain RD uses pixel λ directly. Coder-faithful rate:
+ * keep = sig+gt1+sign = 3 bits nominal, 2 adapted (contexts learn
+ * textured positions; 3 over-zeroed in trial 39: -16%/-0.73 screen);
+ * zero below last = 1 sig bit.
+ * Downward scan would capture last-shrink exactly; this trial uses the
+ * conservative fixed-last rule (missed trailing savings only keep more
+ * — safe direction). Encoder-only, zero syntax; runs identically in
+ * decide+write (pure function of quant coeffs + orig + eff + λ).
+ * Returns recount of nonzeros. */
+static int rdoq_level1(tc_coeff_t *q, const tc_coeff_t *corig, int n,
+                       int is8, int qp, int64_t lambda)
+{
+    for (int i = 0; i < n; i++) {
+        int qi = q[i];
+        if (qi != 1 && qi != -1) continue;
+        int band = tc_freq_band(i, is8 ? 8 : 4);
+        int eff = tc_eff_scale(qp, band, 0);
+        int dq = tc_dequant_coeff(qi, eff); /* biased, matches recon */
+        int c = corig[i];
+        int64_t dz = (int64_t)c * c + lambda;
+        int64_t dk = (int64_t)(c - dq) * (c - dq) + 2 * lambda;
+        if (dz < dk) q[i] = 0;
+    }
+    int nz = 0;
+    for (int i = 0; i < n; i++) if (q[i]) nz++;
+    return nz;
+}
+
 static int count_coeff_bits(const tc_coeff_t *c, int n)
 {
     int bits = 0;
@@ -330,11 +395,13 @@ static int64_t qt_code_chroma(qt_enc_t *e, int px, int py, int cu,
                  int eff4_band[4];
                  for (int band = 0; band < 4; band++) eff4_band[band] = tc_eff_scale(qp, band, 0);
                  int nz=0;
+                 { tc_coeff_t qo4[16]; for (int i=0;i<16;i++) qo4[i]=c4[i];
                  for (int i=0;i<16;i++){ int band=tc_freq_band(i,4); c4[i]=(tc_coeff_t)tc_quant_coeff(c4[i],eff4_band[band]); if(c4[i]) nz++; }
+                   nz = rdoq_level1(c4, qo4, 16, 0, qp, e->lambda); /* RDOQ-lite */ }
                  /* Coeffs follow the same entropy path as every other
                   * v2 syntax element (range coder when rc!=NULL, EG
                   * otherwise) so encoder and decoder can never drift. */
-                 if (write) enc_write_coeffs(e->bs,e->tans,e->rc,e->rc_ctx, c4, 16, TC_BLOCK_4x4_ID);
+                 if (write) enc_write_coeffs(e->bs,e->tans,e->rc,e->rc_ctx, c4, 16, TC_BLOCK_4x4_ID, 1);
                  else { int last=-1; for (int i=15;i>=0;i--) if (c4[i]) {last=i;break;} bits += 1 + 2*nz + count_coeff_bits(c4,16) + lastpos_cost(last,16); }
                  tc_coeff_t iq[16];
                  for (int i=0;i<16;i++){ int band=tc_freq_band(i,4); iq[i]=(tc_coeff_t)tc_dequant_coeff(c4[i],eff4_band[band]); }
@@ -373,8 +440,11 @@ static int64_t qt_code_luma(qt_enc_t *e, int px, int py, int cu,
             int eff8_band[4];
             for (int band = 0; band < 4; band++) eff8_band[band] = tc_eff_scale(qp, band, 0);
             int nz=0;
-            for (int i=0;i<64;i++){ int band=tc_freq_band(i,8); tu[i]=(tc_coeff_t)tc_quant_coeff(tu[i],eff8_band[band]); coeffs[(ty*ntu+tx)*64+i]=tu[i]; if(tu[i]) nz++; }
-            if (write) { enc_write_bits(e->bs,e->rc,e->rc_ctx,RC_CTX_DCT_SIZE,TC_BLOCK_8x8_ID,1); enc_write_coeffs(e->bs,e->tans,e->rc,e->rc_ctx,coeffs+(ty*ntu+tx)*64,64,TC_BLOCK_8x8_ID); }
+            { tc_coeff_t qo8[64]; for (int i=0;i<64;i++) qo8[i]=tu[i];
+              for (int i=0;i<64;i++){ int band=tc_freq_band(i,8); tu[i]=(tc_coeff_t)tc_quant_coeff(tu[i],eff8_band[band]); }
+              nz = rdoq_level1(tu, qo8, 64, 1, qp, e->lambda); /* RDOQ-lite */
+              for (int i=0;i<64;i++){ coeffs[(ty*ntu+tx)*64+i]=tu[i]; } }
+            if (write) { enc_write_bits(e->bs,e->rc,e->rc_ctx,RC_CTX_DCT_SIZE,TC_BLOCK_8x8_ID,1); enc_write_coeffs(e->bs,e->tans,e->rc,e->rc_ctx,coeffs+(ty*ntu+tx)*64,64,TC_BLOCK_8x8_ID, 0); }
             else { int last=-1; const tc_coeff_t *cc8=coeffs+(ty*ntu+tx)*64; for (int i=63;i>=0;i--) if (cc8[i]) {last=i;break;} bits += 1 + 2*nz + count_coeff_bits(cc8,64) + lastpos_cost(last,64); }
             tc_coeff_t iq[64];
             for (int i=0;i<64;i++){ int band=tc_freq_band(i,8); iq[i]=(tc_coeff_t)tc_dequant_coeff(coeffs[(ty*ntu+tx)*64+i],eff8_band[band]); }
@@ -396,8 +466,11 @@ static int64_t qt_code_luma(qt_enc_t *e, int px, int py, int cu,
                 int eff4_band[4];
                 for (int band = 0; band < 4; band++) eff4_band[band] = tc_eff_scale(qp, band, 0);
                 int nz=0;
-                for (int i=0;i<16;i++){ int band=tc_freq_band(i,4); c4[i]=(tc_coeff_t)tc_quant_coeff(c4[i],eff4_band[band]); coeffs[base+q*16+i]=c4[i]; if(c4[i]) nz++; }
-                if (write) { enc_write_bits(e->bs,e->rc,e->rc_ctx,RC_CTX_DCT_SIZE,TC_BLOCK_4x4_ID,1); enc_write_coeffs(e->bs,e->tans,e->rc,e->rc_ctx,coeffs+base+q*16,16,TC_BLOCK_4x4_ID); }
+                { tc_coeff_t qo4b[16]; for (int i=0;i<16;i++) qo4b[i]=c4[i];
+                  for (int i=0;i<16;i++){ int band=tc_freq_band(i,4); c4[i]=(tc_coeff_t)tc_quant_coeff(c4[i],eff4_band[band]); }
+                  nz = rdoq_level1(c4, qo4b, 16, 0, qp, e->lambda); /* RDOQ-lite */
+                  for (int i=0;i<16;i++){ coeffs[base+q*16+i]=c4[i]; } }
+                if (write) { enc_write_bits(e->bs,e->rc,e->rc_ctx,RC_CTX_DCT_SIZE,TC_BLOCK_4x4_ID,1); enc_write_coeffs(e->bs,e->tans,e->rc,e->rc_ctx,coeffs+base+q*16,16,TC_BLOCK_4x4_ID, 0); }
                 else { int last=-1; const tc_coeff_t *cc4=coeffs+base+q*16; for (int i=15;i>=0;i--) if (cc4[i]) {last=i;break;} bits += 1 + 2*nz + count_coeff_bits(cc4,16) + lastpos_cost(last,16); }
                 tc_coeff_t iq4[16];
                 for (int i=0;i<16;i++){ int band=tc_freq_band(i,4); iq4[i]=(tc_coeff_t)tc_dequant_coeff(c4[i],eff4_band[band]); }
@@ -1728,11 +1801,11 @@ static void encode_block(tc_encoder_t *enc, tc_ctu_info_t *ctu,
                             sub[r * 4 + c] = dct_out[(sy * 4 + r) * 8 + (sx * 4 + c)];
                         }
                     }
-                    enc_write_coeffs(bs, tans, rc, rc_ctx, sub, 16, TC_BLOCK_4x4_ID);
+                    enc_write_coeffs(bs, tans, rc, rc_ctx, sub, 16, TC_BLOCK_4x4_ID, 2);
                 }
             }
         } else {
-            enc_write_coeffs(bs, tans, rc, rc_ctx, dct_out, n_coeff, TC_BLOCK_8x8_ID);
+            enc_write_coeffs(bs, tans, rc, rc_ctx, dct_out, n_coeff, TC_BLOCK_8x8_ID, 2);
         }
 
         /* ── Reconstruct (dequantize + IDCT + add prediction) ── */
@@ -1865,7 +1938,7 @@ static void encode_block(tc_encoder_t *enc, tc_ctu_info_t *ctu,
         /* DCT + quantize + encode (residual-mode) */
         tc_fwht4x4(c_res, 4, c_dct);
         tc_quantize(c_dct, 16, tc_clip(qp + 1, 0, 63), 0);
-        enc_write_coeffs(bs, tans, rc, rc_ctx, c_dct, 16, TC_BLOCK_4x4_ID);
+        enc_write_coeffs(bs, tans, rc, rc_ctx, c_dct, 16, TC_BLOCK_4x4_ID, 2);
 
         /* Reconstruct chroma */
         tc_dequantize(c_dct, 16, tc_clip(qp + 1, 0, 63), 0);

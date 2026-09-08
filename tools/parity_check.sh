@@ -157,4 +157,18 @@ for mode in "" "--entropy"; do
   cmp -s /tmp/parity_neon.tcv /tmp/parity_scalar.tcv || { echo "PARITY FAIL: mode='$mode' bitstreams differ"; exit 1; }
   echo "OK: e2e bitstream identical (mode='$mode')"
 done
+
+# 3) recon consistency: decoder output must equal encoder recon (matched
+# versions). Catches encoder/decoder replay drift that bit-compare and
+# crash-oriented tests cannot see (scalar/NEON parity is blind to it too).
+# Covers v2 quadtree path (previously unchecked end-to-end) + legacy v1.
+for mode in "--v2 --entropy" ""; do
+  ./build/tcenc -w 128 -h 224 -q 30 -n 6 $mode -o /tmp/parity_rec.tcv /tmp/parity_src.yuv 2>/tmp/parity_enc.log
+  enc_psnr=$(grep -o "Avg PSNR: *[0-9.]*" /tmp/parity_enc.log | grep -o "[0-9.]*$")
+  ./build/tcdec --check /tmp/parity_src.yuv /tmp/parity_rec.tcv /tmp/parity_rec.yuv 2>/tmp/parity_dec.log
+  dec_psnr=$(grep -o "Avg PSNR: *[0-9.]*" /tmp/parity_dec.log | grep -o "[0-9.]*$")
+  python3 -c "import sys; e=float('$enc_psnr'); d=float('$dec_psnr'); sys.exit(0 if abs(e-d)<=0.03 else 1)" \
+    || { echo "PARITY FAIL: recon mismatch mode='$mode' enc=$enc_psnr dec=$dec_psnr"; exit 1; }
+  echo "OK: recon consistent mode='$mode' (enc=$enc_psnr dec=$dec_psnr)"
+done
 echo "SCALAR/NEON PARITY: ALL OK"
