@@ -193,10 +193,43 @@ Dolly shot over fine detail (leaves/bark); stresses prediction granularity.
 | x264vf | 32 | 34,083 | 31.24 | 0.8010 | 19.2 | 47.8 |
 | x264vf | 37 | 18,262 | 29.32 | 0.7567 | 18.4 | 35.4 |
 
-Reading: ~10× the bits at matched quality — worst class yet. Diagnosis:
-v2 min prediction unit is 8×8 (4×4 transforms exist inside, but prediction
-is per-8×8 minimum); x264 predicts down to 4×4. Fine detail needs finer
-prediction granularity (v2.1: depth+1 quadtree to 4×4 CUs, 85→341 nodes).
+## Fine-detail checkpoint (re-measured 2026-09-08 — SUPERSEDES 09-07 row)
+
+Same harness. x264vf rows reproduce byte-identically (deterministic
+reference); tcodecv2 now carries trials 32+33 (09-07 row was pre-deblock).
+
+| Codec | QP | Bytes (30fr) | PSNR-Y | SSIM |
+|---|---:|---:|---:|---:|
+| tcodecv2 | 27 | 177,428 | 33.04 | 0.8319 |
+| tcodecv2 | 32 | 49,337 | 30.90 | 0.7755 |
+| tcodecv2 | 37 | 17,067 | 28.85 | 0.7315 |
+| x264vf | 27 | 77,871 | 33.48 | 0.8521 |
+| x264vf | 32 | 34,083 | 31.24 | 0.8010 |
+| x264vf | 37 | 18,262 | 29.32 | 0.7567 |
+
+Reading: **BD-rate +76%** (was ~10×). The deblock fix closed most of
+the old gap by itself (09-07 tc qp27: 514KB@29.82 → now 177KB@33.04).
+Inter is 5.6× smaller than all-intra here (9.15 vs 1.64KB/fr @qp32) —
+motion works; the gap is inter-residual quality, not granularity (see
+below). Second-best nature class now, not the worst.
+
+### x264 ablation battery (tree+park, CRF32, what actually matters)
+
+Each row disables one x264 tool (identical quality throughout, so byte
+deltas = that tool's value on this content):
+
+| Ablation | tree bytes | Δ | park bytes | Δ |
+|---|---|---|---|---|
+| base (p8x8) | 33,490 | — | 196,930 | — |
+| partitions none→all | 32,945→33,761 | ~0 (+0.03dB) | — | ~0 |
+| CABAC→CAVLC | 38,006 | **+13.5%** | 219,484 | **+11.4%** |
+| no 8×8DCT / dia ME / ref1 / no-mixedrefs / no-deblock | | all ≈0–0.8% | | all ≈0–0.2% |
+
+Only entropy matters (+11–13.5%); partitions, transform size, refs,
+deblock, ME precision all ≈0 on nature at veryfast. x264's lead is
+decision QUALITY accumulation (RDO/RDOQ/CABAC), not tool checklist.
+Sub-4×4 verdict: DO NOT BUILD — see `docs/SUB4_DESIGN.md` §8 (design
+kept current if a partition-shaped gap ever appears).
 
 ## B-frame dividend (2026-09-08, BD-rate vs P-only, current code both)
 
