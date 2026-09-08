@@ -101,6 +101,12 @@ flatter (skip-shaped; v2 skip remains parked), but the in-loop filter is
 no longer the binding constraint on screen. Full suite 54/54 incl.
 300-frame soak; scalar/NEON parity ALL OK.
 
+### RDOQ-lite update (hill-climb 23)
+
+tcodecv2 qp32: **1,913B @44.25** vs 2,032B @44.32 above (same clip,
+decode-truth): −5.9%/−0.07dB. First residual-side win; parity +
+recon-consistency ALL OK.
+
 Reading: at matched rate (~2.4–2.8KB) tcodecv2 trails x264vf by ~9dB;
 at matched quality the bitrate ratio is several-to-one against tcodecv2.
 The gap narrowed vs the pre-climb era (fixed RDO alone took screen_ui
@@ -158,6 +164,18 @@ Frozen-content drift, formerly −3.1dB/30fr and the blocker for skip work,
 re-measures at **+0.30dB/30fr (no drift)** — the broken deblock was the
 drift source. Skip-6 (fresh-chroma skip, no propagation machinery needed)
 is next.
+
+### RDOQ-lite update (hill-climb 23 — SUPERSEDES qp32 point above)
+
+| Codec | QP | Bytes (30fr) | PSNR-Y | SSIM |
+|---|---:|---:|---:|---:|
+| tcodecv2 | 32 | 443,387 | 27.05 | 0.8136 |
+
+−3.2%/−0.06dB vs the deblock row (decode-truth both). Byte breakdown
+(TC_BYTEBREAK, park 10fr qp32): residual-luma **86.2%**, residual-chroma
+4.3%, mode/split/DCT flags 6.6%, MVD 2.8%, frame headers ~0.1%. The
+remaining gap is overwhelmingly luma-residual magnitude (prediction
+quality feeding it + quant/RDOQ + coeff entropy), not signaling.
 
 ## Grain checkpoint (2026-09-06, ducks_take_off 720p50, 30 frames)
 

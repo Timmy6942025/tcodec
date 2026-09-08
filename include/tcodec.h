@@ -106,6 +106,9 @@ void tc_decoder_get_profile(tc_decoder_t *dec,
                             uint64_t *transform_ns, uint64_t *motion_ns,
                             uint64_t *chroma_ns, uint64_t *deblock_ns,
                             uint64_t *copy_ns);
+/* Worker-thread count for v2 wavefront + WPP pools (default 4).
+ * Recreates the pools; call before decoding (not concurrently). */
+void tc_decoder_set_threads(tc_decoder_t *dec, int nthreads);
 
 /* ── Utility functions ───────────────────────────────────────── */
 

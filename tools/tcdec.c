@@ -33,7 +33,8 @@ static void print_usage(const char *prog)
         "  -n N      Decode N frames (0=all)\n"
         "  -v        Verbose\n"
         "  --profile Print component timing totals\n"
-        "  --check   Compute PSNR against reference\n",
+        "  --check   Compute PSNR against reference\n"
+        "  -t N      Worker threads for v2 wavefront (default 4, 1=serial-equivalent)\n",
         TCODEC_VERSION_STRING, prog);
 }
 
@@ -72,6 +73,7 @@ int main(int argc, char **argv)
     int width = 0, height = 0;
     int is_rgb = 0, max_frames = 0, verbose = 0, profile = 0, check_psnr = 0;
     const char *ref_path = NULL;
+    int nthreads = 4;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-w") == 0 && i + 1 < argc) {
@@ -89,6 +91,10 @@ int main(int argc, char **argv)
         } else if (strcmp(argv[i], "--check") == 0 && i + 1 < argc) {
             check_psnr = 1;
             ref_path = argv[++i];
+        } else if (strcmp(argv[i], "-t") == 0 && i + 1 < argc) {
+            nthreads = atoi(argv[++i]);
+            if (nthreads < 1) nthreads = 1;
+            if (nthreads > 16) nthreads = 16;
         } else if (argv[i][0] != '-') {
             if (!input_path) input_path = argv[i];
             else output_path = argv[i];
@@ -112,6 +118,7 @@ int main(int argc, char **argv)
     }
     tc_decoder_set_profile(dec, profile);
     tc_decoder_reset_profile(dec);
+    tc_decoder_set_threads(dec, nthreads);
 
     /* Open files */
     FILE *fin = fopen(input_path, "rb");

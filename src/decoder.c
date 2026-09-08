@@ -2022,6 +2022,23 @@ tc_decoder_t *tc_decoder_create(int32_t width, int32_t height)
     return dec;
 }
 
+void tc_decoder_set_threads(tc_decoder_t *dec, int nthreads)
+{
+    if (!dec) return;
+    if (nthreads < 1) nthreads = 1;
+    if (nthreads > 16) nthreads = 16;
+#if !defined(TCODEC_NO_THREADS)
+    if (nthreads == dec->num_threads) return;
+    tc_threadpool_destroy(dec->pool);
+    v2_pool_destroy((v2_pool_t *)dec->v2_pool);
+    dec->num_threads = nthreads;
+    dec->pool = tc_threadpool_create(nthreads);
+    dec->v2_pool = v2_pool_create(nthreads);
+#else
+    (void)nthreads;
+#endif
+}
+
 void tc_decoder_destroy(tc_decoder_t *dec)
 {
     if (!dec) return;
