@@ -260,6 +260,22 @@ First double-digit structural win of the program (cf. legacy B ≈ parity:
 B needs RDO maturity, not just emission). B encode costs ~+27% time on
 water (extra ME); decode −16% (more refs). B QP ladder (+1/+2) included.
 
+### ⚠️ SUPERSEDED 2026-09-08 (post-deblock + RDOQ re-measure — B now neutral-to-harmful)
+
+Same harness, current code, full 3QP B-curves:
+
+| Content | B qp27 | B qp32 | B qp37 | P same-QP | Verdict |
+|---|---|---|---|---|---|
+| park | 949KB@29.71 | 382KB@26.53 | 123KB@23.99 | 1084KB@30.48 / 443KB@27.05 / 159KB@24.36 | BD −0.9% (neutral) |
+| screen | 2978B@49.06 | 2198B@44.29 | 1729B@37.79 | 2991B@49.43 / 2032B@44.32 / 1192B@37.95 | +8%/+45% bytes (HARMFUL) |
+
+(P qp27/37 rows pre-RDOQ; qp32 current. Direction robust to the 3% RDOQ shift.)
+Theory: with broken deblock, B's two-ref averaging DENOISED dirty
+references (big win); with clean refs + 4-ref P-choice, B adds only
+overhead (ref_sel+bi bits, +1/+2 ladder tax, mismatched bwd refs on
+scroll). Benchmark tables stay P-only (our better config). B needs
+ladder+RDO retune (project, not trial) — do NOT default `-b` on.
+
 ## Static-animation checkpoint (2026-09-07, sita 720p24, 30 frames)
 
 First 30 frames are pixel-identical (frozen leader). x264 skips everything

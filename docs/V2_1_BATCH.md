@@ -63,6 +63,15 @@ perfectly flat (skip exact-copies). Skip fundamentally needs:
 (a) chroma-aware RDO, (b) fresh skip chroma, (c) PROPAGATION awareness
 (don't zero residuals that future frames need as reference).
 
+Update 2026-09-08 (6th trial, HILLCLIMB 34 — drift premise dead): the
+deblock rewrite eliminated frozen drift (+0.30dB/30fr), but skip-6
+(fresh chroma + chroma-honest RDO + ρ=1 guard + tool bit) still lost:
+ρ=0 −30.7%/−5.06dB, ρ=1 −22.6%/−3.35dB, near-exact gate never fires.
+Measured cause: mvp-MC SSE averages 550/cu² even on FROZEN content
+(MVP divergence — zero-MVD skip predicts poorly), and lb crud inflates
+alternatives. Skip needs (d) decent zero-MVD prediction (better MVP)
+on top of (a–c). All reverted; 7th failure total. NOT next.
+
 ## 6. Per-CTU QP deltas + mb-tree-lite (unblocks adaptive allocation)
 
 Frame-QP heuristics (bit-ratio ±, quality servo) all move diagonally —
