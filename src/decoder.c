@@ -995,7 +995,8 @@ static void qt_dec_leaf(qt_dec_t *d, int depth, int cx, int cy)
             if (d->frame_type == TC_FRAME_BIDIR) {
             const tc_frame_buf_t *rf = dpb_find_poc_lt(dec->dpb, d->poc);
             const tc_frame_buf_t *rb = dpb_find_poc_gt(dec->dpb, d->poc);
-            int do_avg = bi || merge || skip;
+            int do_avg = bi || skip; /* legacy merge carries bi=1 (avg);
+                                       * new single merge bi=0 (ref_sel) */
             if (do_avg && rf && rb) {
                 tc_pixel_t *t1 = dec->v2_bipred_a;
                 tc_pixel_t *t2 = dec->v2_bipred_b;
@@ -1031,9 +1032,9 @@ static void qt_dec_leaf(qt_dec_t *d, int depth, int cx, int cy)
             uint64_t chroma_start = dec->profile_enabled ? dec_now_ns() : 0;
             /* Inter CUs never transmit a chroma-intra flag: chroma is
              * always collocated MC from the selected reference(s) with the
-             * luma MV. BIDIR mirrors luma: bi/merge average fwd+bwd (poc),
-             * explicit single uses its ref. */
-            if (d->frame_type == TC_FRAME_BIDIR && (bi || merge)) {
+             * luma MV. BIDIR mirrors luma: bi averages fwd+bwd (poc);
+             * single (incl. new merge+bi=0) uses its ref. */
+            if (d->frame_type == TC_FRAME_BIDIR && bi) {
                 const tc_frame_buf_t *cf = dpb_find_poc_lt(dec->dpb, d->poc);
                 const tc_frame_buf_t *cbw = dpb_find_poc_gt(dec->dpb, d->poc);
                 if (cf && cbw) {
@@ -1600,7 +1601,8 @@ static void v2_recon_leaf(tc_decoder_t *dec, const v2_cmd_ctu_t *cmd,
              * (mirrored MV); explicit single uses its ref. */
             const tc_frame_buf_t *rf = dpb_find_poc_lt(dec->dpb, poc);
             const tc_frame_buf_t *rb = dpb_find_poc_gt(dec->dpb, poc);
-            int do_avg = n->bi || n->merge || n->skip;
+            int do_avg = n->bi || n->skip; /* legacy merge bi=1 (avg);
+                                             * single merge bi=0 (ref_sel) */
             if (do_avg && rf && rb) {
                 tc_inter_predict_decoder(rf->y, rf->stride_y, rf->width, rf->height, mv, bip_a, cu, cu);
                 tc_mv_s mv2 = { -mv.x, -mv.y };
@@ -1650,9 +1652,9 @@ static void v2_recon_leaf(tc_decoder_t *dec, const v2_cmd_ctu_t *cmd,
             }
         }
     } else {
-        /* Mirror serial path: bi/merge average poc-ordered chroma;
-         * explicit single uses its ref. */
-        if (frame_type == TC_FRAME_BIDIR && (n->bi || n->merge)) {
+        /* Mirror serial path: bi averages poc-ordered chroma;
+         * single (incl. new merge+bi=0) uses its ref. */
+        if (frame_type == TC_FRAME_BIDIR && n->bi) {
             const tc_frame_buf_t *cf = dpb_find_poc_lt(dec->dpb, poc);
             const tc_frame_buf_t *cbw = dpb_find_poc_gt(dec->dpb, poc);
             tc_mv_s cmv = { n->mv_x, n->mv_y };

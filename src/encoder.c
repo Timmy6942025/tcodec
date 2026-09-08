@@ -586,12 +586,13 @@ static int64_t qt_leaf(qt_enc_t *e, int depth, int cx, int cy, int write)
             if (nd->merge || nd->skip) { mv=mvp; mv.x+=px*4; mv.y+=py*4; }
             if (!nd->skip) {
                 if (e->frame_type==TC_FRAME_BIDIR) {
-                    /* Mirror decoder serial path exactly: bi/merge average
-                     * poc-ordered refs (mirrored MV); explicit single uses
-                     * its ref. Merge/skip carry no MVD (mv already mvp). */
+                    /* Mirror decoder serial path exactly: bi averages
+                     * poc-ordered refs (mirrored MV); merge+bi=1 also
+                     * averages (legacy); merge+bi=0 and explicit single
+                     * use ref_sel's ref. Merge/skip carry no MVD. */
                     const tc_frame_buf_t *rf = dpb_find_poc_lt(enc->dpb, e->poc);
                     const tc_frame_buf_t *rb = dpb_find_poc_gt(enc->dpb, e->poc);
-                    if (nd->bi || nd->merge) {
+                    if (nd->bi) {
                         if (rf && rb) {
                             tc_pixel_t t1[64*64],t2[64*64];
                             tc_inter_predict(rf->y,rf->stride_y,enc->cfg.width,enc->cfg.height,mv,t1,cu,cu);
@@ -622,8 +623,10 @@ static int64_t qt_leaf(qt_enc_t *e, int depth, int cx, int cy, int write)
                 if (nd->ch_intra) {
                     tc_intra_chroma_dc(enc->recon->cb,enc->recon->stride_c,px/2,py/2,cu/2,cbuf[0],cu/2);
                     tc_intra_chroma_dc(enc->recon->cr,enc->recon->stride_c,px/2,py/2,cu/2,cbuf[1],cu/2);
-                } else if (e->frame_type == TC_FRAME_BIDIR && (nd->bi || nd->merge)) {
-                    /* Mirror decoder: average poc-ordered chroma. */
+                } else if (e->frame_type == TC_FRAME_BIDIR && nd->bi) {
+                    /* Mirror decoder: average poc-ordered chroma (bi=1;
+                     * legacy merge carries bi=1). Single (incl. new
+                     * merge+bi=0) uses ref_sel below. */
                     const tc_frame_buf_t *cf = dpb_find_poc_lt(enc->dpb, e->poc);
                     const tc_frame_buf_t *cbw = dpb_find_poc_gt(enc->dpb, e->poc);
                     if (cf && cbw) {
@@ -795,6 +798,32 @@ static int64_t qt_leaf(qt_enc_t *e, int depth, int cx, int cy, int write)
             int bits_m = 1+1+1+1+1+1+lbm;
             int64_t costm = dlm + e->lambda*bits_m;
             if (costm<best_cost) { best_cost=costm;b_intra=0;b_merge=1;b_skip=0;b_mvdx=0;b_mvdy=0; b_dct=TC_BLOCK_8x8_ID;b_ch=0;b_cmode=0;b_imode=1;b_refsel=0;b_bi=1; }
+        }
+        /* Single-ref merge candidates (mvp, zero MVD, merge headers):
+         * average-merge ghosts under uniform motion (scroll) since fwd
+         * and bwd refs straddle the motion; single merge ≈ P-merge.
+         * merge+bi=0 selects single ref via ref_sel; merge+bi=1 stays
+         * average (every legacy merge leaf carries bi=1, so old streams
+         * decode identically). RDO picks per leaf. */
+        if (enc->cfg.preset >= TC_PRESET_MEDIUM && !fast_mode) {
+            if (fwdf) {
+                tc_mv_s mf={mvp.x+px*4,mvp.y+py*4};
+                tc_inter_predict(fwdf->y,fwdf->stride_y, enc->cfg.width,enc->cfg.height,mf,pred,cu,cu);
+                int lbf = 0;
+                int64_t dlf = qt_code_luma(e,px,py,cu,TC_BLOCK_8x8_ID,pred,&lbf,0);
+                int bits_fm = 1+1+1+1+1+1+lbf;
+                int64_t costfm = dlf + e->lambda*bits_fm;
+                if (costfm<best_cost) { best_cost=costfm;b_intra=0;b_merge=1;b_skip=0;b_mvdx=0;b_mvdy=0; b_dct=TC_BLOCK_8x8_ID;b_ch=0;b_cmode=0;b_imode=1;b_refsel=0;b_bi=0; }
+            }
+            if (bwdf) {
+                tc_mv_s mb={mvp.x+px*4,mvp.y+py*4};
+                tc_inter_predict(bwdf->y,bwdf->stride_y, enc->cfg.width,enc->cfg.height,mb,pred,cu,cu);
+                int lbb = 0;
+                int64_t dlb = qt_code_luma(e,px,py,cu,TC_BLOCK_8x8_ID,pred,&lbb,0);
+                int bits_bm = 1+1+1+1+1+1+lbb;
+                int64_t costbm = dlb + e->lambda*bits_bm;
+                if (costbm<best_cost) { best_cost=costbm;b_intra=0;b_merge=1;b_skip=0;b_mvdx=0;b_mvdy=0; b_dct=TC_BLOCK_8x8_ID;b_ch=0;b_cmode=0;b_imode=1;b_refsel=1;b_bi=0; }
+            }
         }
     } else if (e->frame_type != TC_FRAME_KEY) {
         tc_mv_s mvp = qt_mvp(e,cx,cy,e->grid);

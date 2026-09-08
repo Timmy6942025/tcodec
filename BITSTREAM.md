@@ -638,8 +638,11 @@ plain v2 P frames). B-frames (`--bframes`, GOP4 reorder): explicit leaves
 carry `ref_sel` (0 = forward max-POC-below, 1 = backward min-POC-above)
 plus a `bi` bit; `bi` = 1 averages forward prediction with the mirrored
 backward prediction (luma and chroma, single shared MVD), `bi` = 0 uses
-the selected single ref. Merge/skip on B-frames use the averaged
-prediction with the median predictor. The MV predictor is the median of the
+the selected single ref. Skip on B-frames uses the averaged prediction
+with the median predictor. Merge with `bi` = 1 averages (all legacy
+merge leaves carry `bi` = 1, so old streams decode identically);
+merge with `bi` = 0 is single-ref merge (ref_sel picks fwd/bwd, zero MVD,
+merge headers) for uniform motion where averaging ghosts. The MV predictor is the median of the
 available left, above, and above-right 8×8 MV-grid cells; intra cells are
 unavailable. Merge and skip use the predictor directly; explicit inter adds
 MVD to it.

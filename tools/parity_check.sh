@@ -161,8 +161,9 @@ done
 # 3) recon consistency: decoder output must equal encoder recon (matched
 # versions). Catches encoder/decoder replay drift that bit-compare and
 # crash-oriented tests cannot see (scalar/NEON parity is blind to it too).
-# Covers v2 quadtree path (previously unchecked end-to-end) + legacy v1.
-for mode in "--v2 --entropy" ""; do
+# Covers v2 quadtree path (previously unchecked end-to-end) + legacy v1
+# + B-frame drain path (tcdec --check used to skip tail frames there).
+for mode in "--v2 --entropy" "--v2 --entropy -b" ""; do
   ./build/tcenc -w 128 -h 224 -q 30 -n 6 $mode -o /tmp/parity_rec.tcv /tmp/parity_src.yuv 2>/tmp/parity_enc.log
   enc_psnr=$(grep -o "Avg PSNR: *[0-9.]*" /tmp/parity_enc.log | grep -o "[0-9.]*$")
   ./build/tcdec --check /tmp/parity_src.yuv /tmp/parity_rec.tcv /tmp/parity_rec.yuv 2>/tmp/parity_dec.log

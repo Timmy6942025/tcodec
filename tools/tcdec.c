@@ -170,6 +170,7 @@ int main(int argc, char **argv)
     int frame_count = 0;
     int decode_failed = 0;
     double total_psnr = 0.0;
+    int psnr_count = 0;
     double start = tc_wall_seconds();
 
     while (!feof(fin)) {
@@ -244,6 +245,7 @@ int main(int argc, char **argv)
             } else {
                 double psnr = tc_psnr(ref_y, dec_w, y, stride_y, dec_w, dec_h);
                 total_psnr += psnr;
+                psnr_count++;
                 if (verbose) {
                     fprintf(stderr, "Frame %4d: PSNR = %.2f dB\n",
                             frame_count, psnr);
@@ -279,6 +281,22 @@ int main(int argc, char **argv)
         }
         tc_write_yuv(fout, y, stride_y, cb, stride_cb, cr, stride_cr,
                      dec_w, dec_h, is_rgb, rgb_buf);
+        if (check_psnr && fref) {
+            /* Same sequential compare as the main loop: drained frames
+             * are display-ordered, matching the reference file order.
+             * (Previously missing here: B-stream averages silently
+             * dropped tail frames.) */
+            size_t y_size = (size_t)(dec_w * dec_h);
+            size_t c_size = (size_t)((dec_w / 2) * (dec_h / 2));
+            if (fread(ref_y,  1, y_size,  fref) != y_size ||
+                fread(ref_cb, 1, c_size, fref) != c_size ||
+                fread(ref_cr, 1, c_size, fref) != c_size) {
+                check_psnr = 0;  /* Reference exhausted */
+            } else {
+                total_psnr += tc_psnr(ref_y, dec_w, y, stride_y, dec_w, dec_h);
+                psnr_count++;
+            }
+        }
         frame_count++;
         if (verbose) fprintf(stderr, "  drain frame %d\n", frame_count);
         if (max_frames > 0 && frame_count >= max_frames) break;
@@ -308,8 +326,8 @@ int main(int argc, char **argv)
                 (unsigned long long)chroma_ns, (unsigned long long)deblock_ns,
                 (unsigned long long)copy_ns);
     }
-    if (check_psnr && frame_count > 0) {
-        fprintf(stderr, "  Avg PSNR: %.2f dB\n", total_psnr / frame_count);
+    if (check_psnr && psnr_count > 0) {
+        fprintf(stderr, "  Avg PSNR: %.2f dB\n", total_psnr / psnr_count);
     }
 
     /* Cleanup */
