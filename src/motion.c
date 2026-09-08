@@ -28,6 +28,8 @@
 
 #include "tcodec_common.h"
 #include <string.h>
+#include <stdio.h>
+#include <stdlib.h>
 
 /* ── SAD computation ─────────────────────────────────────────── */
 
@@ -623,6 +625,10 @@ void tc_inter_predict_decoder(const tc_pixel_t *ref, int ref_stride,
                               tc_pixel_t *TCODEC_RESTRICT dst, int dst_stride,
                               int blk_size)
 {
+    static long disp_n = 0, disp_s = 0, disp_px = 0;
+    static int disp_on = -1;
+    if (disp_on < 0) disp_on = (getenv("TC_DISPATCH") != 0);
+    int use_neon = 0;
 #if TCODEC_NEON
     const int fx = mv.x >> 2, fy = mv.y >> 2;
     /* Diagonal phases use the right-hand vertical anchor at x+1.  Its
@@ -631,13 +637,20 @@ void tc_inter_predict_decoder(const tc_pixel_t *ref, int ref_stride,
     if (fx >= 2 && fy >= 2 && fx + blk_size + 3 < ref_w &&
         fy + blk_size + 2 < ref_h && blk_size >= 8 &&
         (blk_size & 7) == 0) {
+        use_neon = 1;
         tc_inter_predict_neon(ref, ref_stride, ref_w, ref_h, mv,
                               dst, dst_stride, blk_size);
-        return;
-    }
+    } else
 #endif
     tc_inter_predict(ref, ref_stride, ref_w, ref_h, mv, dst, dst_stride,
                      blk_size);
+    if (disp_on) {
+        if (use_neon) { disp_n++; disp_px += blk_size * blk_size; }
+        else disp_s++;
+        if ((disp_n + disp_s) % 2000 == 0)
+            fprintf(stderr, "DISPATCH luma neon_calls=%ld scalar_calls=%ld neon_px=%ld\n",
+                    disp_n, disp_s, disp_px);
+    }
 }
 
 void tc_inter_predict_chroma_decoder(const tc_pixel_t *ref, int ref_stride,

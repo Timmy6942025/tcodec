@@ -1770,6 +1770,8 @@ typedef struct {
     int remaining;
     pthread_mutex_t mutex;
     pthread_cond_t cond;
+    /* WAVESTAT (TC_WAVESTAT=1): wait-vs-work split per frame. */
+    unsigned long long wait_ns, work_ns;
 } v2_wave_ctx_t;
 
 static void v2_ready_push(v2_wave_ctx_t *w, int task)
@@ -1780,11 +1782,14 @@ static void v2_ready_push(v2_wave_ctx_t *w, int task)
 static void *v2_wave_worker(void *opaque)
 {
     v2_wave_ctx_t *w = (v2_wave_ctx_t *)opaque;
+    int wstat = (getenv("TC_WAVESTAT") != 0);
     for (;;) {
         int task;
         pthread_mutex_lock(&w->mutex);
+        uint64_t t0 = wstat ? dec_now_ns() : 0;
         while (w->ready_head == w->ready_tail && w->remaining != 0)
             pthread_cond_wait(&w->cond, &w->mutex);
+        if (wstat) w->wait_ns += dec_now_ns() - t0;
         if (w->remaining == 0) {
             pthread_mutex_unlock(&w->mutex);
             return NULL;
@@ -1792,8 +1797,15 @@ static void *v2_wave_worker(void *opaque)
         task = w->ready[w->ready_head++];
         pthread_mutex_unlock(&w->mutex);
 
+        uint64_t r0 = wstat ? dec_now_ns() : 0;
         v2_recon_ctu(w->dec, &w->cmds[task], task / w->cols,
                      task % w->cols, w->qp, w->frame_type, w->poc);
+        if (wstat) {
+            uint64_t r1 = dec_now_ns();
+            pthread_mutex_lock(&w->mutex);
+            w->work_ns += r1 - r0;
+            pthread_mutex_unlock(&w->mutex);
+        }
 
         pthread_mutex_lock(&w->mutex);
         w->remaining--;
@@ -1969,6 +1981,9 @@ static int v2_decode_frame_parallel(tc_decoder_t *dec, int qp,
     } else {
         v2_pool_submit(pool, &w);
     }
+    if (getenv("TC_WAVESTAT"))
+        fprintf(stderr, "WAVESTAT work=%.1fms wait=%.1fms tasks=%d\n",
+                w.work_ns / 1e6, w.wait_ns / 1e6, rows * cols);
     pthread_mutex_destroy(&w.mutex); pthread_cond_destroy(&w.cond);
     free(w.deps); free(w.ready);
 #endif
