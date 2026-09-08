@@ -206,4 +206,5 @@ bit-exact test_v2_bframes. No new syntax (flags existed, unused for v2).
 | probe 3QP | ≈−19% bytes, −0.0..−0.9dB (diagonal; qp32 dip flagged) |
 | screen_ui med QP32 | 3.39KB@42.26 → 2.79KB@42.49 (−17.7% AND +0.23dB TRUE WIN) |
 | park nature QP32 | 581KB@25.55 → 468KB@25.24 (−19.6%, −0.31dB/−0.007 SSIM; +27% enc time) |
+| BD-rate B-vs-P | park −10.12%, screen −16.14% (3-QP curves, current code both) |
 | test_v2_bframes + suite | PASS, 53/53 |

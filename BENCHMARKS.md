@@ -151,6 +151,17 @@ v2 min prediction unit is 8×8 (4×4 transforms exist inside, but prediction
 is per-8×8 minimum); x264 predicts down to 4×4. Fine detail needs finer
 prediction granularity (v2.1: depth+1 quadtree to 4×4 CUs, 85→341 nodes).
 
+## B-frame dividend (2026-09-08, BD-rate vs P-only, current code both)
+
+| Content | BD-rate B-vs-P | Basis |
+|---|---|---|
+| park nature 720p50 30fr | −10.12% | 3-QP curves, medium, entropy+profile1 |
+| screen_ui 720p 10fr | −16.14% | 3-QP curves, medium, entropy+profile1 |
+
+First double-digit structural win of the program (cf. legacy B ≈ parity:
+B needs RDO maturity, not just emission). B encode costs ~+27% time on
+water (extra ME); decode −16% (more refs). B QP ladder (+1/+2) included.
+
 ## Static-animation checkpoint (2026-09-07, sita 720p24, 30 frames)
 
 First 30 frames are pixel-identical (frozen leader). x264 skips everything
