@@ -216,3 +216,4 @@ bit-exact test_v2_bframes. No new syntax (flags existed, unused for v2).
 | park nature QP32 | 581KB@25.55 → 468KB@25.24 (−19.6%, −0.31dB/−0.007 SSIM; +27% enc time) |
 | BD-rate B-vs-P | park −10.12%, screen −16.14% (3-QP curves, current code both) |
 | test_v2_bframes + suite | PASS, 53/53 |
+| deblock trials 32+33 + full suite | probe −30%/+4.5dB cumul; screen −42%/+2.0dB @QP32; park −22%/+1.6dB @QP32; FULL 54/54 incl. 300fr soak |

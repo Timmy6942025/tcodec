@@ -79,6 +79,28 @@ Current-code note: the tcodecv2 row already includes sessions 1–10
 vs the first scoreboard run it improved −8/−18/−11% bytes at
 +0.16/+0.61/+0.29dB across QP27/32/37.
 
+## Deblock-fix checkpoint (2026-09-08, trials 32+33 — SUPERSEDES screen row above)
+
+Same harness/settings. tcodecv2 now carries the flat-identity weak kernel
+(trial 32) and HEVC-direction strength mapping (trial 33); x264 rows are
+unchanged (reference encoder, stable across runs).
+
+| Codec | QP | Bytes (10fr) | PSNR-Y | SSIM |
+|---|---:|---:|---:|---:|
+| tcodecv2 | 27 | 2,991 | 49.43 | 0.9971 |
+| tcodecv2 | 32 | 2,032 | 44.32 | 0.9938 |
+| tcodecv2 | 37 | 1,192 | 37.95 | 0.9899 |
+| x264vf | 27 | 2,815 | 55.83 | 0.9993 |
+| x264vf | 32 | 2,572 | 50.49 | 0.9982 |
+| x264vf | 37 | 2,359 | 47.21 | 0.9967 |
+
+Reading: vs the 09-06 tcodecv2 row, −54/−42/−44% bytes at
++4.27/+2.04/−0.05dB. Interpolated matched-rate gap vs x264vf at ~2.6KB is
+now ≈−3.3dB (was ~9dB). x264's curve on static content is still much
+flatter (skip-shaped; v2 skip remains parked), but the in-loop filter is
+no longer the binding constraint on screen. Full suite 54/54 incl.
+300-frame soak; scalar/NEON parity ALL OK.
+
 Reading: at matched rate (~2.4–2.8KB) tcodecv2 trails x264vf by ~9dB;
 at matched quality the bitrate ratio is several-to-one against tcodecv2.
 The gap narrowed vs the pre-climb era (fixed RDO alone took screen_ui
