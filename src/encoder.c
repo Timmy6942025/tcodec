@@ -684,22 +684,9 @@ static int64_t qt_leaf(qt_enc_t *e, int depth, int cx, int cy, int write)
             int bits_f = 1 + 1 + 1 + 1 + 1 + 1 + (tc_bs_se_bits(disp.x)+tc_bs_se_bits(disp.y)) + lb;
             int64_t costf = dl + e->lambda*bits_f;
             if (costf < best_cost) { best_cost=costf; b_intra=0;b_skip=0;b_merge=0;b_dct=f_dct; b_mvdx=disp.x;b_mvdy=disp.y;b_refsel=0;b_bi=0;b_ch=0; b_cmode=0;b_imode=1; }
-            /* Bi-average candidate reuses the fwd MV (mirrored bwd). */
-            if (bwdf && !fast_mode) {
-                tc_pixel_t pa[64*64], pb[64*64];
-                tc_mv_s mvb = { -bm.x, -bm.y };
-                tc_inter_predict(bwdf->y,bwdf->stride_y, enc->cfg.width,enc->cfg.height,mvb,pb,cu,cu);
-                for (int i2 = 0; i2 < cu*cu; i2++) pa[i2] = pred[i2];
-                for (int i2 = 0; i2 < cu*cu; i2++) pred[i2]=(tc_pixel_t)((pa[i2]+pb[i2]+1)>>1);
-                uint8_t bi_dct = TC_BLOCK_8x8_ID; int lbb = 0; int64_t dlb;
-                if (enc->cfg.preset >= TC_PRESET_MEDIUM && cu <= 32)
-                    dlb = qt_code_best(e,px,py,cu,pred,&lbb,&bi_dct);
-                else
-                    dlb = qt_code_luma(e,px,py,cu,TC_BLOCK_8x8_ID,pred,&lbb,0);
-                int bits_bi = 1 + 1 + 1 + 1 + 1 + 1 + (tc_bs_se_bits(disp.x)+tc_bs_se_bits(disp.y)) + lbb;
-                int64_t costbi = dlb + e->lambda*bits_bi;
-                if (costbi < best_cost) { best_cost=costbi; b_intra=0;b_skip=0;b_merge=0;b_dct=bi_dct; b_mvdx=disp.x;b_mvdy=disp.y;b_refsel=0;b_bi=1;b_ch=0; b_cmode=0;b_imode=1; }
-            }
+            /* NOTE: explicit bi-average tried here (fwd MV + mirrored bwd):
+             * removing it saved -1.9% bytes on park water (mirror too crude;
+             * merge-as-average below covers static). Deleted 2026-09-08. */
         }
         /* Backward-only candidate. */
         if (bwdf) {
