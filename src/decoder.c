@@ -968,12 +968,12 @@ static void qt_dec_leaf(qt_dec_t *d, int depth, int cx, int cy)
             if (mergef) {
                 merge = 1;
             } else {
-                /* v2 second reference (MULTI_REF tool, P-frames): ref_sel
-                 * bit follows the merge flag; selects dpb[0]/dpb[1]. */
+                /* v2 multi reference (MULTI_REF tool, P-frames): 2-bit
+                 * ref_idx follows the merge flag; selects dpb[0..3]. */
                 if (d->frame_type != TC_FRAME_BIDIR &&
                     (d->dec->last_header.tool_flags & TC_TOOL_MULTI_REF)) {
-                    ref_sel = (int)qt_read_bits(d, RC_CTX_REF_SEL, 1);
-                    if (ref_sel > 1) d->bs->error = 1;
+                    ref_sel = (int)qt_read_bits(d, RC_CTX_REF_SEL, 2);
+                    if (ref_sel > 3) d->bs->error = 1;
                 }
                 dct_size = (int)qt_read_bits(d, RC_CTX_DCT_SIZE, 1);
                 mvd_x = qt_read_se(d, RC_CTX_MVD_X);
@@ -1014,11 +1014,12 @@ static void qt_dec_leaf(qt_dec_t *d, int depth, int cx, int cy)
                 dec_profile_add(dec, &dec->profile_motion_ns, motion_start);
             }
         } else {
-            /* P-frame second reference: ref_sel indexes dpb; missing dpb[1]
-             * with ref_sel set is a bitstream error (encoder never emits it
-             * when dpb[1] is invalid). */
-            const tc_frame_buf_t *r = ref_sel ? dec->dpb[1].frame : dec->dpb[0].frame;
-            if (ref_sel && !r) d->bs->error = 1;
+            /* P-frame multi reference: ref_idx 0..3 indexes dpb slots;
+             * dangling index is a bitstream error (encoder only emits
+             * valid slots). */
+            const tc_frame_buf_t *r = (ref_sel >= 0 && ref_sel < TC_REF_FRAMES) ?
+                dec->dpb[ref_sel].frame : NULL;
+            if (!r) d->bs->error = 1;
             uint64_t motion_start = dec->profile_enabled ? dec_now_ns() : 0;
             if (r) tc_inter_predict_decoder(r->y, r->stride_y, dec->width, dec->height, mv, pred, cu, cu);
             else   memset(pred, 128, (size_t)cu * cu);
@@ -1057,7 +1058,8 @@ static void qt_dec_leaf(qt_dec_t *d, int depth, int cx, int cy)
                     }
                 }
             } else {
-            const tc_frame_buf_t *r = ref_sel ? dec->dpb[1].frame : dec->dpb[0].frame;
+            const tc_frame_buf_t *r = (ref_sel >= 0 && ref_sel < TC_REF_FRAMES) ?
+                dec->dpb[ref_sel].frame : NULL;
             if (d->frame_type == TC_FRAME_BIDIR)
                 r = ref_sel ? dpb_find_poc_gt(dec->dpb, d->poc) : dpb_find_poc_lt(dec->dpb, d->poc);
             if (r) {
@@ -1367,9 +1369,10 @@ static void v2_parse_leaf(v2_parse_ctx_t *p, int depth, int cx, int cy)
             if (!n->merge) {
                 if (p->frame_type != TC_FRAME_BIDIR &&
                     (p->dec->last_header.tool_flags & TC_TOOL_MULTI_REF)) {
-                    n->ref_sel = (uint8_t)v2_parse_bits(p, RC_CTX_REF_SEL, 1);
-                    if (n->ref_sel > 1) p->bs->error = 1;
-                    if (n->ref_sel && !p->dec->dpb[1].frame) p->bs->error = 1;
+                    n->ref_sel = (uint8_t)v2_parse_bits(p, RC_CTX_REF_SEL, 2);
+                    if (n->ref_sel > 3) p->bs->error = 1;
+                    if (n->ref_sel >= TC_REF_FRAMES ||
+                        !p->dec->dpb[n->ref_sel].frame) p->bs->error = 1;
                 }
                 n->dct_size = (uint8_t)v2_parse_bits(p, RC_CTX_DCT_SIZE, 1);
                 n->mvd_x = v2_parse_se(p, RC_CTX_MVD_X);
@@ -1610,7 +1613,8 @@ static void v2_recon_leaf(tc_decoder_t *dec, const v2_cmd_ctu_t *cmd,
                 else memset(pred, 128, (size_t)cu * cu);
             }
         } else {
-            const tc_frame_buf_t *r = n->ref_sel ? dec->dpb[1].frame : dec->dpb[0].frame;
+            const tc_frame_buf_t *r = (n->ref_sel < TC_REF_FRAMES) ?
+                dec->dpb[n->ref_sel].frame : NULL;
             if (r) tc_inter_predict_decoder(r->y, r->stride_y, r->width, r->height, mv, pred, cu, cu);
             else memset(pred, 128, (size_t)cu * cu);
         }
@@ -1674,7 +1678,8 @@ static void v2_recon_leaf(tc_decoder_t *dec, const v2_cmd_ctu_t *cmd,
                 }
             }
         } else {
-        const tc_frame_buf_t *r = n->ref_sel ? dec->dpb[1].frame : dec->dpb[0].frame;
+        const tc_frame_buf_t *r = (n->ref_sel < TC_REF_FRAMES) ?
+            dec->dpb[n->ref_sel].frame : NULL;
         if (frame_type == TC_FRAME_BIDIR)
             r = n->ref_sel ? dpb_find_poc_gt(dec->dpb, poc) : dpb_find_poc_lt(dec->dpb, poc);
         if (r) {

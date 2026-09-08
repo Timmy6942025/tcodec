@@ -506,7 +506,7 @@ static int64_t qt_leaf(qt_enc_t *e, int depth, int cx, int cy, int write)
                 if (e->frame_type==TC_FRAME_BIDIR) { enc_write_bits(e->bs,e->rc,e->rc_ctx,RC_CTX_REF_SEL,nd->ref_sel,1); enc_write_bits(e->bs,e->rc,e->rc_ctx,RC_CTX_BLOCK_MODE,nd->bi,1); }
                 if (nd->skip) { enc_write_bits(e->bs,e->rc,e->rc_ctx,RC_CTX_SKIP_FLAG,1,1); }
                 else if (nd->merge) { enc_write_bits(e->bs,e->rc,e->rc_ctx,RC_CTX_SKIP_FLAG,0,1); enc_write_bits(e->bs,e->rc,e->rc_ctx,RC_CTX_MERGE_FLAG,1,1); }
-                else { enc_write_bits(e->bs,e->rc,e->rc_ctx,RC_CTX_SKIP_FLAG,0,1); enc_write_bits(e->bs,e->rc,e->rc_ctx,RC_CTX_MERGE_FLAG,0,1); if (e->multiref && e->frame_type==TC_FRAME_INTER) enc_write_bits(e->bs,e->rc,e->rc_ctx,RC_CTX_REF_SEL,nd->ref_sel,1); enc_write_bits(e->bs,e->rc,e->rc_ctx,RC_CTX_DCT_SIZE,nd->dct_size,1); enc_write_se(e->bs,e->rc,e->rc_ctx,RC_CTX_MVD_X,nd->mvd_x); enc_write_se(e->bs,e->rc,e->rc_ctx,RC_CTX_MVD_Y,nd->mvd_y); }
+                else { enc_write_bits(e->bs,e->rc,e->rc_ctx,RC_CTX_SKIP_FLAG,0,1); enc_write_bits(e->bs,e->rc,e->rc_ctx,RC_CTX_MERGE_FLAG,0,1); if (e->multiref && e->frame_type==TC_FRAME_INTER) enc_write_bits(e->bs,e->rc,e->rc_ctx,RC_CTX_REF_SEL,nd->ref_sel & 3,2); enc_write_bits(e->bs,e->rc,e->rc_ctx,RC_CTX_DCT_SIZE,nd->dct_size,1); enc_write_se(e->bs,e->rc,e->rc_ctx,RC_CTX_MVD_X,nd->mvd_x); enc_write_se(e->bs,e->rc,e->rc_ctx,RC_CTX_MVD_Y,nd->mvd_y); }
             }
             tc_mv_s mvp = qt_mvp(e,cx,cy,e->grid);
             tc_mv_s mv = { mvp.x+px*4+nd->mvd_x, mvp.y+py*4+nd->mvd_y };
@@ -538,8 +538,11 @@ static int64_t qt_leaf(qt_enc_t *e, int depth, int cx, int cy, int write)
                         else memset(pred, 128, (size_t)cu*cu);
                     }
                 } else {
-                    const tc_frame_buf_t *rf = (nd->ref_sel && enc->dpb[1].frame) ?
-                        enc->dpb[1].frame : enc->dpb[0].frame;
+                    /* P multiref: ref_idx 0..3 indexes dpb slots (valid by
+                     * decision construction). */
+                    int ri = nd->ref_sel & 3;
+                    const tc_frame_buf_t *rf = (ri < TC_REF_FRAMES && enc->dpb[ri].frame) ?
+                        enc->dpb[ri].frame : enc->dpb[0].frame;
                     tc_inter_predict(rf->y,rf->stride_y, enc->cfg.width,enc->cfg.height,mv,pred,cu,cu);
                 }
                 qt_code_luma(e,px,py,cu,nd->dct_size,pred,&bits_dummy,write == QT_WRITE);
@@ -576,8 +579,11 @@ static int64_t qt_leaf(qt_enc_t *e, int depth, int cx, int cy, int write)
                     if (e->frame_type == TC_FRAME_BIDIR)
                         rcf = (nd->ref_sel ? dpb_find_poc_gt(enc->dpb, e->poc)
                                            : dpb_find_poc_lt(enc->dpb, e->poc));
-                    else if (nd->ref_sel && enc->dpb[1].frame)
-                        rcf = enc->dpb[1].frame;
+                    else if (e->frame_type == TC_FRAME_INTER) {
+                        int ri = nd->ref_sel & 3;
+                        if (ri < TC_REF_FRAMES && enc->dpb[ri].frame)
+                            rcf = enc->dpb[ri].frame;
+                    }
                     if (!rcf) rcf = enc->dpb[0].frame;
                     tc_inter_predict_chroma(rcf->cb,rcf->stride_c, enc->cfg.width/2,enc->cfg.height/2,mv,cbuf[0],cu/2,cu/2);
                     tc_inter_predict_chroma(rcf->cr,rcf->stride_c, enc->cfg.width/2,enc->cfg.height/2,mv,cbuf[1],cu/2,cu/2);
@@ -758,32 +764,35 @@ static int64_t qt_leaf(qt_enc_t *e, int depth, int cx, int cy, int write)
             else
                 dl = qt_code_luma(e,px,py,cu,TC_BLOCK_8x8_ID,pred,&lb,0);
             int bits_inter = 1 + 1 + 1 + 1 + 2 + (tc_bs_se_bits(disp.x)+tc_bs_se_bits(disp.y)) + lb;
-            if (e->multiref) bits_inter += 1; /* ref_sel bit always present when active */
+            if (e->multiref) bits_inter += 2; /* 2-bit ref_idx always present when active */
             int64_t cost = dl + e->lambda*bits_inter;
             if (cost < best_cost) { best_cost=cost; b_intra=0;b_skip=0;b_merge=0;b_dct=cur_dct; b_mvdx=disp.x;b_mvdy=disp.y;b_refsel=0;b_bi=0;b_ch=0; b_cmode=0;b_imode=1; }
         }
         if (fast_mode) {
             int bits_inter = 1 + 1 + 1 + 1 + 2 + (tc_bs_se_bits(disp.x)+tc_bs_se_bits(disp.y)) + lb;
-            if (e->multiref) bits_inter += 1;
+            if (e->multiref) bits_inter += 2;
             int64_t cost = dl + e->lambda*bits_inter;
             if (cost < best_cost) { best_cost=cost; b_intra=0;b_skip=0;b_merge=0;b_dct=TC_BLOCK_8x8_ID; b_mvdx=disp.x;b_mvdy=disp.y;b_refsel=0;b_bi=0;b_ch=0; b_cmode=0;b_imode=1; }
         }
-        /* Second-reference candidate (v2 multiref, full-RDO path only):
-         * same MVP center, ME against dpb[1]; honest bits include the
-         * ref_sel bit. Decoder mirrors via dpb[1]. */
-        if (!fast_mode && e->multiref && enc->dpb[1].frame) {
-            tc_sad_t sad1; tc_mv_s bm1 = tc_motion_est(enc->dpb[1].frame->y, enc->dpb[1].frame->stride_y, enc->cfg.width,enc->cfg.height, enc->cur->y+py*enc->cur->stride_y+px, enc->cur->stride_y, center.x>>2, center.y>>2, cu, sr, &sad1);
-            tc_mv_s disp1 = { bm1.x-(mvp.x+px*4), bm1.y-(mvp.y+py*4) };
-            tc_inter_predict(enc->dpb[1].frame->y,enc->dpb[1].frame->stride_y, enc->cfg.width,enc->cfg.height,bm1,pred,cu,cu);
-            uint8_t r1_dct = TC_BLOCK_8x8_ID; int lb1 = 0; int64_t dl1;
-            if (enc->cfg.preset >= TC_PRESET_MEDIUM && cu <= 32)
-                dl1 = qt_code_best(e,px,py,cu,pred,&lb1,&r1_dct);
-            else
-                dl1 = qt_code_luma(e,px,py,cu,TC_BLOCK_8x8_ID,pred,&lb1,0);
-            int bits_r1 = 1 + 1 + 1 + 1 + 2 + 1 + (tc_bs_se_bits(disp1.x)+tc_bs_se_bits(disp1.y)) + lb1;
-            int64_t cost1 = dl1 + e->lambda*bits_r1;
-            if (cost1 < best_cost) { best_cost=cost1; b_intra=0;b_skip=0;b_merge=0;b_dct=r1_dct; b_mvdx=disp1.x;b_mvdy=disp1.y;b_refsel=1;b_bi=0;b_ch=0; b_cmode=0;b_imode=1; }
-        }
+        /* Extra-reference candidates (v2 multiref, full-RDO path only):
+         * same MVP center, ME against each valid dpb[1..3] slot; honest
+         * bits include the 2-bit ref_idx. Decoder mirrors via dpb[ref]. */
+        if (!fast_mode && e->multiref) {
+            for (int ri = 1; ri < TC_REF_FRAMES; ri++) {
+                if (!enc->dpb[ri].frame) continue;
+                tc_sad_t sad1; tc_mv_s bm1 = tc_motion_est(enc->dpb[ri].frame->y, enc->dpb[ri].frame->stride_y, enc->cfg.width,enc->cfg.height, enc->cur->y+py*enc->cur->stride_y+px, enc->cur->stride_y, center.x>>2, center.y>>2, cu, sr, &sad1);
+                tc_mv_s disp1 = { bm1.x-(mvp.x+px*4), bm1.y-(mvp.y+py*4) };
+                tc_inter_predict(enc->dpb[ri].frame->y,enc->dpb[ri].frame->stride_y, enc->cfg.width,enc->cfg.height,bm1,pred,cu,cu);
+                uint8_t r1_dct = TC_BLOCK_8x8_ID; int lb1 = 0; int64_t dl1;
+                if (enc->cfg.preset >= TC_PRESET_MEDIUM && cu <= 32)
+                    dl1 = qt_code_best(e,px,py,cu,pred,&lb1,&r1_dct);
+                else
+                    dl1 = qt_code_luma(e,px,py,cu,TC_BLOCK_8x8_ID,pred,&lb1,0);
+                int bits_r1 = 1 + 1 + 1 + 1 + 2 + 2 + (tc_bs_se_bits(disp1.x)+tc_bs_se_bits(disp1.y)) + lb1;
+                int64_t cost1 = dl1 + e->lambda*bits_r1;
+                if (cost1 < best_cost) { best_cost=cost1; b_intra=0;b_skip=0;b_merge=0;b_dct=r1_dct; b_mvdx=disp1.x;b_mvdy=disp1.y;b_refsel=(uint8_t)ri;b_bi=0;b_ch=0; b_cmode=0;b_imode=1; }
+                }
+            }
         /* Global-motion extra center (full-RDO path): extra search diversity
          * beyond the mvp center; RDO picks. MVD stays relative to mvp
          * (decoder sees ordinary explicit inter). Magnitude gate skips

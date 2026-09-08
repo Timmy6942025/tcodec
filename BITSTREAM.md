@@ -629,9 +629,10 @@ chroma residual RDO on medium+ presets), optional 3-bit chroma mode, luma
 transform syntax, and two chroma 4×4 residual planes. Inter leaves carry skip or merge signaling; explicit
 inter leaves carry a transform-size flag and signed Exp-Golomb MVD x/y.
 When the `MULTI_REF` tool flag is set (medium+ preset, streaming-main+ profile),
-explicit P-frame inter leaves additionally carry one `ref_sel` bit after the
-merge flag selecting `dpb[0]`/`dpb[1]` for luma and chroma prediction (the MVD
+explicit P-frame inter leaves additionally carry a 2-bit `ref_idx` after the
+merge flag selecting `dpb[0..3]` for luma and chroma prediction (the MVD
 stays relative to the shared median predictor); merge leaves stay ref0-only.
+(Earlier revisions used a 1-bit `ref_sel`; those streams do not decode.)
 Without the flag the syntax is unchanged (the reference is `dpb[0]` for
 plain v2 P frames). B-frames (`--bframes`, GOP4 reorder): explicit leaves
 carry `ref_sel` (0 = forward max-POC-below, 1 = backward min-POC-above)
