@@ -276,6 +276,27 @@ overhead (ref_sel+bi bits, +1/+2 ladder tax, mismatched bwd refs on
 scroll). Benchmark tables stay P-only (our better config). B needs
 ladder+RDO retune (project, not trial) — do NOT default `-b` on.
 
+## D8 multi-codec matrix (interim 2026-09-08, 5 clips — corpus fetch ongoing)
+
+BD-rate vs x264vf (3QP curves, med/veryfast-medium presets, 30fr):
+
+| Clip | class | tc BD | x265 BD | svtav1p6 BD |
+|---|---|---|---|---|
+| park_joy | nature water | +99.6% | — | — |
+| in_to_tree | detail | +76% | — | — |
+| old_town_cross | aerial | +135.7% | −28.9% | N/A¹ |
+| parkrun | grain/snow | +158.8% | −15.3% | N/A¹ |
+| stockholm | city pan | +143.7% | −22.6% | N/A¹ |
+| vidyo_talk | talking head | +124.6% | −31.8% | N/A¹ |
+| screen_ui | screen | (P beats x264 on bytes) | — | — |
+
+¹ svt CRF scale lands 38–44dB vs x264's 27–34dB (no curve overlap) —
+rerun svt at higher CRF for overlap. x265 −15..−32% sanity-checks the
+harness. New clips gap WORSE than park: static-background clips (vidyo,
+old_town, stockholm) indict no-skip; parkrun grain (+158.8%, worst)
+needs synthesis or texture handling. Full 8-clip + svt-overlap + x265
+curves on park/tree/ducks/screen pending fetch completion.
+
 ## Static-animation checkpoint (2026-09-07, sita 720p24, 30 frames)
 
 First 30 frames are pixel-identical (frozen leader). x264 skips everything
