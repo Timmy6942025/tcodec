@@ -1,8 +1,14 @@
 # TCodec v2.1 Syntax Batch — Design (2026-09-06)
 
 These items all need bitstream additions. Batch them into ONE version bump
-to avoid repeated compat breaks. None is started; this doc scopes them from
-hill-climb audits. Order by value/effort.
+to avoid repeated compat breaks. Order by value/effort (item 0 first).
+
+## 0. ~~Reference choice beats averaging~~ DONE 2026-09-08 (hill-climb 19)
+
+B-frame selection mix on park water (1746 explicit inter leaves): fwd 30%,
+bwd 40%, bi-average 3%, merge 27%. P multiref extended 2→4 refs (2-bit
+`ref_idx`, same `MULTI_REF` flag): probe wins all QP, screen −9.4%/+0.61dB,
+park −1.0%. Choice value confirmed; joint-search bi remains parked.
 
 ## 1. v2 B-frame emission (biggest: +5–10% typical)
 
