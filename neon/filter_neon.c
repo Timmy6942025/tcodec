@@ -34,15 +34,20 @@ static int n_edge_strength(int p0, int p1, int q0, int q1, int qp)
     int threshold2 = tc_clip(qp / 2, 4, 32);
     int threshold3 = tc_clip(qp,     8, 48);
 
-    if (diff < threshold1) return 0;
+    /* NOTE: HEVC direction — filter likely artifacts (small diffs),
+     * preserve likely real edges (large diffs). Requires a flat-identity
+     * weak kernel (trial 32); with the old kernel this mapping collapses
+     * flat content. */
+    if (diff < threshold1) return 2;
     if (diff < threshold2) return 1;
-    if (diff < threshold3) return 2;
-    return 3;
+    if (diff < threshold3) return 1;
+    return 0;
 }
 
 static tc_pixel_t n_weak_filter(int p1, int p0, int q0, int q1, int tc)
 {
-    int delta = ((-p1 + 4 * p0 + 4 * q0 - q1 + 4) >> 3);
+    /* Mirrors scalar weak_filter (HEVC delta, flat-identity). */
+    int delta = ((9 * (q0 - p0) - 3 * (q1 - p1) + 8) >> 4);
     delta = tc_clip(delta, -tc, tc);
     return (tc_pixel_t)tc_clip(p0 + delta, 0, 255);
 }
@@ -70,18 +75,20 @@ static int n_weak_filter8_horiz(tc_pixel_t *y, int stride,
     int16x8_t p0s = vreinterpretq_s16_u16(vmovl_u8(p0));
     int16x8_t q0s = vreinterpretq_s16_u16(vmovl_u8(q0));
     int16x8_t q1s = vreinterpretq_s16_u16(vmovl_u8(q1));
-    int16x8_t four = vdupq_n_s16(4);
+    int16x8_t eight = vdupq_n_s16(8);
     int16x8_t tc_v = vdupq_n_s16((int16_t)tc_clip(qp / 3, 1, 10));
-    int16x8_t delta = vaddq_s16(vsubq_s16(vaddq_s16(vmulq_n_s16(p0s, 4),
-                                                      vmulq_n_s16(q0s, 4)),
-                                          vaddq_s16(p1s, q1s)), four);
-    delta = vshrq_n_s16(delta, 3);
+    int16x8_t d_q0p0 = vsubq_s16(q0s, p0s);
+    int16x8_t d_q1p1 = vsubq_s16(q1s, p1s);
+    int16x8_t delta = vaddq_s16(vsubq_s16(vmulq_n_s16(d_q0p0, 9),
+                                          vmulq_n_s16(d_q1p1, 3)), eight);
+    delta = vshrq_n_s16(delta, 4);
     delta = vmaxq_s16(vminq_s16(delta, tc_v), vnegq_s16(tc_v));
     int16x8_t p_out = vaddq_s16(p0s, delta);
-    int16x8_t q_delta = vaddq_s16(vsubq_s16(vaddq_s16(vmulq_n_s16(q0s, 4),
-                                                       vmulq_n_s16(p0s, 4)),
-                                           vaddq_s16(q1s, p1s)), four);
-    q_delta = vshrq_n_s16(q_delta, 3);
+    int16x8_t d_p0q0 = vsubq_s16(p0s, q0s);
+    int16x8_t d_p1q1 = vsubq_s16(p1s, q1s);
+    int16x8_t q_delta = vaddq_s16(vsubq_s16(vmulq_n_s16(d_p0q0, 9),
+                                            vmulq_n_s16(d_p1q1, 3)), eight);
+    q_delta = vshrq_n_s16(q_delta, 4);
     q_delta = vmaxq_s16(vminq_s16(q_delta, tc_v), vnegq_s16(tc_v));
     int16x8_t q_out = vaddq_s16(q0s, q_delta);
     p_out = vmaxq_s16(vminq_s16(p_out, vdupq_n_s16(255)), vdupq_n_s16(0));
@@ -107,14 +114,18 @@ static int n_weak_filter4_vert(tc_pixel_t *y, int stride,
     int16x8_t q0s = vreinterpretq_s16_u16(vmovl_u8(vld1_u8(q0a)));
     int16x8_t q1s = vreinterpretq_s16_u16(vmovl_u8(vld1_u8(q1a)));
     int16x8_t tc_v = vdupq_n_s16((int16_t)tc_clip(qp / 3, 1, 10));
-    int16x8_t four = vdupq_n_s16(4);
-    int16x8_t dp = vshrq_n_s16(vaddq_s16(vsubq_s16(vaddq_s16(vmulq_n_s16(p0s, 4),
-                                                               vmulq_n_s16(q0s, 4)),
-                                                   vaddq_s16(p1s, q1s)), four), 3);
+    int16x8_t eight = vdupq_n_s16(8);
+    int16x8_t d_q0p0 = vsubq_s16(q0s, p0s);
+    int16x8_t d_q1p1 = vsubq_s16(q1s, p1s);
+    int16x8_t dp = vshrq_n_s16(vaddq_s16(vsubq_s16(vmulq_n_s16(d_q0p0, 9),
+                                                   vmulq_n_s16(d_q1p1, 3)),
+                                         eight), 4);
     dp = vmaxq_s16(vminq_s16(dp, tc_v), vnegq_s16(tc_v));
-    int16x8_t dq = vshrq_n_s16(vaddq_s16(vsubq_s16(vaddq_s16(vmulq_n_s16(q0s, 4),
-                                                               vmulq_n_s16(p0s, 4)),
-                                                   vaddq_s16(q1s, p1s)), four), 3);
+    int16x8_t d_p0q0 = vsubq_s16(p0s, q0s);
+    int16x8_t d_p1q1 = vsubq_s16(p1s, q1s);
+    int16x8_t dq = vshrq_n_s16(vaddq_s16(vsubq_s16(vmulq_n_s16(d_p0q0, 9),
+                                                   vmulq_n_s16(d_p1q1, 3)),
+                                         eight), 4);
     dq = vmaxq_s16(vminq_s16(dq, tc_v), vnegq_s16(tc_v));
     int16x8_t po = vmaxq_s16(vminq_s16(vaddq_s16(p0s, dp), vdupq_n_s16(255)), vdupq_n_s16(0));
     int16x8_t qo = vmaxq_s16(vminq_s16(vaddq_s16(q0s, dq), vdupq_n_s16(255)), vdupq_n_s16(0));

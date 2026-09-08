@@ -5,11 +5,10 @@
  * Inspired by HEVC's deblocking, but simplified for ARM performance:
  *
  *  - Only filter block boundaries (4×4 or 8×8 edges)
- *  - Edge strength (0-3) determined by:
- *    0: No filter (flat on both sides)
- *    1: Weak filter (small discontinuity)
- *    2: Medium filter
- *    3: Strong filter (large discontinuity, likely visible)
+ *  - Edge strength is HEVC-direction: small boundary diffs are likely
+ *    blocking artifacts (filter them weak); large diffs are likely real
+ *    edges (preserve them, strength 0). Strength 3+ paths are currently
+ *    unreachable (reserved for a future flatness-gated strong mode).
  *
  *  - For strength 1-2: 4-tap filter on boundary pixels
  *  - For strength 3:   6-tap strong filter (HEVC-style)
@@ -28,10 +27,14 @@ static int edge_strength(int p0, int p1, int q0, int q1, int qp)
     int threshold2 = tc_clip(qp / 2, 4, 32);   /* Medium threshold */
     int threshold3 = tc_clip(qp,     8, 48);    /* Strong threshold */
 
-    if (diff < threshold1) return 0;   /* No filtering needed */
-    if (diff < threshold2) return 1;   /* Weak */
-    if (diff < threshold3) return 2;   /* Medium */
-    return 3;                           /* Strong */
+    /* NOTE: HEVC direction — filter likely artifacts (small diffs),
+     * preserve likely real edges (large diffs). Requires a flat-identity
+     * weak kernel (trial 32); with the old kernel this mapping collapses
+     * flat content. */
+    if (diff < threshold1) return 2;
+    if (diff < threshold2) return 1;
+    if (diff < threshold3) return 1;
+    return 0;
 }
 
 /* ── Weak filter (4-tap) ───────────────────────────────────────
@@ -45,7 +48,10 @@ static int edge_strength(int p0, int p1, int q0, int q1, int qp)
 
 TCODEC_INLINE tc_pixel_t weak_filter(int p1, int p0, int q0, int q1, int tc)
 {
-    int delta = ((-p1 + 4 * p0 + 4 * q0 - q1 + 4) >> 3);
+    /* HEVC weak-filter delta: 0 on flat input (the previous
+     * (-p1+4p0+4q0-q1+4)>>3 evaluated to ~6v/8 on flat v, injecting up
+     * to +-tc at every filtered flat boundary). */
+    int delta = ((9 * (q0 - p0) - 3 * (q1 - p1) + 8) >> 4);
     delta = tc_clip(delta, -tc, tc);
     return (tc_pixel_t)tc_clip(p0 + delta, 0, 255);
 }
