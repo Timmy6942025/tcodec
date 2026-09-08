@@ -134,6 +134,31 @@ references only, no affine/global motion, entropy-model gap, luma-only
 RDO. Decode on nature (12–19fps) trails ffmpeg-x264 (27–35fps) and the
 60fps@720p target — D9 open.
 
+## Deblock-fix checkpoint (2026-09-08, trials 32+33 — SUPERSEDES nature row above)
+
+Same harness/settings (`--src` adhoc, 30 frames). tcodecv2 now carries the
+flat-identity weak kernel + HEVC-direction mapping; x264vf rows reproduce
+byte-identically (reference encoder, stable).
+
+| Codec | QP | Bytes (30fr) | PSNR-Y | SSIM |
+|---|---:|---:|---:|---:|
+| tcodecv2 | 27 | 1,083,627 | 30.48 | 0.8792 |
+| tcodecv2 | 32 | 458,231 | 27.11 | 0.8156 |
+| tcodecv2 | 37 | 158,960 | 24.36 | 0.7427 |
+| x264vf | 27 | 456,234 | 29.86 | 0.8848 |
+| x264vf | 32 | 199,752 | 26.85 | 0.8274 |
+| x264vf | 37 | 86,331 | 24.14 | 0.7494 |
+
+Reading: **BD-rate +99.6%** (tcodecv2 ≈ 2× the bits at matched quality;
+was +150–200%). Per-point: −17/−22/−24% bytes at +2.23/+1.56/+1.07dB vs
+the 09-06 row. At matched rate ~200KB tcodecv2 trails by ~1.9dB (was
+2.5–4dB). Remaining gap drivers, in order: no skip (static regions still
+pay merge+residual every frame), luma-only RDO, entropy-model gap.
+Frozen-content drift, formerly −3.1dB/30fr and the blocker for skip work,
+re-measures at **+0.30dB/30fr (no drift)** — the broken deblock was the
+drift source. Skip-6 (fresh-chroma skip, no propagation machinery needed)
+is next.
+
 ## Grain checkpoint (2026-09-06, ducks_take_off 720p50, 30 frames)
 
 Byte-range prefix of `ducks_take_off_420_720p50.y4m`, first 30 frames;
