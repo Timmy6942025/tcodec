@@ -890,7 +890,7 @@ static int64_t qt_leaf(qt_enc_t *e, int depth, int cx, int cy, int write)
          * same MVP center, ME against each valid dpb[1..3] slot; honest
          * bits include the 2-bit ref_idx. Decoder mirrors via dpb[ref]. */
         if (!fast_mode && e->multiref) {
-            for (int ri = 1; ri < TC_REF_FRAMES; ri++) {
+            for (int ri = 1; ri < 2; ri++) { /* TRIAL61: cap at dpb[1] (2-ref); syntax stays 2-bit */
                 if (!enc->dpb[ri].frame) continue;
                 tc_sad_t sad1; tc_mv_s bm1 = tc_motion_est(enc->dpb[ri].frame->y, enc->dpb[ri].frame->stride_y, enc->cfg.width,enc->cfg.height, enc->cur->y+py*enc->cur->stride_y+px, enc->cur->stride_y, center.x>>2, center.y>>2, cu, sr, &sad1);
                 tc_mv_s disp1 = { bm1.x-(mvp.x+px*4), bm1.y-(mvp.y+py*4) };
