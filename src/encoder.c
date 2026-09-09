@@ -1202,6 +1202,11 @@ static void encode_ctu_v2(tc_encoder_t *enc, int row, int col, int qp,
     qt_enc_t e; memset(&e,0,sizeof(e));
     e.enc=enc; e.ctu_x=col*TC_CTU_SIZE; e.ctu_y=row*TC_CTU_SIZE;
     e.qp=qp; e.qp_c=tc_clip(qp+1,0,63); e.lambda=(int64_t)tc_lambda(qp);
+    /* TRIAL66: keyframes anchor the GOP — price bits cheaper for them
+     * (λ×3/4), spending more on references. All major codecs do this.
+     * NOTE: use the parameter (e.frame_type is not yet assigned; KEY==0
+     * would fire everywhere on the zeroed struct). */
+    if (frame_type == TC_FRAME_KEY) e.lambda = (e.lambda * 3) / 4;
     /* Must match the MULTI_REF tool-flag condition above: when set, the
      * decoder expects a ref_sel bit on every explicit v2 inter leaf. */
     e.multiref = (enc->cfg.use_v2 && enc->cfg.preset >= TC_PRESET_MEDIUM &&
