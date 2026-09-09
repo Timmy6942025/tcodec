@@ -294,14 +294,17 @@ svtav1p6 preset 6 @CRF 54/58/63 for quality overlap; 30fr, screen 10fr):
 | bbb_nature | 3D animation | +49.7% | −42.3% | −66.5% |
 | ed_dark | dark animation | +34.0% | −50.8% | −74.6% |
 | sita_flat | flat animation | **−49.6%** | −67.6% | −87.0% |
+| csgo_gaming | HUD/text FPS | +52.4% | −19.1% | −54.1% |
+| minecraft_gaming | blocky voxel | +50.3% | −21.0% | −57.8% |
 
 ¹ x265 worse than x264 on screen (film-tuned). Harness sanity otherwise
 (x265 < x264 < tc on all natural; svt best everywhere).
-Reading: tc trails x264 by +68..+159% (best: detail/screen; worst: grain
-parkrun +158.8%, ducks +146.6%). Static-background clips (vidyo/old_town/
-stockholm +124..144%) indict no-skip; grain clips indict texture handling.
-Tier-2 (−20..−40% vs H.264) and Tier-3 (AV1-fast) both far. bbb/ed/sita
-curves running (11-clip completion).
+Reading: tc trails x264 by +50..+159% (best: gaming +50–52%, sita −49.6% win;
+worst: grain parkrun +158.8%, ducks +146.6%). Static-background clips
+(vidyo/old_town/stockholm +124..144%) indict no-skip; grain clips indict
+texture handling. Tier-2 (−20..−40% vs H.264) and Tier-3 (AV1-fast) both
+far. 13-clip matrix complete (gaming done; 1080p masters fetched, decode
+baselines next).
 
 
 ## Static-animation checkpoint (re-measured 2026-09-09 — SUPERSEDES 09-07 row)
