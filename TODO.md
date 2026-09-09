@@ -360,7 +360,7 @@ Phase 3 (entropy coding changes will modify the bitstream format).
 |---|---|---|---|
 | D1 | `make test-full` passes (54/54 incl. long-run) | ✅ Done | 54/54 passed Sep 2026 (incl. v2 multiref + v2 CfL + B-frame + RDOQ-era tests) |
 | D2 | Range coder with separate MV x/y contexts, DC/low/high freq models | ✅ Done | DC-specific contexts (6 new RC_CTX_*) added; BD-rate −66.4% |
-| D3 | Sanitizer clean + fuzz coverage documented | ✅ Done | UBSan FULL suite 54/54 zero findings (halt_on_error, incl. 300fr soak); valgrind memcheck clean on v2+entropy enc+dec; fuzz tests pass in-suite. *ASan cannot init on this box (container mmap restriction, pre-existing env blocker — precise cause documented in HILLCLIMB) |
+| D3 | Sanitizer clean + fuzz coverage documented | ✅ Done | UBSan FULL suite 54/54 zero findings (halt_on_error, incl. 300fr soak); valgrind memcheck clean on v2+entropy enc+dec; valgrind leak-check=full clean both ends (exit 0); fuzz tests pass in-suite. *ASan cannot init on this box (container mmap restriction, pre-existing env blocker — precise cause documented in HILLCLIMB) |
 | D5 | DCT-II transforms | ✅ Done | 4×4/8×8 DCT-II + WHT RDO-lite selection (WHT since rejected for v2: genuinely worse, see HILLCLIMB) |
 | D6 | SAO + deblocking | ✅ Done | SAO band/offset (model x6 tuned), deblocking CTU, scalar/NEON parity |
 | D7 | RDO-lite BD-rate vs SAD-only | ✅ Done | BD-rate = −66.4% (5-QP curve, bbb_nature 720p); v2 RDO scale bug fixed since (−8.9% more) |
