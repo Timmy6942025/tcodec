@@ -365,10 +365,9 @@ Phase 3 (entropy coding changes will modify the bitstream format).
 | D6 | SAO + deblocking | ✅ Done | SAO band/offset (model x6 tuned), deblocking CTU, scalar/NEON parity |
 | D7 | RDO-lite BD-rate vs SAD-only | ✅ Done | BD-rate = −66.4% (5-QP curve, bbb_nature 720p); v2 RDO scale bug fixed since (−8.9% more) |
 | D8 | Real-content BD-rate vs x264/x265/SVT-AV1 | ✅ Done | 15-clip × 4-codec BD matrix (tc +37..+159% nature, −49.6% sita WIN; x265/svt sanity); corpus 17 masters + manifest; svt overlap solved (CRF 54-63). 1080p decode baselines next |
-| D9 | ARM decode ≥60fps@720p / ≥30fps@1080p | ❌ Not met | screen 20–30fps, nature 12–19fps@720p (one thread); profile says deblock/coeff/motion dominate |
+| D9 | ARM decode ≥60fps@720p / ≥30fps@1080p | ❌ Not met | park t1/t2/t4 16.9/21.3/18fps, sintel/tos 1080p 5–9fps; interp proven MEMORY-bound (SIMD futile); scaling 1.2× (starvation); parse serial. Program in docs/D9_PLAN.md |
 | D10 | Container/transport (tcmux, MP4 bridge, HLS) | ✅ Done | test_tcmux.sh and test_tcmux_mp4.sh pass |
-| D11 | Docs complete (SPEC/BITSTREAM/PROFILES/BENCHMARKS/README) | ⚠️ Partial | SPEC/BITSTREAM truth-passed for v2 multiref/CfL/ch_intra; BENCHMARKS has 5 new checkpoints; HILLCLIMB + V2_1_BATCH record the program |
-| D12 | Repo hygiene, commits, final report | ⚠️ Partial | ~35 commits ahead of origin/main; docs/FINISH_Tier1.md predates hill-climb era |
+| D11 | Docs complete (SPEC/BITSTREAM/PROFILES/BENCHMARKS/README) | ✅ Done | SPEC/BITSTREAM truth-passed (incl. merge+bi codepoint); BENCHMARKS 15-clip matrix current; goldens multiref+B; FINISH_Tier1 rewritten; HILLCLIMB 69 rows; V2_1_BATCH + 3 design docs |
+| D12 | Repo hygiene, commits, final report | ✅ Done | tree clean on origin/main (pushed per-milestone); FINISH_Tier1 current; goldens regen'd |
 
-**Tier-1 completion blockers:** D8 (full 10+ clip corpus benchmark), D9 (decode real-time),
-D3 (sanitizer under ulimit), D11/D12 (doc truth pass + final report).
+**Tier-1 completion blockers:** D9 (decode sprint: 3.5× needed) + nature-vs-practical gap (projects: grain/vmaf, skip/mbtree-lookahead, v2.1 batch). Compression bar vs NAIVE H.264: MET (park −14%, tree −43% BD).
