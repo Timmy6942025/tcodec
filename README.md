@@ -13,11 +13,11 @@ not yet met.
 | Intra prediction | 18 luma modes |
 | Legacy transforms | 4×4/8×8 WHT for v0/v1 |
 | v2 transforms | Integer residual DCT path with shared quantization |
-| Inter prediction | Median-MV, skip/merge, multi-reference, 6-tap luma fallback |
-| B-frames | Hierarchical GOP4 reorder and bi-prediction infrastructure |
+| Inter prediction | Min-magnitude MV predictor, skip/merge (+B single-merge), 4-ref multiref, 6-tap luma |
+| B-frames | Hierarchical GOP4 fwd/bwd/merge (measured: neutral park, beats-P screen; benchmarks P-only) |
 | Entropy | Legacy Exp-Golomb path and context-modeled range-coded path |
-| Filtering | Deblocking plus v2 luma SAO Band Offset |
-| Rate control | CQP, CBR, and VBR prototype modes |
+| Filtering | Deblocking (HEVC-direction) plus v2 luma SAO Band Offset |
+| Rate control | CQP, working CBR (ρ-model fixed), VBR method present but CLI-unexposed |
 | ARM path | NEON dispatch and scalar/NEON parity checks |
 | Regression suite | 54 codec tests plus container/integration tests |
 

@@ -36,11 +36,11 @@ This document serves as:
 | WHT 4×4 / 8×8 transform | `transform.c` / `transform_neon.c` | Self-inverse, NEON dispatched |
 | Variance-based transform size | `encoder.c` | Threshold = 512 |
 | Entropy coding | `entropy.c` / `range_coder.c` | Legacy Exp-Golomb/tANS-reserved path and context-modeled range-coded path selected by tool flag |
-| Hierarchical hex motion search | `motion.c` | ±16/32/64 range by preset |
+| Hierarchical hex motion search | `motion.c` | 16 fast, 24 medium/slow (wider loses: SAD/RD mismatch), 6-tap qpel refine |
 | 6-tap luma interpolation | `motion.c` | H.264-style half-pel + bilinear quarter-pel |
-| Multi-reference inter prediction | `encoder.c` | 4 DPB slots; SLOW preset searches all |
+| Multi-reference inter prediction | `encoder.c` | 4 DPB slots indexed; search capped at dpb[1] (refs 2–3 ~worthless) |
 | Skip/merge inter modes | `encoder.c` / `decoder.c` | 2-bit mode field: skip/inter/intra/merge |
-| Median MV predictor | `encoder.c` / `decoder.c` | Search center + MVD predictor + merge MV |
+| Min-magnitude MV predictor | `encoder.c` / `decoder.c` | Search center + MVD predictor + merge MV (median diverged) |
 | Deblocking filter | `filter.c` / `filter_neon.c` | Scalar guarded; NEON replaces on ARM |
 | ρ-domain rate control | `ratectl.c` | CQP, CBR, VBR modes |
 | CfL chroma prediction | `encoder.c` / `decoder.c` | Chroma-from-luma for intra; DC(128) for inter |
@@ -129,7 +129,7 @@ Raspberry Pi 4.
 quality at modest decode cost.
 
 **v1 tool flags signaled** (baseline-mobile tools +):
-- `TC_TOOL_MULTI_REF` — Multi-reference inter prediction (SLOW preset)
+- `TC_TOOL_MULTI_REF` — Multi-reference inter prediction (medium+, profile-gated)
 
 | Tool | Supported |
 |------|-----------|
@@ -255,9 +255,9 @@ profile's job). Presets are **already implemented** in the codebase.
 | Preset | Value | Search Range | Description |
 |--------|-------|-------------|-------------|
 | `TC_PRESET_ULTRAFAST` | 0 | 16 px | Minimal search, fastest encode |
-| `TC_PRESET_FAST` | 1 | 32 px | Moderate search, good speed |
-| `TC_PRESET_MEDIUM` | 2 | 32 px | Default balance |
-| `TC_PRESET_SLOW` | 3 | 64 px | Deep search, best quality |
+| `TC_PRESET_FAST` | 1 | 16 px | Bounded structure, good speed |
+| `TC_PRESET_MEDIUM` | 2 | 24 px | Default balance (sweet spot) |
+| `TC_PRESET_SLOW` | 3 | 24 px | Same as medium for v2 (sr64 measured worse) |
 | `TC_PRESET_VERYSLOW` | — | 128 px | **NOT YET IMPLEMENTED.** Research/offline mode from Master Plan. |
 
 ### 5.2 What Presets Currently Affect
@@ -266,9 +266,7 @@ The only encoder behavior that currently varies by preset is **motion
 search range**:
 
 ```c
-int search_range = 32;                              // default (medium/fast)
-if (enc->cfg.preset == TC_PRESET_ULTRAFAST) search_range = 16;
-if (enc->cfg.preset == TC_PRESET_SLOW)      search_range = 64;
+int sr = (enc->cfg.preset <= TC_PRESET_FAST) ? 16 : 24;
 ```
 
 **NOTE**: The Master Plan defines a 5th preset, `veryslow-research`,
