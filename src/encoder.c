@@ -34,11 +34,12 @@ void tc_encoder_destroy(tc_encoder_t *enc);
  * se (MVDs in v2), residual by plane. Range-coder output lags symbols
  * by a few bytes of buffering; shares over full frames are exact-ish. */
 static long long brk_flags = 0, brk_se = 0, brk_resid[3] = {0,0,0};
+static long long brk_est = 0; /* winner lb estimates (RDO picks) */
 static void brk_report(void)
 {
     long long tot = brk_flags + brk_se + brk_resid[0] + brk_resid[1] + brk_resid[2];
-    fprintf(stderr, "BYTEBREAK flags=%lld se(mvd)=%lld resid_luma=%lld resid_chroma=%lld resid_legacy=%lld sum=%lld\n",
-            brk_flags, brk_se, brk_resid[0], brk_resid[1], brk_resid[2], tot);
+    fprintf(stderr, "BYTEBREAK flags=%lld se(mvd)=%lld resid_luma=%lld resid_chroma=%lld resid_legacy=%lld est=%lld sum=%lld\n",
+            brk_flags, brk_se, brk_resid[0], brk_resid[1], brk_resid[2], brk_est, tot);
 }
 static int brk_on = -1;
 static TCODEC_FORCEINLINE int brk_active(void)
@@ -332,6 +333,7 @@ static int rdoq_level1(tc_coeff_t *q, const tc_coeff_t *corig, int n,
     return nz;
 }
 
+
 static int count_coeff_bits(const tc_coeff_t *c, int n)
 {
     int bits = 0;
@@ -358,6 +360,24 @@ static int lastpos_cost(int last, int n)
     int bl = 32 - __builtin_clz(v);
     return 1 + 5 + (2 * bl - 1);
 }
+/* Winner lb-estimate for model-accuracy audit (TC_BYTEBREAK): recompute the
+ * estimator on FINAL written coeffs (write pass only). Compares against
+ * BYTEBREAK actual residual bytes. */
+static void brk_est_add(const tc_coeff_t *c, int n)
+{
+    if (!brk_active()) return;
+    int nz = 0, last = -1;
+    for (int i = n - 1; i >= 0; i--) if (c[i]) { last = i; break; }
+    for (int i = 0; i < n; i++) if (c[i]) nz++;
+    int b = 1 + 2 * nz + lastpos_cost(last, n);
+    for (int i = 0; i <= last; i++) {
+        int v = c[i];
+        if (!v) b += 1;
+        else { int a = v < 0 ? -v : v; b += 1 + 2 * (32 - __builtin_clz(a)) + 1; }
+    }
+    brk_est += b;
+}
+
 
 static tc_mv_s qt_mvp(qt_enc_t *e, int cx, int cy, const qt_mvcell_t *grid)
 {
@@ -406,8 +426,8 @@ static int64_t qt_code_chroma(qt_enc_t *e, int px, int py, int cu,
                  /* Coeffs follow the same entropy path as every other
                   * v2 syntax element (range coder when rc!=NULL, EG
                   * otherwise) so encoder and decoder can never drift. */
-                 if (write) enc_write_coeffs(e->bs,e->tans,e->rc,e->rc_ctx, c4, 16, TC_BLOCK_4x4_ID, 1);
-                 else { int last=-1; for (int i=15;i>=0;i--) if (c4[i]) {last=i;break;} bits += 1 + 2*nz + count_coeff_bits(c4,16) + lastpos_cost(last,16); }
+                 if (write) { enc_write_coeffs(e->bs,e->tans,e->rc,e->rc_ctx, c4, 16, TC_BLOCK_4x4_ID, 1); brk_est_add(c4,16); }
+                 else { int last=-1; for (int i=15;i>=0;i--) if (c4[i]) {last=i;break;}bits += 1 + 2*nz + count_coeff_bits(c4,16) + lastpos_cost(last,16); }
                  tc_coeff_t iq[16];
                  for (int i=0;i<16;i++){ int band=tc_freq_band(i,4); iq[i]=(tc_coeff_t)tc_dequant_coeff(c4[i],eff4_band[band]); }
                 tc_coeff_t recs[16];
@@ -449,8 +469,8 @@ static int64_t qt_code_luma(qt_enc_t *e, int px, int py, int cu,
               for (int i=0;i<64;i++){ int band=tc_freq_band(i,8); tu[i]=(tc_coeff_t)tc_quant_coeff(tu[i],eff8_band[band]); }
               nz = rdoq_level1(tu, qo8, 64, 1, qp, e->lambda); /* RDOQ-lite */
               for (int i=0;i<64;i++){ coeffs[(ty*ntu+tx)*64+i]=tu[i]; } }
-            if (write) { enc_write_bits(e->bs,e->rc,e->rc_ctx,RC_CTX_DCT_SIZE,TC_BLOCK_8x8_ID,1); enc_write_coeffs(e->bs,e->tans,e->rc,e->rc_ctx,coeffs+(ty*ntu+tx)*64,64,TC_BLOCK_8x8_ID, 0); }
-            else { int last=-1; const tc_coeff_t *cc8=coeffs+(ty*ntu+tx)*64; for (int i=63;i>=0;i--) if (cc8[i]) {last=i;break;} bits += 1 + 2*nz + count_coeff_bits(cc8,64) + lastpos_cost(last,64); }
+            if (write) { enc_write_bits(e->bs,e->rc,e->rc_ctx,RC_CTX_DCT_SIZE,TC_BLOCK_8x8_ID,1); enc_write_coeffs(e->bs,e->tans,e->rc,e->rc_ctx,coeffs+(ty*ntu+tx)*64,64,TC_BLOCK_8x8_ID, 0); brk_est_add(coeffs+(ty*ntu+tx)*64,64); }
+            else { int last=-1; const tc_coeff_t *cc8=coeffs+(ty*ntu+tx)*64; for (int i=63;i>=0;i--) if (cc8[i]) {last=i;break;}bits += 1 + 2*nz + count_coeff_bits(cc8,64) + lastpos_cost(last,64); }
             tc_coeff_t iq[64];
             for (int i=0;i<64;i++){ int band=tc_freq_band(i,8); iq[i]=(tc_coeff_t)tc_dequant_coeff(coeffs[(ty*ntu+tx)*64+i],eff8_band[band]); }
             tc_idct8x8_res(iq,res8,8);
@@ -475,8 +495,8 @@ static int64_t qt_code_luma(qt_enc_t *e, int px, int py, int cu,
                   for (int i=0;i<16;i++){ int band=tc_freq_band(i,4); c4[i]=(tc_coeff_t)tc_quant_coeff(c4[i],eff4_band[band]); }
                   nz = rdoq_level1(c4, qo4b, 16, 0, qp, e->lambda); /* RDOQ-lite */
                   for (int i=0;i<16;i++){ coeffs[base+q*16+i]=c4[i]; } }
-                if (write) { enc_write_bits(e->bs,e->rc,e->rc_ctx,RC_CTX_DCT_SIZE,TC_BLOCK_4x4_ID,1); enc_write_coeffs(e->bs,e->tans,e->rc,e->rc_ctx,coeffs+base+q*16,16,TC_BLOCK_4x4_ID, 0); }
-                else { int last=-1; const tc_coeff_t *cc4=coeffs+base+q*16; for (int i=15;i>=0;i--) if (cc4[i]) {last=i;break;} bits += 1 + 2*nz + count_coeff_bits(cc4,16) + lastpos_cost(last,16); }
+                if (write) { enc_write_bits(e->bs,e->rc,e->rc_ctx,RC_CTX_DCT_SIZE,TC_BLOCK_4x4_ID,1); enc_write_coeffs(e->bs,e->tans,e->rc,e->rc_ctx,coeffs+base+q*16,16,TC_BLOCK_4x4_ID, 0); brk_est_add(coeffs+base+q*16,16); }
+                else { int last=-1; const tc_coeff_t *cc4=coeffs+base+q*16; for (int i=15;i>=0;i--) if (cc4[i]) {last=i;break;}bits += 1 + 2*nz + count_coeff_bits(cc4,16) + lastpos_cost(last,16); }
                 tc_coeff_t iq4[16];
                 for (int i=0;i<16;i++){ int band=tc_freq_band(i,4); iq4[i]=(tc_coeff_t)tc_dequant_coeff(c4[i],eff4_band[band]); }
                 tc_coeff_t rec4[16];
