@@ -10,26 +10,12 @@ bwd 40%, bi-average 3%, merge 27%. P multiref extended 2→4 refs (2-bit
 `ref_idx`, same `MULTI_REF` flag): probe wins all QP, screen −9.4%/+0.61dB,
 park −1.0%. Choice value confirmed; joint-search bi remains parked.
 
-## 1. v2 B-frame emission (biggest: +5–10% typical)
+## 1. ~~v2 B-frame emission~~ DONE 2026-09-08/09 (hill-climb 18+24+40)
 
-State: frame machinery (GOP4 reorder, scheduler, DPB poc logic) and leaf
-BIDIR syntax (ref_sel/bi bits, parse+recon both decoder paths, grid rules)
-exist, but `b_mode` is blocked for v2 (`encoder.c`: `!use_v2`) and v2 leaf
-decisions never evaluate B candidates. Legacy B measured ~parity with P
-(+0.35%/−0.04dB; ladder fix −12.5%/−0.41dB diagonal) — v2-B needs B-RDO
-maturity, not just emission. Audit 2026-09-07 found three latent v2-BIDIR
-bugs (all unreachable today since emission is blocked):
-- Encoder replay + both decoders resolve BIDIR refs by DPB SLOT
-  (`ref_sel ? dpb[1] : dpb[0]`) instead of POC order (`dpb_find_poc_lt/gt`
-  like legacy) — wrong under GOP reorder. Fix to poc-based first.
-- The `bi` flag is written and parsed but IGNORED in replay/recon (always
-  averages); single-dir B decodes as average. Must branch properly.
-- BIDIR chroma is single-ref MC while luma averages — must average chroma
-  like luma.
-Plan: (1) poc-based refs everywhere, (2) honor bi flag + averaged chroma,
-(3) qt_leaf BIDIR branch (fwd/bwd/bi RDO + merge-as-bi-average),
-(4) unblock b_mode for v2 (hierarchical QP already fixed),
-(5) test_v2_bframes (GOP roundtrip + order), validate park/screen/probe.
+Shipped: poc refs, bi honored, averaged chroma, fwd/bwd/bi RDO, single-ref
+merge (merge+bi=0 codepoint, no new syntax — old streams bit-identical).
+Post-deblock audit: B neutral park (−0.9% BD), beats-P screen (single-merge
+rescued scroll). Benchmarks stay P-only; B ladder retune deferred.
 
 ## 2. ~~WHT transform-type flag~~ REJECTED 2026-09-06
 
@@ -38,13 +24,9 @@ checkerboard) and forced-WHT measures +10%/-0.2dB: WHT is genuinely worse
 here, not RDO blindness. No v2 work justified. Legacy keeps its harmless
 RDO option (frozen path, not worth churning).
 
-## 3. Per-leaf CfL alpha signaling (small)
+## 3. ~~Per-leaf CfL alpha signaling~~ DONE (adaptive sign/magnitude kept)
 
-Fixed `>>3` hurts negatively-correlated chroma (measured −0.41dB Cr).
-2-bit alpha select per ch_intra leaf (off/>>4/>>3/>>2) or sign+mag.
-Requires color-correlated validation content (probe has it now).
-
-## 4. Chroma SAO + Edge Offset (medium)
+## 4. Chroma SAO + Edge Offset (medium — still open)
 
 Luma BO exists and won big (−17.5% screen). Chroma BO (same pattern,
 separate flags) + luma EO (directional) are natural followers.
@@ -71,6 +53,15 @@ Measured cause: mvp-MC SSE averages 550/cu² even on FROZEN content
 (MVP divergence — zero-MVD skip predicts poorly), and lb crud inflates
 alternatives. Skip needs (d) decent zero-MVD prediction (better MVP)
 on top of (a–c). All reverted; 7th failure total. NOT next.
+
+Update 2026-09-09 (8th trial, HILLCLIMB 44 — mb-tree-lite + static gate):
+per-CTU stability SAD → ρ(CTU) + static-CTU gate (S≤2000) + ρ3-uniform.
+Kills: CTU-adaptive ρ −10%/−2.1dB; faces need finer-than-CTU gating
+(vidyo −13%/−1.4dB at S≤20000, neutral at S≤2000); sita +6%, frozen
++5–19% (mvp-diverged static poisoning). Saves: screen −30%/−0.25dB
+(scroll-coherent MVP only). Verdict: value confined to coherent motion;
+needs MVP-temporal + per-block ρ (real mb-tree + lookahead). Design in
+docs/MBTREE_DESIGN.md. Still NOT next (9th attempt needs new MVP).
 
 ## 6. Per-CTU QP deltas + mb-tree-lite (unblocks adaptive allocation)
 
