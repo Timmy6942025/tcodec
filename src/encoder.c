@@ -856,8 +856,10 @@ static int64_t qt_leaf(qt_enc_t *e, int depth, int cx, int cy, int write)
         /* v2 presets deliberately trade RDO breadth for predictable ARM
          * encode time. Fast uses a compact search; medium retains the
          * broader search used by the original v2 path. */
-        int sr = (enc->cfg.preset <= TC_PRESET_FAST) ? 16 :
-                 (enc->cfg.preset >= TC_PRESET_SLOW) ? 64 : 24; /* TRIAL48b sr24 */
+        /* Search range by preset (trial 48/49): 16 fast, 24 medium/slow.
+         * Wider ranges lose (SAD-best ≠ RD-best; mismatch grows with
+         * range — slow sr64 measured +3.2%/flat vs medium on park). */
+        int sr = (enc->cfg.preset <= TC_PRESET_FAST) ? 16 : 24;
         tc_mv_s center = { mvp.x+px*4, mvp.y+py*4 };
         tc_sad_t sad; tc_mv_s bm = tc_motion_est(enc->dpb[0].frame->y, enc->dpb[0].frame->stride_y, enc->cfg.width,enc->cfg.height, enc->cur->y+py*enc->cur->stride_y+px, enc->cur->stride_y, center.x>>2, center.y>>2, cu, sr, &sad);
         tc_mv_s disp = { bm.x-(mvp.x+px*4), bm.y-(mvp.y+py*4) };
