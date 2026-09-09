@@ -56,7 +56,7 @@ extern "C" {
 #define TC_TANS_TABLE_BITS  10          /* tANS table = 1024 entries */
 #define TC_TANS_TABLE_SIZE  (1 << TC_TANS_TABLE_BITS)
 #define TC_NUM_CONTEXTS     16          /* Reserved for legacy ANS context coding */
-#define TC_NUM_CONTEXTS_RC  76          /* Range coder contexts (Phase 3, D2) */
+#define TC_NUM_CONTEXTS_RC  86          /* Range coder contexts (Phase 3, D2; TRIAL72 grew 76->86 for SAO de-alias) */
 #define TC_TILE_MAX         8
 
 /* Magic bytes */

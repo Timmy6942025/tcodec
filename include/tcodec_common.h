@@ -396,11 +396,11 @@ void tc_rc_dec_coeffs(tc_rc_dec_t *rc, tc_rc_ctx_t *ctx,
 #define RC_CTX_LEVEL_DC    53   /* DC level (D2) */
 #define RC_CTX_REF_SEL     59   /* B-frame ref selection (0=fwd,1=bwd,2=bi) */
 #define RC_CTX_MERGE_FLAG  61   /* merge (no MVD) vs explicit MVD */
-#define RC_CTX_QT_SPLIT    62   /* quadtree split flag (v2, depth in sub-ctx) */
-#define RC_CTX_SAO_TYPE    65   /* v2 SAO off/band flag */
-#define RC_CTX_SAO_BAND    66   /* v2 SAO band position (5 bits) */
-#define RC_CTX_SAO_OFFSET  71   /* v2 SAO signed offset */
-#define RC_CTX_MAX         76
+#define RC_CTX_QT_SPLIT    62   /* quadtree split flag (v2, depth in sub-ctx: 62..65) */
+#define RC_CTX_SAO_TYPE    76   /* v2 SAO off/band flag (TRIAL72: was 65, collided QT_SPLIT depth3) */
+#define RC_CTX_SAO_BAND    77   /* v2 SAO band position (5 bits: 77..81; was 66) */
+#define RC_CTX_SAO_OFFSET  82   /* v2 SAO signed offset (4 bits: 82..85; was 71) */
+#define RC_CTX_MAX         86
 
 /* Frequency band classification for a zigzag position.
  * Reserved for future JND-weighted quantization per coefficient.

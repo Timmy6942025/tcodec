@@ -83,7 +83,7 @@ multi-win kernel + scaling program, scheduled post-compression.
 |---|---|---|
 | D0 | Pass | ARM64/NEON release, fast regression green |
 | D1 | Pass | 54/54 full incl. soak; 53/53 fast |
-| D2 | Pass | Range coder, MV x/y + DC/low/high contexts (76 RC ctx) |
+| D2 | Pass | Range coder, MV x/y + DC/low/high contexts (86 RC ctx; trial-72 SAO de-alias) |
 | D3 | Pass | UBSan 54/54 zero findings; valgrind clean; fuzz green (ASan env-blocked, documented) |
 | D4 | Pass* | B-frame emission + single-merge measured (*gain now content-dependent, not broad) |
 | D5 | Pass | DCT-II 4×4/8×8 + RDO size selection (WHT rejected with data) |
