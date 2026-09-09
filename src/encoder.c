@@ -993,7 +993,7 @@ static int64_t qt_leaf(qt_enc_t *e, int depth, int cx, int cy, int write)
         if (b_intra && !fast_intra && enc->cfg.preset >= TC_PRESET_MEDIUM) {
             tc_intra_predict(pred,cu,ra+1,rl+1,cu,(tc_intra_mode_t)b_imode);
             int ldc = 0;
-            qt_code_luma(e,px,py,cu,TC_BLOCK_8x8_ID,pred,&ldc,0);
+            qt_code_luma(e,px,py,cu,b_dct,pred,&ldc,0); /* TRIAL64: winner TU size (was hardcoded 8x8) */
             tc_pixel_t m0[32*32], m1[32*32], f0[32*32], f1[32*32];
             int cs = cu/2;
             tc_mv_s cmv = qt_mvp(e,cx,cy,e->grid); cmv.x+=px*4; cmv.y+=py*4;

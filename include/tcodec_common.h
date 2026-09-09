@@ -214,8 +214,8 @@ int tc_jnd_weight(int band, int pos);
 /* ── Shared quantizer primitives (encoder + decoder must agree) ──
  *
  * eff = JND-weighted quantizer step for a coefficient position.
- * Quantize uses a dead-zone offset of eff/8 (hill-climbed: harsher than
- * the classic eff/3 spares low-amplitude detail for -15% bytes at -0.4dB);
+ * Quantize uses a dead-zone offset of eff/3 (an eff/8 variant trialed
+ * -15%/-0.4dB but reverted per real-content gates; see HILLCLIMB);
  * reconstruction places the level at the centroid of that bin
  * (q·eff + eff/6) instead of the old
  * q·eff + eff/2, which overshot every level by eff/3 (≈2.3× the MSE of
