@@ -311,6 +311,10 @@ static void qt_paste_rect(uint8_t *dst, int dst_stride, int x, int y,
 static int rdoq_level1(tc_coeff_t *q, const tc_coeff_t *corig, int n,
                        int is8, int qp, int64_t lambda)
 {
+    static long st_c = 0, st_in = 0, st_out = 0;
+    static int st_on = -1;
+    if (st_on < 0) st_on = (getenv("TC_RDOQSPLIT") != 0);
+    if (st_on) { st_c++; for (int i = 0; i < n; i++) if (q[i]) st_in++; }
     for (int i = 0; i < n; i++) {
         int qi = q[i];
         if (qi != 1 && qi != -1) continue;
@@ -324,6 +328,7 @@ static int rdoq_level1(tc_coeff_t *q, const tc_coeff_t *corig, int n,
     }
     int nz = 0;
     for (int i = 0; i < n; i++) if (q[i]) nz++;
+    if (st_on) { st_out += nz; if (st_c % 50000 == 0) fprintf(stderr, "RDOQSPLIT tus=%ld qin=%ld qout=%ld killpct=%.1f\n", st_c, st_in, st_out, st_in ? 100.0*(st_in-st_out)/st_in : 0.0); }
     return nz;
 }
 
