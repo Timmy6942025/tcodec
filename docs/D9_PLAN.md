@@ -3,6 +3,8 @@
 Target: 60fps@720p / 30fps@1080p (Tier-1). Current (this box, 4 cores):
 park 720p30 qp32 multiref+B? no, P-only: t1/t2/t3/t4 = 16.9/21.3/17.0/18.0fps
 Sintel 1080p10 qp32: t1/t2/t4 = 5.2/6.8/7.55fps (target 30 → 4× needed).
+Tos 1080p10 qp32: t1/t4 = 5.1/9.3fps (1.8× scaling — bigger frames utilize
+the wavefront better, consistent with ramp/drain-bound small frames).
 (single cold run read 9.9 — always warm up before measuring).
 
 ## 1. Component profile (park 720p, t1, 30fr)

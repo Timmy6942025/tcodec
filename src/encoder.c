@@ -424,8 +424,8 @@ static int64_t qt_code_chroma(qt_enc_t *e, int px, int py, int cu,
                  for (int band = 0; band < 4; band++) eff4_band[band] = tc_eff_scale(qp, band, 0);
                  int nz=0;
                  { tc_coeff_t qo4[16]; for (int i=0;i<16;i++) qo4[i]=c4[i];
-                 for (int i=0;i<16;i++){ int band=tc_freq_band(i,4); c4[i]=(tc_coeff_t)tc_quant_coeff(c4[i],eff4_band[band]); if(c4[i]) nz++; }
-                   nz = rdoq_level1(c4, qo4, 16, 0, qp, e->lambda); /* RDOQ-lite */ }
+                 for (int i=0;i<16;i++){ int band=tc_freq_band(i,4); c4[i]=(tc_coeff_t)tc_quant_coeff(c4[i],eff4_band[band]); }
+                   nz = rdoq_level1(c4, qo4, 16, 0, qp, tc_lambda(qp)); /* RDOQ-lite: chroma λ (qp_c), not luma λ */ }
                  /* Coeffs follow the same entropy path as every other
                   * v2 syntax element (range coder when rc!=NULL, EG
                   * otherwise) so encoder and decoder can never drift. */
