@@ -456,8 +456,23 @@ tc_mv_s tc_motion_est(const tc_pixel_t *ref, int ref_stride,
         int fy = qy >> 2;
         if (fx < 0 || fy < 0 || fx + blk_size + 1 > ref_w || fy + blk_size + 1 > ref_h)
             continue;
-        tc_sad_t s = tc_sad_subpel(ref, ref_stride, qx, qy,
-                                    orig, orig_stride, blk_size);
+        tc_sad_t s;
+        /* TRIAL56: 6-tap SAD (matches reconstruction filter) when margins
+         * allow; bilinear SAD picks different quarter-pels than 6-tap SSE
+         * prices. Encoder-only, deterministic. */
+        if (fx >= 2 && fy >= 2 && fx + blk_size + 2 < ref_w &&
+            fy + blk_size + 2 < ref_h) {
+            s = 0;
+            for (int yy = 0; yy < blk_size; yy++) {
+                const tc_pixel_t *o = orig + yy * orig_stride;
+                for (int xx = 0; xx < blk_size; xx++)
+                    s += tc_abs((int)o[xx] - luma_interp_hv(ref, ref_stride,
+                        fx + xx, fy + yy, qx & 3, qy & 3));
+            }
+        } else {
+            s = tc_sad_subpel(ref, ref_stride, qx, qy,
+                              orig, orig_stride, blk_size);
+        }
         if (s < best_sad) {
             best_sad = s;
             best_mv.x = qx;
