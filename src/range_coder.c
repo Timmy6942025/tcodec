@@ -182,7 +182,7 @@ void tc_rc_enc_bits(tc_rc_enc_t *rc, tc_rc_ctx_t *ctx, int base_ctx,
     for (int i = 0; i < nbits; i++) {
         uint32_t bit = (val >> (nbits - 1 - i)) & 1;
         int cidx = base_ctx + i;
-        if (cidx >= RC_CTX_MAX) cidx = RC_CTX_MAX - 1;
+        if (cidx >= RC_CTX_MAX) cidx = 75; /* TRIAL73: overflow sink (was 85 SAO, polluted) */
         tc_rc_enc_bit(rc, &ctx[cidx], (int)bit);
     }
 }
@@ -198,18 +198,18 @@ uint32_t tc_rc_enc_ue(tc_rc_enc_t *rc, tc_rc_ctx_t *ctx,
 
     for (int i = 0; i < leading_zeros; i++) {
         int cidx = base_ctx + i;
-        if (cidx >= RC_CTX_MAX) cidx = RC_CTX_MAX - 1;
+        if (cidx >= RC_CTX_MAX) cidx = 75; /* TRIAL73 */
         tc_rc_enc_bit(rc, &ctx[cidx], 0);
     }
     {
         int cidx = base_ctx + leading_zeros;
-        if (cidx >= RC_CTX_MAX) cidx = RC_CTX_MAX - 1;
+        if (cidx >= RC_CTX_MAX) cidx = 75; /* TRIAL73 */
         tc_rc_enc_bit(rc, &ctx[cidx], 1);
     }
     for (int i = 0; i < leading_zeros; i++) {
         uint32_t bit = (code >> (leading_zeros - 1 - i)) & 1;
         int cidx = base_ctx + leading_zeros + 1 + i;
-        if (cidx >= RC_CTX_MAX) cidx = RC_CTX_MAX - 1;
+        if (cidx >= RC_CTX_MAX) cidx = 75; /* TRIAL73 */
         tc_rc_enc_bit(rc, &ctx[cidx], (int)bit);
     }
     return (uint32_t)(leading_zeros * 2 + 1);
@@ -355,7 +355,7 @@ uint32_t tc_rc_dec_bits(tc_rc_dec_t *rc, tc_rc_ctx_t *ctx,
     uint32_t val = 0;
     for (int i = 0; i < nbits; i++) {
         int cidx = base_ctx + i;
-        if (cidx >= RC_CTX_MAX) cidx = RC_CTX_MAX - 1;
+        if (cidx >= RC_CTX_MAX) cidx = 75; /* TRIAL73 */
         val = (val << 1) | (uint32_t)tc_rc_dec_bit(rc, &ctx[cidx]);
     }
     return val;
@@ -366,7 +366,7 @@ uint32_t tc_rc_dec_ue(tc_rc_dec_t *rc, tc_rc_ctx_t *ctx, int base_ctx)
     int leading_zeros = 0;
     while (1) {
         int cidx = base_ctx + leading_zeros;
-        if (cidx >= RC_CTX_MAX) cidx = RC_CTX_MAX - 1;
+        if (cidx >= RC_CTX_MAX) cidx = 75; /* TRIAL73 */
         if (tc_rc_dec_bit(rc, &ctx[cidx]) == 1) break;
         leading_zeros++;
         if (leading_zeros > 31) return 0;
@@ -374,7 +374,7 @@ uint32_t tc_rc_dec_ue(tc_rc_dec_t *rc, tc_rc_ctx_t *ctx, int base_ctx)
     uint32_t suffix = 0;
     for (int i = 0; i < leading_zeros; i++) {
         int cidx = base_ctx + leading_zeros + 1 + i;
-        if (cidx >= RC_CTX_MAX) cidx = RC_CTX_MAX - 1;
+        if (cidx >= RC_CTX_MAX) cidx = 75; /* TRIAL73 */
         suffix = (suffix << 1) | (uint32_t)tc_rc_dec_bit(rc, &ctx[cidx]);
     }
     return (1u << leading_zeros) - 1 + suffix;
