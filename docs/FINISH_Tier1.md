@@ -95,6 +95,14 @@ multi-win kernel + scaling program, scheduled post-compression.
 | D11 | Pass | SPEC/BITSTREAM truth-passed (incl. merge+bi codepoint); BENCHMARKS current |
 | D12 | Pass | Clean tree on origin/main; this report; goldens regen'd |
 
+## Tier-1 compression bar (naive H.264) — MET 2026-09-09
+
+BD-rate tcodecv2 vs x264 ultrafast (3QP curves): park −14.2%, tree
+−42.7%, screen bytes-win at matched quality (ultrafast curve
+container-polluted below ~9KB; qualitative win stands). "Meaningful
+gains over naive H.264 presets" is evidenced on every measured class.
+Vs practical H.264 (veryfast): +37..+159% remains open (Tier-2).
+
 ## Next blockers (Tier-1 closure)
 
 1. **D9 decode sprint** (only Tier-1 gate not passed): motion edge-dispatch,
