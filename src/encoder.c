@@ -584,7 +584,7 @@ static int64_t qt_leaf(qt_enc_t *e, int depth, int cx, int cy, int write)
                 if (e->frame_type==TC_FRAME_BIDIR) { enc_write_bits(e->bs,e->rc,e->rc_ctx,RC_CTX_REF_SEL,nd->ref_sel,1); enc_write_bits(e->bs,e->rc,e->rc_ctx,RC_CTX_BLOCK_MODE,nd->bi,1); }
                 if (nd->skip) { enc_write_bits(e->bs,e->rc,e->rc_ctx,RC_CTX_SKIP_FLAG,1,1); }
                 else if (nd->merge) { enc_write_bits(e->bs,e->rc,e->rc_ctx,RC_CTX_SKIP_FLAG,0,1); enc_write_bits(e->bs,e->rc,e->rc_ctx,RC_CTX_MERGE_FLAG,1,1); }
-                else { enc_write_bits(e->bs,e->rc,e->rc_ctx,RC_CTX_SKIP_FLAG,0,1); enc_write_bits(e->bs,e->rc,e->rc_ctx,RC_CTX_MERGE_FLAG,0,1); if (e->multiref && e->frame_type==TC_FRAME_INTER) enc_write_bits(e->bs,e->rc,e->rc_ctx,RC_CTX_REF_SEL,nd->ref_sel & 3,2); enc_write_bits(e->bs,e->rc,e->rc_ctx,RC_CTX_DCT_SIZE,nd->dct_size,1); enc_write_se(e->bs,e->rc,e->rc_ctx,RC_CTX_MVD_X,nd->mvd_x); enc_write_se(e->bs,e->rc,e->rc_ctx,RC_CTX_MVD_Y,nd->mvd_y); }
+                else { enc_write_bits(e->bs,e->rc,e->rc_ctx,RC_CTX_SKIP_FLAG,0,1); enc_write_bits(e->bs,e->rc,e->rc_ctx,RC_CTX_MERGE_FLAG,0,1); if (e->multiref && e->frame_type==TC_FRAME_INTER) enc_write_bits(e->bs,e->rc,e->rc_ctx,RC_CTX_REF_SEL,nd->ref_sel & 3,2); enc_write_bits(e->bs,e->rc,e->rc_ctx,RC_CTX_DCT_SIZE,nd->dct_size,1); enc_write_se(e->bs,e->rc,e->rc_ctx,RC_CTX_MVD_X,nd->mvd_x); enc_write_se(e->bs,e->rc,e->rc_ctx,RC_CTX_MVD_Y,nd->mvd_y); if (brk_active()) { static long mx=0; static long long s=0,n=0; long a = nd->mvd_x<0?-nd->mvd_x:nd->mvd_x, b = nd->mvd_y<0?-nd->mvd_y:nd->mvd_y; if (a>mx) mx=a; if (b>mx) mx=b; s+=a+b; n+=2; if (n%2000==0) fprintf(stderr, "BRKMVD max=%ld avg=%.1f\n", mx, (double)s/n); } }
             }
             tc_mv_s mvp = qt_mvp(e,cx,cy,e->grid);
             tc_mv_s mv = { mvp.x+px*4+nd->mvd_x, mvp.y+py*4+nd->mvd_y };
@@ -730,6 +730,7 @@ static int64_t qt_leaf(qt_enc_t *e, int depth, int cx, int cy, int write)
      * (dl + (lambda<<16)*bits)>>16 form crushed SSE by 65536x and made
      * every decision bits-only. Fixed by hill-climb audit. */
     uint8_t b_intra=0,b_bi=0,b_refsel=0,b_dct=TC_BLOCK_8x8_ID,b_skip=0,b_merge=0,b_ch=0;
+    int won_global = 0; /* set only by P global-center win; reset by later wins */
     int b_imode=1,b_cmode=0,b_mvdx=0,b_mvdy=0;
 
     b_skip=0; b_merge=0;  /* keyframes are intra-only */
@@ -909,7 +910,7 @@ static int64_t qt_leaf(qt_enc_t *e, int depth, int cx, int cy, int write)
                 int bits_g = 1 + 1 + 1 + 1 + 2 + (tc_bs_se_bits(dispg.x)+tc_bs_se_bits(dispg.y)) + lbg;
                 if (e->multiref) bits_g += 1;
                 int64_t costg = dlg + e->lambda*bits_g;
-                if (costg < best_cost) { best_cost=costg; b_intra=0;b_skip=0;b_merge=0;b_dct=gdct; b_mvdx=dispg.x;b_mvdy=dispg.y;b_refsel=0;b_bi=0;b_ch=0; b_cmode=0;b_imode=1; }
+                if (costg < best_cost) { best_cost=costg; b_intra=0;b_skip=0;b_merge=0;b_dct=gdct; b_mvdx=dispg.x;b_mvdy=dispg.y;b_refsel=0;b_bi=0;b_ch=0; b_cmode=0;b_imode=1; won_global=1; }
             }
         }
         if (enc->cfg.preset >= TC_PRESET_MEDIUM) {
@@ -917,7 +918,7 @@ static int64_t qt_leaf(qt_enc_t *e, int depth, int cx, int cy, int write)
             int64_t dl2 = qt_code_luma(e,px,py,cu,TC_BLOCK_8x8_ID,pred,&lb,0);
             int bits_merge = 1+1+1+1+1+1+lb;
             int64_t cost2 = dl2 + e->lambda*bits_merge;
-            if (cost2<best_cost) { best_cost=cost2;b_intra=0;b_merge=1;b_skip=0;b_mvdx=disp.x;b_mvdy=disp.y; b_dct=TC_BLOCK_8x8_ID;b_ch=0;b_cmode=0;b_imode=1;b_refsel=0;b_bi=0; }
+            if (cost2<best_cost) { best_cost=cost2;b_intra=0;b_merge=1;b_skip=0;b_mvdx=disp.x;b_mvdy=disp.y; b_dct=TC_BLOCK_8x8_ID;b_ch=0;b_cmode=0;b_imode=1;b_refsel=0;b_bi=0; won_global=0; }
         }
     }
 
@@ -969,7 +970,7 @@ static int64_t qt_leaf(qt_enc_t *e, int depth, int cx, int cy, int write)
             }
             int bits = 1 + 5 + 1 + 1 + lb;
             int64_t cost = dl + e->lambda*bits;
-            if (cost<best_cost){ best_cost=cost;b_intra=1;best_imode=m;b_dct=TC_BLOCK_8x8_ID; b_skip=0;b_merge=0;b_mvdx=0;b_mvdy=0;b_ch=0;b_cmode=0;b_refsel=0;b_bi=0; }
+            if (cost<best_cost){ best_cost=cost;b_intra=1;best_imode=m;b_dct=TC_BLOCK_8x8_ID; b_skip=0;b_merge=0;b_mvdx=0;b_mvdy=0;b_ch=0;b_cmode=0;b_refsel=0;b_bi=0; won_global=0; }
         }
         if (b_intra)
             b_imode = best_imode;
@@ -1019,6 +1020,14 @@ static int64_t qt_leaf(qt_enc_t *e, int depth, int cx, int cy, int write)
      * skip chroma AND propagation. Parked. */
 
     nd->intra=b_intra; nd->skip=b_skip; nd->merge=b_merge; nd->bi=b_bi;
+    { static int wsh = -1; if (wsh < 0) wsh = (getenv("TC_WINSHARE") != 0);
+    if (wsh && e->frame_type == TC_FRAME_INTER) {
+        static long cE0=0,cEm=0,cG=0,cM=0,cI=0,cT=0,cS=0;
+        cT++;
+        if (b_intra) cI++; else if (b_skip) cS++; else if (b_merge) cM++; else if (won_global) cG++;
+        else if (b_refsel) cEm++; else cE0++;
+        if (cT%5000==0) fprintf(stderr, "WINSHARE P: expl0=%ld explN=%ld glob=%ld merge=%ld intra=%ld skip=%ld\n", cE0, cEm, cG, cM, cI, cS);
+    } }
     nd->intra_mode=(uint8_t)b_imode; nd->intra_cmode=(uint8_t)b_cmode;
     nd->ch_intra=b_ch; nd->ref_sel=(uint8_t)b_refsel; nd->dct_size=b_dct;
     nd->mvd_x=(int16_t)b_mvdx; nd->mvd_y=(int16_t)b_mvdy;
