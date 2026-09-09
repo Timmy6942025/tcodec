@@ -5,8 +5,9 @@ nature compression gap. All correctness, sanitizer, corpus, container,
 parity, and documentation gates pass.**
 
 This report supersedes all prior revisions (the August edition predates
-the September hill-climb program: trials 1–24, deblock rewrite, RDOQ,
-B single-merge). Every number below is reproducible with the commands
+the September hill-climb program, now trials 1–58: deblock rewrite, RDOQ,
+B single-merge, search-range discipline, min-mag MVP, 6-tap ME refine,
+CBR fix, keyint default). Every number below is reproducible with the commands
 shown; decode-based PSNR is ground truth (`tcdec --check` fixed for
 B-drain tails this month — encoder-reported PSNR is NOT trusted).
 
@@ -41,7 +42,7 @@ B-drain tails this month — encoder-reported PSNR is NOT trusted).
 | ASan | **Cannot init on this host** (container mmap restriction, pre-existing env blocker — NOT a code finding; UBSan+valgrind cover it) |
 | `git status` | clean; everything on `origin/main` |
 
-## Compression standing (D8 matrix: 11 clips × 4 codecs, BD-rate vs x264vf)
+## Compression standing (D8 matrix: 15 clips × 4 codecs, BD-rate vs x264vf)
 
 | Clip | tc | x265 | svtav1p6 |
 |---|---|---|---|
@@ -56,11 +57,16 @@ B-drain tails this month — encoder-reported PSNR is NOT trusted).
 | bbb_nature | +49.7% | −42.3% | −66.5% |
 | ed_dark | +34.0% | −50.8% | −74.6% |
 | sita_flat | **−49.6% (WIN)** | −67.6% | −87.0% |
+| csgo_gaming | +52.4% | −19.1% | −54.1% |
+| minecraft_gaming | +50.3% | −21.0% | −57.8% |
+| tos_vfx | +85.5% | −36.4% | −57.5% |
+| sintel_action | +37.4% | −44.4% | −70.0% |
 
 ¹ x265 worse than x264 on screen. September program moved park
 +150–200%→+95%, tree ~10×→+68%, screen −21% bytes @−3.3dB, sita to a
 win. B-frames: neutral park, beats-P screen (single-merge). The nature
-gap (+68..+159%) remains the open compression item; byte-breakdown says
+gap (+37..+159%) remains the open compression item (best sintel +37.4%,
+gaming +50–52%); byte-breakdown says
 86% of park bytes are luma residual.
 
 ## Decoder performance (D9 — NOT MET, program in docs/D9_PLAN.md)
@@ -95,5 +101,5 @@ multi-win kernel + scaling program, scheduled post-compression.
    entropy-parse throughput, wavefront stragglers; needs perf hardware.
 2. **Nature compression**: +68..+159% BD gap (skip-8 needs mb-tree+MVP;
    texture/RDOQ extensions; B-ladder retune).
-3. Deferred corpus classes: gaming (csgo/minecraft 2.9GB each), 1080p
-   sintel/tos masters, tos_vfx, sintel_action.
+3. Remaining corpus (fetched, unbenchmarked): 1080p decode rows beyond
+   baselines; nothing else outstanding on content.
