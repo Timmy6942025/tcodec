@@ -79,6 +79,16 @@ adaptation without lookahead/propagation can't win. Concrete design
 - Must earn ~2% overhead; validate screen (static regions) + park
   (uniform-motion control). This unblocks skip (#5) and proper CRF.
 
+## 7. Intra MPM + merge list (small, syntax — scoped 2026-09-09)
+
+- Intra MPM: 5-bit flat mode → left-predicted MPM (1 bit hit). Intra is
+  27–65% of P-leaves; saves ~2–3 bits/hit. Needs mode storage in all 3
+  MV grids + tool-gated flag. EV ~0.5–2% (hit-rate-dependent).
+- Merge list: choice among {median,left,above} MVs (see
+  docs/MERGELIST_DESIGN.md). EV ~1–2%. Same vehicle as MPM.
+- Both need the v2.1 version ceremony (goldens BEFORE — current as of
+  hill-31+; BITSTREAM §7.6; compat plan below). Do NOT drive by solo.
+
 ## Compatibility plan
 
 - v2.1 = new payload version OR tool-gated optional syntax per item.
