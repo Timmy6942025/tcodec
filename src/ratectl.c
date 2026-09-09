@@ -45,11 +45,13 @@ static double rho_from_qp(int qp)
 
 static int qp_from_rho(double rho_target)
 {
-    /* Inverse sigmoid: QP(ρ) = mid - scale × ln(ρ/(1-ρ)) */
+    /* Inverse sigmoid: QP(ρ) = mid + scale × ln(ρ/(1−ρ)). NOTE the plus:
+     * a minus here breaks roundtrip identity (qp32 remapped to qp24
+     * every frame_start) and diverges CBR. Fixed 2026-09-09 (trial 53). */
     if (rho_target <= 0.01) return TC_QP_MIN;
     if (rho_target >= 0.99) return TC_QP_MAX;
     double logit = log(rho_target / (1.0 - rho_target));
-    double qp = RHO_MODEL_MID - RHO_MODEL_SCALE * logit;
+    double qp = RHO_MODEL_MID + RHO_MODEL_SCALE * logit;
     return tc_clip((int)(qp + 0.5), TC_QP_MIN, TC_QP_MAX);
 }
 
@@ -97,27 +99,28 @@ void tc_ratectl_frame_start(tc_ratectl_t *rc, tc_frame_type_t type)
         return;
     }
 
-    /* For CBR/VBR: adjust QP based on buffer status */
+    /* For CBR/VBR: adjust QP based on buffer status. level is budget
+     * fullness (1 = full budget): overspend drains it → save (QP up);
+     * underspend fills it → spend (QP down). Negative feedback; both
+     * branch signs were inverted before trial 53 (runaway finer). */
     if (rc->method == TC_RC_CBR || rc->method == TC_RC_VBR) {
         double buffer_fill = rc->buffer_level;
 
-        /* If buffer is getting too full, increase QP (coarser) */
-        /* If buffer is getting empty, decrease QP (finer) */
         double adjustment = 0.0;
 
         if (buffer_fill > 0.8) {
-            adjustment = 2.0;   /* Increase QP to reduce bitrate */
+            adjustment = -2.0;  /* Plenty of budget: decrease QP (finer) */
         } else if (buffer_fill > 0.6) {
-            adjustment = 1.0;
-        } else if (buffer_fill < 0.2) {
-            adjustment = -2.0;  /* Decrease QP to increase bitrate */
-        } else if (buffer_fill < 0.4) {
             adjustment = -1.0;
+        } else if (buffer_fill < 0.2) {
+            adjustment = 2.0;   /* Budget drained: increase QP (coarser) */
+        } else if (buffer_fill < 0.4) {
+            adjustment = 1.0;
         }
 
-        /* Map adjustment through ρ-domain */
+        /* Map adjustment through ρ-domain (higher rho = coarser). */
         double current_rho = rho_from_qp(rc->qp);
-        double target_rho  = current_rho - adjustment * 0.05;
+        double target_rho  = current_rho + adjustment * 0.05;
         target_rho = tc_clip_d(target_rho, 0.05, 0.95);
 
         rc->qp = qp_from_rho(target_rho);
