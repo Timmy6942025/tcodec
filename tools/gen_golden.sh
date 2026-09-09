@@ -128,12 +128,32 @@ for yuv in "$GOLDEN_DIR"/*.yuv; do
             || { echo "  FAILED: $tcname"; exit 1; }
         hash=$(sha256sum "$GOLDEN_DIR/$tcname" | cut -d' ' -f1)
         echo "$hash  $tcname" >> "$HASH_FILE"
+
+        # v2e multiref: profile-1 4-ref syntax (hill-climb 19)
+        tcname="${base}_qp${qp}_v2m.tcv"
+        echo "  Encoding $tcname (w=$w h=$h qp=$qp)..."
+        "$TCENC" -w "$w" -h "$h" -q "$qp" --v2 --entropy --profile 1 \
+            -o "$GOLDEN_DIR/$tcname" "$yuv" 2>&1 \
+            || { echo "  FAILED: $tcname"; exit 1; }
+        hash=$(sha256sum "$GOLDEN_DIR/$tcname" | cut -d' ' -f1)
+        echo "$hash  $tcname" >> "$HASH_FILE"
+
+        # v2e B-frames: GOP4 fwd/bwd/single-merge (hill-climb 18/20/24/40)
+        tcname="${base}_qp${qp}_v2b.tcv"
+        echo "  Encoding $tcname (w=$w h=$h qp=$qp)..."
+        "$TCENC" -w "$w" -h "$h" -q "$qp" --v2 --entropy --profile 1 -b \
+            -o "$GOLDEN_DIR/$tcname" "$yuv" 2>&1 \
+            || { echo "  FAILED: $tcname"; exit 1; }
+        hash=$(sha256sum "$GOLDEN_DIR/$tcname" | cut -d' ' -f1)
+        echo "$hash  $tcname" >> "$HASH_FILE"
     done
 done
 
 # Decode every conformance stream and hash the decoded output.
-# Byte-identical re-decode is asserted both here (manifest) and in
-# the C suite (test_golden_decode).
+# Byte-identical re-decode is asserted here via the manifest (committed;
+# regenerating on another host/arch and diffing manifests is the
+# cross-platform conformance check). v2 tool paths (multiref, B-frames)
+# have dedicated in-process roundtrip tests in test_tcodec.c.
 echo "Decoding conformance streams..."
 for tc in "$GOLDEN_DIR"/*.tcv; do
     dec="${tc%.tcv}_dec.yuv"
