@@ -737,10 +737,11 @@ static tc_mv_s qt_dec_mvp(const qt_dec_t *d, int cx, int cy)
     if (!ha) a = hb ? b : c;
     if (!hb) b = ha ? a : c;
     if (!hc) c = ha ? a : b;
-    int px,py;
-    { int t,x[3]={a.x,b.x,c.x}; if(x[0]>x[1]){t=x[0];x[0]=x[1];x[1]=t;} if(x[1]>x[2]){t=x[1];x[1]=x[2];x[2]=t;} if(x[0]>x[1]){t=x[0];x[0]=x[1];x[1]=t;} px=x[1]; }
-    { int t,y[3]={a.y,b.y,c.y}; if(y[0]>y[1]){t=y[0];y[0]=y[1];y[1]=t;} if(y[1]>y[2]){t=y[1];y[1]=y[2];y[2]=t;} if(y[0]>y[1]){t=y[0];y[0]=y[1];y[1]=t;} py=y[1]; }
-    return (tc_mv_s){px,py};
+    /* TRIAL54: min-magnitude candidate (mirrors encoder qt_mvp exactly). */
+    { int64_t qa=(int64_t)a.x*a.x+(int64_t)a.y*a.y, qb=(int64_t)b.x*b.x+(int64_t)b.y*b.y, qc=(int64_t)c.x*c.x+(int64_t)c.y*c.y;
+      if (qb < qa && qb <= qc) return (tc_mv_s){b.x,b.y};
+      if (qc < qa && qc < qb) return (tc_mv_s){c.x,c.y};
+      return (tc_mv_s){a.x,a.y}; }
 }
 
 static const uint8_t qt_band4[16] = {
@@ -1402,11 +1403,14 @@ static void v2_parse_leaf(v2_parse_ctx_t *p, int depth, int cx, int cy)
         if (!hc) mc = ha ? ma : mb;
     }
     int vx[3] = { ma.x, mb.x, mc.x }, vy[3] = { ma.y, mb.y, mc.y };
-    for (int k = 0; k < 2; k++) for (int j = k + 1; j < 3; j++) {
-        if (vx[k] > vx[j]) { int t = vx[k]; vx[k] = vx[j]; vx[j] = t; }
-        if (vy[k] > vy[j]) { int t = vy[k]; vy[k] = vy[j]; vy[j] = t; }
-    }
-    tc_mv_s mvp = { vx[1], vy[1] };
+    /* TRIAL54: min-magnitude candidate (mirrors encoder qt_mvp exactly). */
+    int64_t q0=(int64_t)vx[0]*vx[0]+(int64_t)vy[0]*vy[0];
+    int64_t q1=(int64_t)vx[1]*vx[1]+(int64_t)vy[1]*vy[1];
+    int64_t q2=(int64_t)vx[2]*vx[2]+(int64_t)vy[2]*vy[2];
+    tc_mv_s mvp;
+    if (q1 < q0 && q1 <= q2) { mvp.x = vx[1]; mvp.y = vy[1]; }
+    else if (q2 < q0 && q2 < q1) { mvp.x = vx[2]; mvp.y = vy[2]; }
+    else { mvp.x = vx[0]; mvp.y = vy[0]; }
     n->mv_x = (int16_t)(mvp.x + px * 4 + ((n->skip || n->merge || n->intra) ? 0 : n->mvd_x));
     n->mv_y = (int16_t)(mvp.y + py * 4 + ((n->skip || n->merge || n->intra) ? 0 : n->mvd_y));
 

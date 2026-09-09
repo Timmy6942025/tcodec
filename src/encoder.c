@@ -390,10 +390,13 @@ static tc_mv_s qt_mvp(qt_enc_t *e, int cx, int cy, const qt_mvcell_t *grid)
     if (!ha) a = hb ? b : c;
     if (!hb) b = ha ? a : c;
     if (!hc) c = ha ? a : b;
-    int px,py;
-    { int t,x[3]={a.x,b.x,c.x}; if(x[0]>x[1]){t=x[0];x[0]=x[1];x[1]=t;} if(x[1]>x[2]){t=x[1];x[1]=x[2];x[2]=t;} if(x[0]>x[1]){t=x[0];x[0]=x[1];x[1]=t;} px=x[1]; }
-    { int t,y[3]={a.y,b.y,c.y}; if(y[0]>y[1]){t=y[0];y[0]=y[1];y[1]=t;} if(y[1]>y[2]){t=y[1];y[1]=y[2];y[2]=t;} if(y[0]>y[1]){t=y[0];y[0]=y[1];y[1]=t;} py=y[1]; }
-    return (tc_mv_s){px,py};
+    /* TRIAL54: min-magnitude candidate beats per-component median where
+     * neighbors disagree (measured mvp-MC SSE 550/cu2 frozen). Coherent
+     * fields unaffected (all candidates ~equal); static pulls to zero. */
+    { int64_t qa=(int64_t)a.x*a.x+(int64_t)a.y*a.y, qb=(int64_t)b.x*b.x+(int64_t)b.y*b.y, qc=(int64_t)c.x*c.x+(int64_t)c.y*c.y;
+      if (qb < qa && qb <= qc) return (tc_mv_s){b.x,b.y};
+      if (qc < qa && qc < qb) return (tc_mv_s){c.x,c.y};
+      return (tc_mv_s){a.x,a.y}; }
 }
 
 static int64_t qt_code_chroma(qt_enc_t *e, int px, int py, int cu,
