@@ -212,7 +212,7 @@ def main():
     ap.add_argument("--codecs", default="tcodec")
     ap.add_argument("--qps", default="22,27,32,37,42")
     ap.add_argument("--frames", type=int, default=0)
-    ap.add_argument("--keyint", type=int, default=48)
+    ap.add_argument("--keyint", type=int, default=250)
     ap.add_argument("--threads", type=int, default=4)
     ap.add_argument("--tc-preset", type=int, default=2)
     ap.add_argument("--tc-extra", default="--entropy")

@@ -41,7 +41,7 @@ static void print_usage(const char *prog)
         "  -q QP     Quantization parameter 0-63 (default 32)\n"
         "  -r KBPS   Target bitrate in kbps (enables CBR)\n"
         "  -p PRESET 0=ultrafast 1=fast 2=medium 3=slow (default 2)\n"
-        "  -k KF     Keyframe interval (default 30)\n"
+        "  -k KF     Keyframe interval (default 250, x264 parity)\n"
         "  -t THR    Threads (default 4)\n"
         "  --rgb     Input is RGB24\n"
         "  -n N      Encode N frames (0=all)\n"
@@ -62,7 +62,7 @@ int main(int argc, char **argv)
     const char *output_path = NULL;
     int width = 0, height = 0;
     int fps = 30, qp = 32, preset = 2;
-    int keyframe_interval = 30, threads = 4;
+    int keyframe_interval = 250, threads = 4;
     int target_bitrate_kbps = 0;
     int is_rgb = 0, max_frames = 0, verbose = 0;
     int bitstream_version = -1;  /* -1 = use default from tc_config_defaults */
