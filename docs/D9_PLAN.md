@@ -54,6 +54,16 @@ D9 = multi-win program + (ideally) perf hardware (none on this box)
 for kernel tuning. Do NOT attempt as drive-by trials; schedule a
 dedicated kernel sprint after compression work lands.
 
+Update 2026-09-09 (trial 47 verdict): motion edge-tiling REVERTED —
+microbench proves interpolation is MEMORY-bound (NEON 6-tap ≈ scalar
+per block; tiling worth ~1.3% total). SIMD kernel work on interp/idct
+is largely futile here; D9 must come from VOLUME reduction (fewer nz:
+RDOQ did this; skip would; B-frames do) + bandwidth/layout + (still)
+wavefront stragglers. Parse-side (serial entropy) remains the one
+compute-bound candidate. Coeff-parse core already force-inlined (prior
+pass); further micro-opts ≈ 2–3% total. Real parse parallelism needs
+per-row/CTU entry points (FORMAT change, v2.1 batch).
+
 Update 2026-09-09 (trials 46/47): motion edge-tiling REVERTED — microbench
 proves interpolation is MEMORY-bound (NEON 6-tap ≈ scalar per block;
 tiling worth ~1.3% total). SIMD kernel work on interp/idct is largely
