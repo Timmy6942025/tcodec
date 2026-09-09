@@ -978,16 +978,23 @@ static int64_t qt_leaf(qt_enc_t *e, int depth, int cx, int cy, int write)
             tc_intra_predict(pred,cu,ra+1,rl+1,cu,(tc_intra_mode_t)m);
             int lb = 0;
             int64_t dl;
+            uint8_t idct = TC_BLOCK_8x8_ID;
             if (fast_intra) {
                 int64_t sad = tc_sad(orig_luma, enc->cur->stride_y, pred, cu, cu);
                 dl = (sad * sad) / (int64_t)(cu * cu);
                 lb = 1 + 5 + 1 + 1;
             } else {
-                dl = qt_code_luma(e,px,py,cu,TC_BLOCK_8x8_ID,pred,&lb,0);
+                /* TRIAL59: intra TU-size RDO (was hardcoded 8x8): 4x4 TUs
+                 * fit directional residuals better; decoder reads the same
+                 * dct_size flag (zero new syntax). */
+                if (enc->cfg.preset >= TC_PRESET_MEDIUM && cu <= 32)
+                    dl = qt_code_best(e,px,py,cu,pred,&lb,&idct);
+                else
+                    dl = qt_code_luma(e,px,py,cu,TC_BLOCK_8x8_ID,pred,&lb,0);
             }
             int bits = 1 + 5 + 1 + 1 + lb;
             int64_t cost = dl + e->lambda*bits;
-            if (cost<best_cost){ best_cost=cost;b_intra=1;best_imode=m;b_dct=TC_BLOCK_8x8_ID; b_skip=0;b_merge=0;b_mvdx=0;b_mvdy=0;b_ch=0;b_cmode=0;b_refsel=0;b_bi=0; won_global=0; }
+            if (cost<best_cost){ best_cost=cost;b_intra=1;best_imode=m;b_dct=idct; b_skip=0;b_merge=0;b_mvdx=0;b_mvdy=0;b_ch=0;b_cmode=0;b_refsel=0;b_bi=0; won_global=0; }
         }
         if (b_intra)
             b_imode = best_imode;
