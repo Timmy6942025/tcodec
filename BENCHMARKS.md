@@ -177,6 +177,16 @@ is next.
 remaining gap is overwhelmingly luma-residual magnitude (prediction
 quality feeding it + quant/RDOQ + coeff entropy), not signaling.
 
+### Current-code curve (hill-climb 26–29: +sr24, min-mag MVP, slowfix)
+
+| Codec | QP | Bytes (30fr) | PSNR-Y | SSIM |
+|---|---:|---:|---:|---:|
+| tcodecv2 | 27 | 1,030,075 | 30.40 | 0.8776 |
+| tcodecv2 | 32 | 433,996 | 27.06 | 0.8141 |
+| tcodecv2 | 37 | 146,031 | 24.32 | 0.7404 |
+
+**BD-rate vs x264vf: +90.6%** (was +99.6% deblock-era, +150–200% pre-climb).
+
 ## Grain checkpoint (2026-09-06, ducks_take_off 720p50, 30 frames)
 
 Byte-range prefix of `ducks_take_off_420_720p50.y4m`, first 30 frames;

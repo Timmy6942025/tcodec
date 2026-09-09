@@ -515,14 +515,6 @@ static int64_t qt_code_luma(qt_enc_t *e, int px, int py, int cu,
     return distortion;
 }
 
-static uint8_t qt_choose_dct(const tc_pixel_t *pred, int cu)
-{
-    int32_t sum=0,sumsq=0,n=cu*cu;
-    for (int i=0;i<n;i++){ int v=pred[i]; sum+=v; sumsq+=v*v; }
-    int var = sumsq/n - (sum/n)*(sum/n);
-    return (var > VARIANCE_THRESHOLD) ? TC_BLOCK_4x4_ID : TC_BLOCK_8x8_ID;
-}
-
 /* Best-of-both transform sizes for v2 inter candidates (preset>=MEDIUM).
  * qt_code_luma already supports 4x4 and 8x8 with matched decoder syntax;
  * callers previously hardcoded 8x8. Returns winning distortion, with the
@@ -2029,24 +2021,6 @@ static void encode_block(tc_encoder_t *enc, tc_ctu_info_t *ctu,
  * at the bit level. This preserves bit-exact output whether WPP
  * (per-row buffers) or sequential (single buffer) is used.
  * ══════════════════════════════════════════════════════════════ */
-
-static void merge_row_bitstream(tc_bs_writer_t *main_bs,
-                                 const uint8_t *row_buf, size_t row_bytes,
-                                 int row_bit_pos)
-{
-    /* Copy full bytes first */
-    for (size_t i = 0; i < row_bytes; i++) {
-        tc_bs_writer_write_bits(main_bs, row_buf[i], 8);
-    }
-
-    /* Copy remaining partial byte (bit_pos bits from the MSB side) */
-    if (row_bit_pos > 0) {
-        uint8_t partial = row_buf[row_bytes];
-        int shift = 8 - row_bit_pos;
-        uint8_t bits = partial >> shift;
-        tc_bs_writer_write_bits(main_bs, bits, row_bit_pos);
-    }
-}
 
 /* ── Encode one CTU row (WPP unit) ──────────────────────────── */
 
