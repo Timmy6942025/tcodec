@@ -47,7 +47,7 @@ README makes claims not backed by code, this spec marks them as
 |------|-------|-------------|
 | KEY (I-frame) | 0 | Intra-only. All blocks use intra prediction. |
 | INTER (P-frame) | 1 | Blocks may use skip, inter, intra, or merge modes. Up to 4 reference frames. |
-| BIDIR (B-frame) | 2 | Hierarchical GOP4 reorder and forward/backward/bi-prediction infrastructure is implemented in the v1 extension path; broad compression benefit remains unestablished. |
+| BIDIR (B-frame) | 2 | Hierarchical GOP4 reorder; v2 fwd/bwd/merge-single RDO (merge+bi codepoint, BITSTREAM.md). Measured: neutral park (B-vs-P +3.7% BD), beats-P screen; benchmarks stay P-only. |
 
 ### 3.2 Frame Dimensions
 
