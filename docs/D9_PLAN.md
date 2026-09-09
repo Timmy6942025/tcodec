@@ -30,9 +30,14 @@ cannot reach 60fps (serial parse + Amdahl); it multiplies serial wins.
 ## 3. Ranked worklist
 
 1. **Serial task cost (same work helps serial + starvation)**:
-   - motion edge dispatch: 21% of luma interp calls fall back to
-     scalar (fx<2||fy<2 borders). Widen NEON with bit-exact clamped
-     edges (TC_DISPATCH=1 meters; OOB safety is fuzz-gated).
+   - motion edge dispatch (D9-1, DESIGNED): 21% of luma interp calls
+     fall back to the slow per-pixel scalar path (fx<2||fy<2 true
+     edges; decoder NEON gate stricter than scalar can_6tap_full).
+     Design: interior sub-rectangle satisfying NEON margins runs the
+     existing NEON kernel; clamped L-fringe runs scalar (same per-pixel
+     arithmetic = bit-exact by construction; OOB safety preserved).
+     Est ~15% of motion (~4% total), zero RD risk. Gate: fps + parity
+     + recon. TC_DISPATCH=1 meters.
    - entropy parse throughput: 21% combined; range-dec per-bin
      branches. Micro-opt + batching (needs careful measurement).
    - deblock: 17%, but reject-gating only helps flat content
@@ -48,6 +53,14 @@ Serial 17fps → 60fps needs ~3.5×. No single item above exceeds ~1.2×.
 D9 = multi-win program + (ideally) perf hardware (none on this box)
 for kernel tuning. Do NOT attempt as drive-by trials; schedule a
 dedicated kernel sprint after compression work lands.
+
+Update 2026-09-09 (trial 47): motion edge-tiling REVERTED — microbench
+proves interpolation is MEMORY-bound (NEON 6-tap ≈ scalar per block;
+tiling worth ~1.3% total). SIMD kernel work on interp/idct is largely
+futile on this workload; D9 must come from VOLUME reduction (fewer nz:
+RDOQ did this; skip would; B-frames do) + bandwidth/layout + (still)
+wavefront stragglers. Parse-side (serial entropy) remains the one
+compute-bound candidate.
 
 ## 5. Infra landed (hill-23 batch)
 

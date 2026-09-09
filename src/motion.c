@@ -626,10 +626,11 @@ void tc_inter_predict_decoder(const tc_pixel_t *ref, int ref_stride,
                               int blk_size)
 {
     static long disp_n = 0, disp_s = 0, disp_px = 0;
+    static long r_fx=0, r_fy=0, r_rm=0, r_bm=0, r_sz=0;
     static int disp_on = -1;
     if (disp_on < 0) disp_on = (getenv("TC_DISPATCH") != 0);
-    int use_neon = 0;
 #if TCODEC_NEON
+    {
     const int fx = mv.x >> 2, fy = mv.y >> 2;
     /* Diagonal phases use the right-hand vertical anchor at x+1.  Its
      * horizontal six-tap vector reaches one sample farther right than the
@@ -637,20 +638,30 @@ void tc_inter_predict_decoder(const tc_pixel_t *ref, int ref_stride,
     if (fx >= 2 && fy >= 2 && fx + blk_size + 3 < ref_w &&
         fy + blk_size + 2 < ref_h && blk_size >= 8 &&
         (blk_size & 7) == 0) {
-        use_neon = 1;
         tc_inter_predict_neon(ref, ref_stride, ref_w, ref_h, mv,
                               dst, dst_stride, blk_size);
-    } else
+        if (disp_on) {
+            disp_n++; disp_px += blk_size * blk_size;
+            if ((disp_n + disp_s) % 2000 == 0)
+                fprintf(stderr, "DISPATCH neon=%ld scalar=%ld neonpx=%ld fx=%ld fy=%ld rm=%ld bm=%ld sz=%ld\n",
+                        disp_n, disp_s, disp_px, r_fx, r_fy, r_rm, r_bm, r_sz);
+        }
+        return;
+    }
+    if (disp_on) {
+        disp_s++;
+        if (fx < 2) r_fx++; else if (fy < 2) r_fy++;
+        else if (!(fx + blk_size + 3 < ref_w)) r_rm++;
+        else if (!(fy + blk_size + 2 < ref_h)) r_bm++;
+        else r_sz++;
+        if ((disp_n + disp_s) % 2000 == 0)
+            fprintf(stderr, "DISPATCH neon=%ld scalar=%ld neonpx=%ld fx=%ld fy=%ld rm=%ld bm=%ld sz=%ld\n",
+                    disp_n, disp_s, disp_px, r_fx, r_fy, r_rm, r_bm, r_sz);
+    }
+    }
 #endif
     tc_inter_predict(ref, ref_stride, ref_w, ref_h, mv, dst, dst_stride,
                      blk_size);
-    if (disp_on) {
-        if (use_neon) { disp_n++; disp_px += blk_size * blk_size; }
-        else disp_s++;
-        if ((disp_n + disp_s) % 2000 == 0)
-            fprintf(stderr, "DISPATCH luma neon_calls=%ld scalar_calls=%ld neon_px=%ld\n",
-                    disp_n, disp_s, disp_px);
-    }
 }
 
 void tc_inter_predict_chroma_decoder(const tc_pixel_t *ref, int ref_stride,
