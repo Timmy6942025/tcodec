@@ -276,28 +276,53 @@ overhead (ref_sel+bi bits, +1/+2 ladder tax, mismatched bwd refs on
 scroll). Benchmark tables stay P-only (our better config). B needs
 ladder+RDO retune (project, not trial) — do NOT default `-b` on.
 
-## D8 multi-codec matrix (interim 2026-09-08, 5 clips — corpus fetch ongoing)
+## D8 multi-codec matrix (2026-09-09 — 8 clips × 4 codecs, corpus masters)
 
-BD-rate vs x264vf (3QP curves, med/veryfast-medium presets, 30fr):
+BD-rate vs x264vf (3QP curves; tc med P-only, x264vf veryfast, x265 medium,
+svtav1p6 preset 6 @CRF 54/58/63 for quality overlap; 30fr, screen 10fr):
 
-| Clip | class | tc BD | x265 BD | svtav1p6 BD |
+| Clip | class | tc BD | x265 BD | svt BD |
 |---|---|---|---|---|
-| park_joy | nature water | +99.6% | — | — |
-| in_to_tree | detail | +76% | — | — |
-| old_town_cross | aerial | +135.7% | −28.9% | N/A¹ |
-| parkrun | grain/snow | +158.8% | −15.3% | N/A¹ |
-| stockholm | city pan | +143.7% | −22.6% | N/A¹ |
-| vidyo_talk | talking head | +124.6% | −31.8% | N/A¹ |
-| screen_ui | screen | (P beats x264 on bytes) | — | — |
+| park_joy | nature water | +95.4% | −14.4% | −47.4% |
+| ducks_takeoff | grain | +146.6% | −33.1% | −54.7% |
+| in_to_tree | detail | +68.0% | −37.8% | −64.8% |
+| old_town_cross | aerial | +135.7% | −28.9% | −54.6% |
+| parkrun | snow/grain | +158.8% | −15.3% | −46.9% |
+| stockholm | city pan | +143.7% | −22.6% | −55.2% |
+| vidyo_talk | talking head | +124.6% | −31.8% | −56.7% |
+| screen_ui | screen | +11.0% | +72.1%¹ | −44.4% |
+| bbb_nature | 3D animation | +49.7% | −42.3% | −66.5% |
+| ed_dark | dark animation | +34.0% | −50.8% | −74.6% |
+| sita_flat | flat animation | **−49.6%** | −67.6% | −87.0% |
 
-¹ svt CRF scale lands 38–44dB vs x264's 27–34dB (no curve overlap) —
-rerun svt at higher CRF for overlap. x265 −15..−32% sanity-checks the
-harness. New clips gap WORSE than park: static-background clips (vidyo,
-old_town, stockholm) indict no-skip; parkrun grain (+158.8%, worst)
-needs synthesis or texture handling. Full 8-clip + svt-overlap + x265
-curves on park/tree/ducks/screen pending fetch completion.
+¹ x265 worse than x264 on screen (film-tuned). Harness sanity otherwise
+(x265 < x264 < tc on all natural; svt best everywhere).
+Reading: tc trails x264 by +68..+159% (best: detail/screen; worst: grain
+parkrun +158.8%, ducks +146.6%). Static-background clips (vidyo/old_town/
+stockholm +124..144%) indict no-skip; grain clips indict texture handling.
+Tier-2 (−20..−40% vs H.264) and Tier-3 (AV1-fast) both far. bbb/ed/sita
+curves running (11-clip completion).
 
-## Static-animation checkpoint (2026-09-07, sita 720p24, 30 frames)
+
+## Static-animation checkpoint (re-measured 2026-09-09 — SUPERSEDES 09-07 row)
+
+sita_flat corpus master (FFV1), 30fr. Old row was pre-deblock (462KB@29.95
+qp27!); current code transforms this class completely.
+
+| Codec | QP | Bytes (30fr) | PSNR-Y | SSIM |
+|---|---:|---:|---:|---:|
+| tcodecv2 | 27 | 20,946 | 40.49 | 0.9541 |
+| tcodecv2 | 32 | 5,122 | 39.70 | 0.9494 |
+| tcodecv2 | 37 | 3,612 | 39.00 | 0.9463 |
+| x264vf | 27 | 70,878 | 43.18 | 0.9728 |
+| x264vf | 32 | 27,971 | 40.26 | 0.9531 |
+| x264vf | 37 | 5,403 | 39.10 | 0.9485 |
+
+² x264 rows from the D8 matrix (same runs). **BD-rate tc vs x264vf: −49.6% —
+first negative BD-rate of the program (a WIN).** Frozen drift (+0.30dB)
+plus fixed deblock plus RDOQ turned the skip-prize class into a strength:
+merge+residual at ~2–5KB beats x264's skip-heavy 16–35KB at matched
+quality. (x265 −67.6%, svt −87.0% here — headroom remains upward.)
 
 First 30 frames are pixel-identical (frozen leader). x264 skips everything
 (16–35KB total); any per-CU syntax tax shows brutally here.
@@ -313,13 +338,20 @@ First 30 frames are pixel-identical (frozen leader). x264 skips everything
 
 History: pre-scene-cut-fix, qp32 emitted 30 keyframes (556KB, non-monotonic
 vs qp27) — false cuts from ORIG-vs-RECON comparison on dark content, fixed
-2026-09-07 (stored input histograms). Post-fix curve is monotonic.
-Remaining gap (~10–20× + drift −3.1dB/30fr vs x264 perfectly flat) is the
-skip prize quantified: zero-residual exact-copy CUs at ~2 bits vs our
-merge+residual floor. See HILLCLIMB skip saga (5 trials); needs
-propagation-aware costing (mb-tree-lite).
+2026-09-07 (stored input histograms). The 09-07 row above it (462KB@29.95)
+was pre-deblock pathology; current code is ~90× smaller at +10dB.
+Old "remaining gap" (~10–20×, drift −3.1dB) is fully retired: drift
+re-measures +0.30dB/30fr and BD-rate is −49.6% (win). Skip saga stays
+parked (7 trials) — merge+residual now beats x264 skip here.
 
- ## D8: Multi-codec real-content benchmark (August 2026)
+ ## D8: Multi-codec real-content benchmark (August 2026 — SUPERSEDED)
+
+ Host: aarch64 Cortex-A72, 4 cores, NEON build (still the reference host).
+
+ August snapshot (bbb 10fr, QPs 22/32/42) preserved for history; see the
+ current D8 matrix above (2026-09-09, 11 clips × 4 codecs, BD-rate).
+ Standing then: "5–8 dB behind x264 veryfast, 1.4–2.3× bits" — now
+ substantially improved on most classes (sita stands at −49.6% BD).
 
  Host: aarch64 Cortex-A72, 4 cores, NEON build, 10 frames of bbb_nature 1280×720,
  v2 preset MEDIUM, QPs 22/32/42.
