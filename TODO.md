@@ -364,7 +364,7 @@ Phase 3 (entropy coding changes will modify the bitstream format).
 | D5 | DCT-II transforms | ✅ Done | 4×4/8×8 DCT-II + WHT RDO-lite selection (WHT since rejected for v2: genuinely worse, see HILLCLIMB) |
 | D6 | SAO + deblocking | ✅ Done | SAO band/offset (model x6 tuned), deblocking CTU, scalar/NEON parity |
 | D7 | RDO-lite BD-rate vs SAD-only | ✅ Done | BD-rate = −66.4% (5-QP curve, bbb_nature 720p); v2 RDO scale bug fixed since (−8.9% more) |
-| D8 | Real-content BD-rate vs x264/x265/SVT-AV1 | ✅ Done | 13-clip × 4-codec BD matrix (tc +50..+159% nature, −49.6% sita WIN; x265/svt sanity); corpus 17 masters + manifest; svt overlap solved (CRF 54-63). 1080p decode baselines next |
+| D8 | Real-content BD-rate vs x264/x265/SVT-AV1 | ✅ Done | 15-clip × 4-codec BD matrix (tc +37..+159% nature, −49.6% sita WIN; x265/svt sanity); corpus 17 masters + manifest; svt overlap solved (CRF 54-63). 1080p decode baselines next |
 | D9 | ARM decode ≥60fps@720p / ≥30fps@1080p | ❌ Not met | screen 20–30fps, nature 12–19fps@720p (one thread); profile says deblock/coeff/motion dominate |
 | D10 | Container/transport (tcmux, MP4 bridge, HLS) | ✅ Done | test_tcmux.sh and test_tcmux_mp4.sh pass |
 | D11 | Docs complete (SPEC/BITSTREAM/PROFILES/BENCHMARKS/README) | ⚠️ Partial | SPEC/BITSTREAM truth-passed for v2 multiref/CfL/ch_intra; BENCHMARKS has 5 new checkpoints; HILLCLIMB + V2_1_BATCH record the program |

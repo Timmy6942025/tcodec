@@ -296,12 +296,14 @@ svtav1p6 preset 6 @CRF 54/58/63 for quality overlap; 30fr, screen 10fr):
 | sita_flat | flat animation | **−49.6%** | −67.6% | −87.0% |
 | csgo_gaming | HUD/text FPS | +52.4% | −19.1% | −54.1% |
 | minecraft_gaming | blocky voxel | +50.3% | −21.0% | −57.8% |
+| tos_vfx | VFX/grain live action | +85.5% | −36.4% | −57.5% |
+| sintel_action | animation fast-cut | +37.4% | −44.4% | −70.0% |
 
 ¹ x265 worse than x264 on screen (film-tuned). Harness sanity otherwise
 (x265 < x264 < tc on all natural; svt best everywhere).
-Reading: tc trails x264 by +50..+159% (best: gaming +50–52%, sita −49.6% win;
-worst: grain parkrun +158.8%, ducks +146.6%). Static-background clips
-(vidyo/old_town/stockholm +124..144%) indict no-skip; grain clips indict
+Reading: tc trails x264 by +37..+159% over 15 clips (best: sintel +37.4%,
+screen +11%, sita −49.6% win; worst: grain parkrun +158.8%, ducks
++146.6%). Static-background clips (vidyo/old_town/stockholm +124..144%) indict no-skip; grain clips indict
 texture handling. Tier-2 (−20..−40% vs H.264) and Tier-3 (AV1-fast) both
 far. 13-clip matrix complete (gaming done; 1080p masters fetched, decode
 baselines next).
