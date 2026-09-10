@@ -105,9 +105,12 @@ Vs practical H.264 (veryfast): +37..+159% remains open (Tier-2).
 
 ## Next blockers (Tier-1 closure)
 
-1. **D9 decode sprint** (only Tier-1 gate not passed): motion edge-dispatch,
-   entropy-parse throughput, wavefront stragglers; needs perf hardware.
-2. **Nature compression**: +68..+159% BD gap (skip-8 needs mb-tree+MVP;
-   texture/RDOQ extensions; B-ladder retune).
+1. **D9 decode sprint** (only Tier-1 gate not passed): interp memory-bound,
+   scaling 1.2× (starvation), parse serial; needs entry-points format +
+   volume cuts (MVP fix helps volume) + variance work. Program in docs/D9_PLAN.md.
+2. **Nature compression**: MVP disp-storage fix (hill-77: probe −10.5%, park
+   −8.2%, screen −2.9%) closes part of +68..+159% BD gap; unlocks skip-8
+   (decent MVP first — now fixed) + merge-list (see docs/MERGELIST_DESIGN.md,
+   unblocked) + v2.1 batch. B-ladder retune deferred.
 3. Remaining corpus (fetched, unbenchmarked): 1080p decode rows beyond
    baselines; nothing else outstanding on content.

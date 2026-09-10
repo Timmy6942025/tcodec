@@ -1112,8 +1112,9 @@ static void qt_dec_leaf(qt_dec_t *d, int depth, int cx, int cy)
             tc_mv_s mvp = qt_dec_mvp(d, cx, cy);
             int base_x = mvp.x + px*4 + ((merge || skip) ? 0 : mvd_x);
             int base_y = mvp.y + py*4 + ((merge || skip) ? 0 : mvd_y);
-            g->dx = (int16_t)(base_x - (px + x*8)*4);
-            g->dy = (int16_t)(base_y - (py + y*8)*4);
+            /* TRIAL77: store disp. */
+            g->dx = (int16_t)(base_x - px*4);
+            g->dy = (int16_t)(base_y - py*4);
         }
     }
     (void)dct_size;
@@ -1441,8 +1442,9 @@ static void v2_parse_leaf(v2_parse_ctx_t *p, int depth, int cx, int cy)
         if (n->intra) g->intra = 1;
         else {
             g->intra = 0;
-            g->dx = (int16_t)(n->mv_x - (px + x * 8) * 4);
-            g->dy = (int16_t)(n->mv_y - (py + y * 8) * 4);
+            /* TRIAL77: store disp. */
+            g->dx = (int16_t)(n->mv_x - px * 4);
+            g->dy = (int16_t)(n->mv_y - py * 4);
         }
     }
 }

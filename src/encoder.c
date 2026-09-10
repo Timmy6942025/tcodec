@@ -742,12 +742,14 @@ static int64_t qt_leaf(qt_enc_t *e, int depth, int cx, int cy, int write)
                 tc_mv_s gmvp = qt_mvp(e, cx, cy, e->grid);
                 int base_x = gmvp.x + px * 4 + ((nd->merge || nd->skip) ? 0 : nd->mvd_x);
                 int base_y = gmvp.y + py * 4 + ((nd->merge || nd->skip) ? 0 : nd->mvd_y);
+                /* TRIAL77: store disp (same all sub-cells). */
+                int disp_x = base_x - px * 4, disp_y = base_y - py * 4;
                 for (int gy = 0; gy < cs; gy++)
                     for (int gx = 0; gx < cs; gx++) {
                         qt_mvcell_t *g = &e->grid[(cy + gy) * TC_MVGRID_STRIDE + (cx + gx)];
                         g->intra = 0;
-                        g->dx = (int16_t)(base_x - (px + gx * 8) * 4);
-                        g->dy = (int16_t)(base_y - (py + gy * 8) * 4);
+                        g->dx = (int16_t)disp_x;
+                        g->dy = (int16_t)disp_y;
                     }
             }
         }
@@ -1095,8 +1097,9 @@ static int64_t qt_leaf(qt_enc_t *e, int depth, int cx, int cy, int write)
         qt_mvcell_t *g=e->grid + (cy+y)*TC_MVGRID_STRIDE + (cx+x);
         if (b_intra) { g->intra=1; }
         else { g->intra=0; tc_mv_s mvp = qt_mvp(e,cx,cy,e->grid);
-            g->dx = (int16_t)((mvp.x+px*4+ (b_merge||b_skip?0:b_mvdx)) - ((px+x*8)*4));
-            g->dy = (int16_t)((mvp.y+py*4+ (b_merge||b_skip?0:b_mvdy)) - ((py+y*8)*4)); }
+            /* TRIAL77: store disp (absMV-origin*4, same for all sub-cells), not absMV-subCell*4 (poisoned MVP for larger CUs). */
+            g->dx = (int16_t)(mvp.x + (b_merge||b_skip?0:b_mvdx));
+            g->dy = (int16_t)(mvp.y + (b_merge||b_skip?0:b_mvdy)); }
     }
     return best_cost;
 }
