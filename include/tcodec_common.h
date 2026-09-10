@@ -631,6 +631,12 @@ typedef struct tc_encoder {
     int               glob_mv_x;
     int               glob_mv_y;
     int               glob_mv_valid;
+    /* mb-tree-lite stability state (TRIAL82 infra, encoder-only, no syntax):
+     * previous input frame orig (for per-CTU SAD stability vs co-located
+     * prev-orig, QP-independent, unlike recon). No RDO use yet (meter only). */
+    tc_frame_buf_t   *prev_orig;
+    int               prev_orig_valid;
+    int64_t          *ctu_stab; /* num_ctu_cols*num_ctu_rows SADs, precomputed per inter frame */
     /* Bitstream v2 quadtree scratch (per-encoder, not static) */
     qt_node_t        *v2_node;         /* TC_QT_NODES decision records */
     qt_mvcell_t      *v2_grid;         /* TC_MVGRID_STRIDE² MV grid */

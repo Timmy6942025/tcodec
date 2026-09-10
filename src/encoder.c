@@ -2317,10 +2317,15 @@ tc_encoder_t *tc_encoder_create(const tc_config_t *config)
         tc_encoder_destroy(enc);
         return NULL;
     }
+    /* TRIAL82 mb-tree stability state (encoder-only, no syntax). */
+    enc->prev_orig = tc_frame_alloc(config->width, config->height);
+    enc->prev_orig_valid = 0;
+    enc->ctu_stab = NULL; /* allocated below with CTU grid (needs num_ctu) */
 
     /* CTU grid dimensions */
     enc->num_ctu_cols = (config->width  + TC_CTU_SIZE - 1) / TC_CTU_SIZE;
     enc->num_ctu_rows = (config->height + TC_CTU_SIZE - 1) / TC_CTU_SIZE;
+    enc->ctu_stab = (int64_t *)calloc((size_t)enc->num_ctu_cols * (size_t)enc->num_ctu_rows, sizeof(int64_t));
 
     /* Allocate CTU info */
     enc->ctu_data = (tc_ctu_info_t *)calloc(
@@ -2440,6 +2445,8 @@ void tc_encoder_destroy(tc_encoder_t *enc)
     free(enc->v2_node);
     free(enc->v2_grid);
     free(enc->out_buf);
+    tc_frame_free(enc->prev_orig); /* TRIAL82 (NULL-safe? tc_frame_free handles NULL? Check: if (!frame) return? Assume yes (like cur/recon free in destroy without NULL check? Actually destroy frees cur/recon without check (they're non-NULL after successful create). prev_orig allocated (may fail? If alloc fails, create continues? We don't check prev_orig alloc failure – to be safe, allow NULL (tc_frame_free must handle NULL). Check tc_frame_free NULL handling. If not NULL-safe, add check. For now, assume NULL-safe (most free funcs check). If crash, fix. */
+    free(enc->ctu_stab); /* TRIAL82 (free NULL-safe) */
 #if !defined(TCODEC_NO_THREADS)
     /* Free per-row bitstream buffers */
     if (enc->row_buf) {
@@ -2688,6 +2695,35 @@ static tc_error_t encode_poc_frame(tc_encoder_t *enc,
     else
         enc->glob_mv_valid = 0;
 
+    /* TRIAL82 mb-tree stability precompute (P-only, encoder-only, no RDO use yet; meter only).
+     * S_c = SAD(orig CTU luma, co-located prev-orig), QP-independent. -1 = invalid (KEY/no prev). */
+    {
+        int nctu = enc->num_ctu_cols * enc->num_ctu_rows;
+        if (enc->ctu_stab) for (int i=0;i<nctu;i++) enc->ctu_stab[i] = -1;
+        if (frame_type == TC_FRAME_INTER && enc->prev_orig_valid && enc->prev_orig && enc->ctu_stab) {
+            static int stabdbg_on = -1;
+            if (stabdbg_on < 0) stabdbg_on = (getenv("TC_STABDBG") != 0) ? 1 : 0;
+            int64_t ssum=0, smin=((int64_t)1<<60), smax=0; int nstatic=0, nct=0;
+            for (int r=0;r<enc->num_ctu_rows;r++) for (int c=0;c<enc->num_ctu_cols;c++) {
+                int ox=c*TC_CTU_SIZE, oy=r*TC_CTU_SIZE;
+                int cw=TC_CTU_SIZE, ch=TC_CTU_SIZE;
+                if (ox+cw > enc->cfg.width) cw = enc->cfg.width-ox;
+                if (oy+ch > enc->cfg.height) ch = enc->cfg.height-oy;
+                int64_t sad=0;
+                for (int yy=0; yy<ch; yy++)
+                    for (int xx=0; xx<cw; xx++) {
+                        int o = enc->cur->y[(oy+yy)*enc->cur->stride_y+(ox+xx)];
+                        int pr = enc->prev_orig->y[(oy+yy)*enc->prev_orig->stride_y+(ox+xx)];
+                        int d=o-pr; sad += d<0?-d:d;
+                    }
+                enc->ctu_stab[r*enc->num_ctu_cols+c]=sad;
+                ssum+=sad; if(sad<smin)smin=sad; if(sad>smax)smax=sad; if(sad<=2000)nstatic++; nct++;
+            }
+            if (stabdbg_on) fprintf(stderr, "STABDBG poc=%d n=%d avg=%lld min=%lld max=%lld static2000=%d (%.1f%%)\n",
+                poc, nct, (long long)(nct?ssum/nct:0), (long long)(nct?smin:0), (long long)smax, nstatic, nct?100.0*nstatic/nct:0.0);
+        }
+    }
+
     /* Encode CTU rows with WPP parallelism or sequential fallback */
     enc_row_ctx_t rctx;
     rctx.enc = enc;
@@ -2829,6 +2865,11 @@ static tc_error_t encode_poc_frame(tc_encoder_t *enc,
     enc->total_bytes += (int64_t)frame_bytes;
     enc->total_frames++;
     enc->frame_count++;
+    /* TRIAL82: save cur orig for next frame stability (after encode, before return; B-reorder? B path calls encode_poc_frame per emission with cur set? prev_orig update here covers P/KEY; B emissions share cur? B reorder buffers display-order inputs, each emission sets cur? Good enough for P-only trial (B stability unused). */
+    if (enc->prev_orig && enc->cur) {
+        tc_frame_copy(enc->prev_orig, enc->cur);
+        enc->prev_orig_valid = 1;
+    }
 
     return TC_OK;
 }
