@@ -286,6 +286,43 @@ overhead (ref_sel+bi bits, +1/+2 ladder tax, mismatched bwd refs on
 scroll). Benchmark tables stay P-only (our better config). B needs
 ladder+RDO retune (project, not trial) — do NOT default `-b` on.
 
+## D8 multi-codec matrix (2026-09-10 — MVP-fixed, SUPERSEDES 09-09 matrix)
+
+BD-rate vs x264vf (3QP curves; tc med P-only mvpfix, x264vf veryfast, x265 medium,
+svtav1p6 preset 6 @CRF 54/58/63; 30fr, screen 10fr; hill-41 MVP disp-storage fix):
+
+| Clip | class | tc BD | x265 BD | svt BD |
+|---|---|---|---|---|
+| park_joy | nature water | +70.3% | −14.4% | −47.2% |
+| ducks_takeoff | grain | +153.5% | −33.2% | −54.6% |
+| in_to_tree | detail | +49.6% | −37.8% | −64.8% |
+| old_town_cross | aerial | +122.5% | −29.0% | −54.6% |
+| parkrun | snow/grain | +137.5% | −15.3% | −46.9% |
+| stockholm | city pan | +104.6% | −22.6% | −55.1% |
+| vidyo_talk | talking head | +83.2% | −31.8% | −56.8% |
+| screen_ui | screen | **−3.5% (WIN)** | +72.1%¹ | −44.4% |
+| bbb_nature | 3D animation | +52.1% | −42.3% | −66.5% |
+| ed_dark | dark animation | +10.4% | −50.8% | −74.7% |
+| sita_flat | flat animation | **−48.1% (WIN)** | −67.6% | −87.0% |
+| csgo_gaming | HUD/text FPS | +51.8% | −19.1% | −54.6% |
+| minecraft_gaming | blocky voxel | +42.7% | −21.0% | −64.1% |
+| tos_vfx | VFX/grain live action | +55.7% | −36.4% | −57.6% |
+| sintel_action | animation fast-cut | +22.2% | −44.4% | −70.1% |
+
+¹ x265 worse than x264 on screen (film-tuned). Harness sanity otherwise.
+Reading: MVP fix improves 12/15 clips vs 09-09 (park −25pp, tree −18pp,
+old_town −13pp, parkrun −21pp, stockholm −39pp, vidyo −42pp, screen flips to
+WIN −14.5pp, ed −24pp, minecraft −8pp, tos −30pp, sintel −15pp; ducks +7pp,
+bbb +2pp, sita +1.5pp (still WIN) regress slightly — grain incompressible,
+better MVP codes more texture for nothing, cf. trial35/63 load-bearing
+overpricing). Average tc BD +76%→+60% (−16pp). Best non-sita: ed +10%,
+sintel +22%, screen WIN. Worst grain (ducks +153%, parkrun +137%).
+Static-background clips (vidyo/old_town/stockholm +83..+122%, was +124..+144%)
+improve hugely (decent MVP first — now fixed) but still indict no-skip;
+grain clips indict texture handling. Tier-2 (−20..−40% vs H.264) and Tier-3
+still far. Full CSVs in /tmp/matrix (not committed, 60 files); BD via
+tools/bd_rate.py + /tmp/bd_two.py.
+
 ## D8 multi-codec matrix (2026-09-09 — 8 clips × 4 codecs, corpus masters)
 
 BD-rate vs x264vf (3QP curves; tc med P-only, x264vf veryfast, x265 medium,

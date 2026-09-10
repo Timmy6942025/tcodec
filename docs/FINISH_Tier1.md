@@ -46,27 +46,28 @@ B-drain tails this month — encoder-reported PSNR is NOT trusted).
 
 | Clip | tc | x265 | svtav1p6 |
 |---|---|---|---|
-| park_joy | +95.4% | −14.4% | −47.4% |
-| ducks_takeoff | +146.6% | −33.1% | −54.7% |
-| in_to_tree | +68.0% | −37.8% | −64.8% |
-| old_town_cross | +135.7% | −28.9% | −54.6% |
-| parkrun | +158.8% | −15.3% | −46.9% |
-| stockholm | +143.7% | −22.6% | −55.2% |
-| vidyo_talk | +124.6% | −31.8% | −56.7% |
-| screen_ui | +11.0% | +72.1%¹ | −44.4% |
-| bbb_nature | +49.7% | −42.3% | −66.5% |
-| ed_dark | +34.0% | −50.8% | −74.6% |
-| sita_flat | **−49.6% (WIN)** | −67.6% | −87.0% |
-| csgo_gaming | +52.4% | −19.1% | −54.1% |
-| minecraft_gaming | +50.3% | −21.0% | −57.8% |
-| tos_vfx | +85.5% | −36.4% | −57.5% |
-| sintel_action | +37.4% | −44.4% | −70.0% |
+| park_joy | +70.3% | −14.4% | −47.2% |
+| ducks_takeoff | +153.5% | −33.2% | −54.6% |
+| in_to_tree | +49.6% | −37.8% | −64.8% |
+| old_town_cross | +122.5% | −29.0% | −54.6% |
+| parkrun | +137.5% | −15.3% | −46.9% |
+| stockholm | +104.6% | −22.6% | −55.1% |
+| vidyo_talk | +83.2% | −31.8% | −56.8% |
+| screen_ui | **−3.5% (WIN)** | +72.1%¹ | −44.4% |
+| bbb_nature | +52.1% | −42.3% | −66.5% |
+| ed_dark | +10.4% | −50.8% | −74.7% |
+| sita_flat | **−48.1% (WIN)** | −67.6% | −87.0% |
+| csgo_gaming | +51.8% | −19.1% | −54.6% |
+| minecraft_gaming | +42.7% | −21.0% | −64.1% |
+| tos_vfx | +55.7% | −36.4% | −57.6% |
+| sintel_action | +22.2% | −44.4% | −70.1% |
 
 ¹ x265 worse than x264 on screen. September program moved park
-+150–200%→+95%, tree ~10×→+68%, screen −21% bytes @−3.3dB, sita to a
-win. B-frames: neutral park, beats-P screen (single-merge). The nature
-gap (+37..+159%) remains the open compression item (best sintel +37.4%,
-gaming +50–52%); byte-breakdown says
++150–200%→+95%→+70% (hill-41 MVP fix −25pp), tree ~10×→+68%→+50%,
+screen to a WIN (−3.5% BD), sita holds WIN (−48%), ed +10% close.
+B-frames: neutral park, beats-P screen (single-merge). The nature
+gap (+10..+153%, avg +60%) remains open (best ed +10%, sintel +22%;
+gaming +43–56%); byte-breakdown says
 86% of park bytes are luma residual.
 
 ## Decoder performance (D9 — NOT MET, program in docs/D9_PLAN.md)
