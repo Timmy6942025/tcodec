@@ -637,6 +637,13 @@ typedef struct tc_encoder {
     tc_frame_buf_t   *prev_orig;
     int               prev_orig_valid;
     int64_t          *ctu_stab; /* num_ctu_cols*num_ctu_rows SADs, precomputed per inter frame */
+    /* Temporal MVP state (TRIAL84 infra, encoder-only, no syntax): frame-level
+     * prev-frame MV disps per 8x8 block ((w/8)*(h/8) cells) + dims. No RDO use
+     * yet (meter only). */
+    qt_mvcell_t      *prev_mvgrid;
+    qt_mvcell_t      *cur_mvgrid; /* TRIAL84: current frame MVs (built per-CTU, swapped to prev at frame end) */
+    int               prev_mvgrid_w, prev_mvgrid_h;
+    int               prev_mv_valid;
     /* Bitstream v2 quadtree scratch (per-encoder, not static) */
     qt_node_t        *v2_node;         /* TC_QT_NODES decision records */
     qt_mvcell_t      *v2_grid;         /* TC_MVGRID_STRIDE² MV grid */

@@ -901,6 +901,24 @@ static int64_t qt_leaf(qt_enc_t *e, int depth, int cx, int cy, int write)
         tc_mv_s center = { mvp.x+px*4, mvp.y+py*4 };
         tc_sad_t sad; tc_mv_s bm = tc_motion_est(enc->dpb[0].frame->y, enc->dpb[0].frame->stride_y, enc->cfg.width,enc->cfg.height, enc->cur->y+py*enc->cur->stride_y+px, enc->cur->stride_y, center.x>>2, center.y>>2, cu, sr, &sad);
         tc_mv_s disp = { bm.x-(mvp.x+px*4), bm.y-(mvp.y+py*4) };
+        /* TRIAL84 TEMPDBG meter (env-gated, no RDO change): spatial mvp vs temporal prev vs true disp. */
+        {
+            static int tempdbg_on = -1;
+            if (tempdbg_on < 0) tempdbg_on = (getenv("TC_TEMPDBG") != 0) ? 1 : 0;
+            if (tempdbg_on && !fast_mode && e->frame_type == TC_FRAME_INTER) {
+                int tAvail=0, tdx=0, tdy=0;
+                if (e->enc->prev_mv_valid && e->enc->prev_mvgrid) {
+                    int fx = e->ctu_x/8 + cx, fy = e->ctu_y/8 + cy;
+                    if (fx < e->enc->prev_mvgrid_w && fy < e->enc->prev_mvgrid_h) {
+                        const qt_mvcell_t *pg = &e->enc->prev_mvgrid[fy*e->enc->prev_mvgrid_w+fx];
+                        if (!pg->intra) { tAvail=1; tdx=pg->dx; tdy=pg->dy; }
+                    }
+                }
+                int trueDx = bm.x - px*4, trueDy = bm.y - py*4;
+                fprintf(stderr, "TEMPDBG cu=%d spat=(%d,%d) tempAvail=%d temp=(%d,%d) true=(%d,%d)\n",
+                    cu, mvp.x, mvp.y, tAvail, tdx, tdy, trueDx, trueDy);
+            }
+        }
         tc_inter_predict(enc->dpb[0].frame->y,enc->dpb[0].frame->stride_y, enc->cfg.width,enc->cfg.height,bm,pred,cu,cu);
         int lb = 0;
         int64_t dl;
@@ -971,6 +989,37 @@ static int64_t qt_leaf(qt_enc_t *e, int depth, int cx, int cy, int write)
                 if (e->multiref) bits_g += 1;
                 int64_t costg = dlg + e->lambda*bits_g;
                 if (costg < best_cost) { best_cost=costg; b_intra=0;b_skip=0;b_merge=0;b_dct=gdct; b_mvdx=dispg.x;b_mvdy=dispg.y;b_refsel=0;b_bi=0;b_ch=0; b_cmode=0;b_imode=1; won_global=1; }
+            }
+        }
+        /* TRIAL84b temporal extra center (full-RDO P-only, encoder-only, zero syntax; mirrors global hill-28).
+         * Collocated prev-frame disp as extra ME start (37% wins over spatial on park water where neighbors disagree).
+         * MVD stays mvp-relative (decoder ordinary explicit). Skip if identical to mvp-center bm (common static). */
+        if (!fast_mode && e->frame_type == TC_FRAME_INTER && enc->dpb[0].frame &&
+            e->enc->prev_mv_valid && e->enc->prev_mvgrid) {
+            int tAvail2=0, tdx2=0, tdy2=0;
+            {
+                int fxx = e->ctu_x/8 + cx, fyy = e->ctu_y/8 + cy;
+                if (fxx < e->enc->prev_mvgrid_w && fyy < e->enc->prev_mvgrid_h) {
+                    const qt_mvcell_t *pg = &e->enc->prev_mvgrid[fyy*e->enc->prev_mvgrid_w+fxx];
+                    if (!pg->intra) { tAvail2=1; tdx2=pg->dx; tdy2=pg->dy; }
+                }
+            }
+            if (tAvail2) {
+                tc_mv_s tc2 = { px*4 + tdx2, py*4 + tdy2 };
+                tc_sad_t sadt; tc_mv_s bmt = tc_motion_est(enc->dpb[0].frame->y, enc->dpb[0].frame->stride_y, enc->cfg.width,enc->cfg.height, enc->cur->y+py*enc->cur->stride_y+px, enc->cur->stride_y, tc2.x>>2, tc2.y>>2, cu, sr, &sadt);
+                if (bmt.x != bm.x || bmt.y != bm.y) {
+                    tc_mv_s dispt = { bmt.x-(mvp.x+px*4), bmt.y-(mvp.y+py*4) };
+                    tc_inter_predict(enc->dpb[0].frame->y,enc->dpb[0].frame->stride_y, enc->cfg.width,enc->cfg.height,bmt,pred,cu,cu);
+                    uint8_t tdct = TC_BLOCK_8x8_ID; int lbt = 0; int64_t dlt;
+                    if (enc->cfg.preset >= TC_PRESET_MEDIUM && cu <= 32)
+                        dlt = qt_code_best(e,px,py,cu,pred,&lbt,&tdct);
+                    else
+                        dlt = qt_code_luma(e,px,py,cu,TC_BLOCK_8x8_ID,pred,&lbt,0);
+                    int bits_t = 1 + 1 + 1 + 1 + 2 + (tc_bs_se_bits(dispt.x)+tc_bs_se_bits(dispt.y)) + lbt;
+                    if (e->multiref) bits_t += 2;
+                    int64_t costt = dlt + e->lambda*bits_t;
+                    if (costt < best_cost) { best_cost=costt; b_intra=0;b_skip=0;b_merge=0;b_dct=tdct; b_mvdx=dispt.x;b_mvdy=dispt.y;b_refsel=0;b_bi=0;b_ch=0; b_cmode=0;b_imode=1; won_global=0; }
+                }
             }
         }
         if (enc->cfg.preset >= TC_PRESET_MEDIUM) {
@@ -1415,6 +1464,21 @@ static void encode_ctu_v2(tc_encoder_t *enc, int row, int col, int qp,
             tc_sao_ctu_luma(enc->recon->y, enc->recon->stride_y,
                             e.ctu_x, e.ctu_y, enc->cfg.width, enc->cfg.height,
                             sao_band, sao_offset);
+        }
+    }
+    /* TRIAL84: copy CTU MV grid to frame-level cur_mvgrid (clipped at frame edges for partial CTUs; else heap OOB, caught by fast suite). */
+    if (enc->cur_mvgrid && e.grid) {
+        int mgw = enc->prev_mvgrid_w, mgh = enc->prev_mvgrid_h;
+        int fx0 = col*TC_MVGRID_STRIDE;
+        for (int gy=0; gy<TC_MVGRID_STRIDE; gy++) {
+            int fy = row*TC_MVGRID_STRIDE + gy;
+            if (fy >= mgh) break;
+            int cw = TC_MVGRID_STRIDE;
+            if (fx0 + cw > mgw) cw = mgw - fx0;
+            if (cw <= 0) break;
+            memcpy(enc->cur_mvgrid + fy*mgw + fx0,
+                   e.grid + gy*TC_MVGRID_STRIDE,
+                   (size_t)cw * sizeof(qt_mvcell_t));
         }
     }
 }
@@ -2326,6 +2390,16 @@ tc_encoder_t *tc_encoder_create(const tc_config_t *config)
     enc->num_ctu_cols = (config->width  + TC_CTU_SIZE - 1) / TC_CTU_SIZE;
     enc->num_ctu_rows = (config->height + TC_CTU_SIZE - 1) / TC_CTU_SIZE;
     enc->ctu_stab = (int64_t *)calloc((size_t)enc->num_ctu_cols * (size_t)enc->num_ctu_rows, sizeof(int64_t));
+    /* TRIAL84 temporal MVP grids (frame-level 8x8 cells, encoder-only). */
+    {
+        int mgw = (config->width + 7) / 8, mgh = (config->height + 7) / 8;
+        enc->prev_mvgrid_w = mgw; enc->prev_mvgrid_h = mgh; enc->prev_mv_valid = 0;
+        enc->prev_mvgrid = (qt_mvcell_t *)calloc((size_t)mgw * (size_t)mgh, sizeof(qt_mvcell_t));
+        enc->cur_mvgrid = (qt_mvcell_t *)calloc((size_t)mgw * (size_t)mgh, sizeof(qt_mvcell_t));
+        /* calloc zeros (dx=dy=0, intra=0?) intra=0 means inter (available) with MV 0 – wrong for initial (should be intra=1 unavailable, no prev). Fix: mark all intra=1 (unavailable) initially. */
+        if (enc->prev_mvgrid) for (int i=0;i<mgw*mgh;i++) enc->prev_mvgrid[i].intra = 1;
+        if (enc->cur_mvgrid) for (int i=0;i<mgw*mgh;i++) enc->cur_mvgrid[i].intra = 1;
+    }
 
     /* Allocate CTU info */
     enc->ctu_data = (tc_ctu_info_t *)calloc(
@@ -2447,6 +2521,7 @@ void tc_encoder_destroy(tc_encoder_t *enc)
     free(enc->out_buf);
     tc_frame_free(enc->prev_orig); /* TRIAL82 (NULL-safe? tc_frame_free handles NULL? Check: if (!frame) return? Assume yes (like cur/recon free in destroy without NULL check? Actually destroy frees cur/recon without check (they're non-NULL after successful create). prev_orig allocated (may fail? If alloc fails, create continues? We don't check prev_orig alloc failure – to be safe, allow NULL (tc_frame_free must handle NULL). Check tc_frame_free NULL handling. If not NULL-safe, add check. For now, assume NULL-safe (most free funcs check). If crash, fix. */
     free(enc->ctu_stab); /* TRIAL82 (free NULL-safe) */
+    free(enc->prev_mvgrid); free(enc->cur_mvgrid); /* TRIAL84 (free NULL-safe) */
 #if !defined(TCODEC_NO_THREADS)
     /* Free per-row bitstream buffers */
     if (enc->row_buf) {
@@ -2869,6 +2944,12 @@ static tc_error_t encode_poc_frame(tc_encoder_t *enc,
     if (enc->prev_orig && enc->cur) {
         tc_frame_copy(enc->prev_orig, enc->cur);
         enc->prev_orig_valid = 1;
+    }
+    /* TRIAL84: swap cur MV grid to prev for next-frame temporal (memcpy 86KB @720p, negligible vs RDO). */
+    if (enc->cur_mvgrid && enc->prev_mvgrid) {
+        memcpy(enc->prev_mvgrid, enc->cur_mvgrid,
+            (size_t)enc->prev_mvgrid_w * (size_t)enc->prev_mvgrid_h * sizeof(qt_mvcell_t));
+        enc->prev_mv_valid = 1;
     }
 
     return TC_OK;
