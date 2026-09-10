@@ -61,6 +61,16 @@ static TCODEC_FORCEINLINE int mvpdbg_active(void)
     return mvpdbg_on;
 }
 
+/* Skip SSE meter (TRIAL79 forensics, env-gated TC_SKIPDBG=1): logs per-leaf
+ * P skip SSE (luma+chroma fresh) + cost comparison to pick near-exact
+ * threshold. Zero behavior change when unset (logging only). */
+static int skipdbg_on = -1;
+static TCODEC_FORCEINLINE int skipdbg_active(void)
+{
+    if (skipdbg_on < 0) skipdbg_on = (getenv("TC_SKIPDBG") != 0) ? 1 : 0;
+    return skipdbg_on;
+}
+
 static TCODEC_FORCEINLINE void enc_write_bits(
     tc_bs_writer_t *bs, tc_rc_enc_t *rc, tc_rc_ctx_t *ctx,
     int base_ctx, uint32_t val, int nbits)
@@ -1003,6 +1013,40 @@ static int64_t qt_leaf(qt_enc_t *e, int depth, int cx, int cy, int write)
                         sseC += (int64_t)db*db + (int64_t)dr*dr;
                         if (sseC != 0) break;
                     }
+                if (skipdbg_active()) {
+                    /* Full SSE (no early break) for distribution forensics. */
+                    const tc_pixel_t *oL2 = enc->cur->y + py*enc->cur->stride_y + px;
+                    int64_t fL = 0;
+                    for (int yy=0; yy<cu; yy++)
+                        for (int xx=0; xx<cu; xx++) {
+                            int d = (int)oL2[yy*enc->cur->stride_y+xx] - (int)pred[yy*cu+xx];
+                            fL += (int64_t)d*d;
+                        }
+                    /* Fresh chroma full SSE (recompute MC? scb/scr only valid when sseL==0? No, scb/scr computed only when sseL==0 (inside if). For meter when sseL>0, scb/scr uninitialized. Need to recompute chroma MC for logging when sseL>0? Simpler: log luma full SSE + (sseC partial? Or recompute chroma MC when needed?). To keep meter simple/safe, log luma full SSE + sseL early-break flag + best_cost comparison (luma-only distribution suffices to pick threshold; chroma rarely dominates? Actually chroma SSE matters for gate (total==0). For near-exact threshold, need total (luma+chroma). Recompute chroma MC when meter on and sseL...? Costly but env-gated (off by default), acceptable for forensics. Do full recompute when meter on. */
+                    {
+                        tc_mv_s smv2 = {mvp.x+px*4, mvp.y+py*4};
+                        int cs2b = cu/2;
+                        tc_pixel_t tcb[32*32], tcr[32*32];
+                        tc_inter_predict_chroma(enc->dpb[0].frame->cb, enc->dpb[0].frame->stride_c,
+                            enc->cfg.width/2, enc->cfg.height/2, smv2, tcb, cs2b, cs2b);
+                        tc_inter_predict_chroma(enc->dpb[0].frame->cr, enc->dpb[0].frame->stride_c,
+                            enc->cfg.width/2, enc->cfg.height/2, smv2, tcr, cs2b, cs2b);
+                        const tc_pixel_t *oCb2 = enc->cur->cb + (py/2)*enc->cur->stride_c + px/2;
+                        const tc_pixel_t *oCr2 = enc->cur->cr + (py/2)*enc->cur->stride_c + px/2;
+                        int64_t fC = 0;
+                        for (int yy=0; yy<cs2b; yy++)
+                            for (int xx=0; xx<cs2b; xx++) {
+                                int db = (int)oCb2[yy*enc->cur->stride_c+xx] - (int)tcb[yy*cs2b+xx];
+                                int dr = (int)oCr2[yy*enc->cur->stride_c+xx] - (int)tcr[yy*cs2b+xx];
+                                fC += (int64_t)db*db + (int64_t)dr*dr;
+                            }
+                        int bits_sk = 2;
+                        int64_t cost_sk = e->lambda * (int64_t)bits_sk;
+                        fprintf(stderr, "SKIPDBG cu=%d fL=%lld fC=%lld tot=%lld best=%lld lam=%lld win=%d\n",
+                            cu, (long long)fL, (long long)fC, (long long)(fL+fC),
+                            (long long)best_cost, (long long)e->lambda, (cost_sk < best_cost) ? 1 : 0);
+                    }
+                }
                 if (sseC == 0) {
                     int bits_skip = 1 + 1; /* P skip: intra(0) + skip(1); honest */
                     int64_t cost_skip = e->lambda * (int64_t)bits_skip; /* distortion 0 */
