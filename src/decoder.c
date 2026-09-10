@@ -155,6 +155,11 @@ static tc_error_t read_frame_header(tc_bs_reader_t *bs, tc_frame_header_t *hdr)
         /* v1: profile_level byte + tool_flags (16 bits) */
         hdr->profile_level = (uint8_t)tc_bs_reader_read_bits(bs, 8);
         hdr->tool_flags    = (uint16_t)tc_bs_reader_read_bits(bs, 16);
+        /* TRIAL78: reject unknown tool flags (future streams fail cleanly,
+         * not silent mis-decode). Old streams (no unknown bits) unaffected. */
+        if (hdr->tool_flags & (uint16_t)~TC_TOOLS_IMPLEMENTED) {
+            return TC_ERR_BITSTREAM;
+        }
 
         /* Extract profile and level from packed byte */
         hdr->profile   = (hdr->profile_level >> 4) & 0x0F;
@@ -1087,14 +1092,28 @@ static void qt_dec_leaf(qt_dec_t *d, int depth, int cx, int cy)
             qt_dec_chroma(d, px, py, cu, cpred);
             dec_profile_add(dec, &dec->profile_chroma_ns, chroma_start);
         } else {
-            /* Skip: luma prediction only; chroma is deliberately not
-             * touched (matches the encoder — both sides hold the same
-             * stale values, so reconstruction stays in lockstep). */
+            /* Skip: luma prediction only; chroma fresh MC when FRESH_SKIP
+             * tool set (P only, trial78 P-only), else stale (old, matches
+             * encoder — both sides same stale values, lockstep). B skip
+             * (fuzz-only, never emitted) keeps stale for safety. */
             uint64_t copy_start = dec->profile_enabled ? dec_now_ns() : 0;
             for (int y = 0; y < cu; y++)
                 memcpy(dec->cur->y + (py + y) * dec->cur->stride_y + px,
                        pred + y * cu, (size_t)cu);
             dec_profile_add(dec, &dec->profile_copy_ns, copy_start);
+            if ((dec->last_header.tool_flags & TC_TOOL_FRESH_SKIP) &&
+                d->frame_type == TC_FRAME_INTER && skip && dec->dpb[0].frame) {
+                int cs2 = cu/2;
+                tc_inter_predict_chroma_decoder(dec->dpb[0].frame->cb, dec->dpb[0].frame->stride_c,
+                    dec->width/2, dec->height/2, mv, dec->v2_cbuf[0], cs2, cs2);
+                tc_inter_predict_chroma_decoder(dec->dpb[0].frame->cr, dec->dpb[0].frame->stride_c,
+                    dec->width/2, dec->height/2, mv, dec->v2_cbuf[1], cs2, cs2);
+                for (int yy=0; yy<cs2; yy++)
+                    for (int xx=0; xx<cs2; xx++) {
+                        dec->cur->cb[(py/2+yy)*dec->cur->stride_c+(px/2+xx)] = dec->v2_cbuf[0][yy*cs2+xx];
+                        dec->cur->cr[(py/2+yy)*dec->cur->stride_c+(px/2+xx)] = dec->v2_cbuf[1][yy*cs2+xx];
+                    }
+            }
         }
     }
 
@@ -1646,6 +1665,22 @@ static void v2_recon_leaf(tc_decoder_t *dec, const v2_cmd_ctu_t *cmd,
         for (int y = 0; y < cu; y++) memcpy(dec->cur->y + (py + y) * dec->cur->stride_y + px,
                                              pred + y * cu, (size_t)cu);
         dec_profile_add(dec, &dec->profile_copy_ns, copy_start);
+        /* TRIAL78 fresh MC chroma on P skip (tool-gated); B skip (fuzz-only) stale. */
+        if ((dec->last_header.tool_flags & TC_TOOL_FRESH_SKIP) &&
+            frame_type == TC_FRAME_INTER && dec->dpb[0].frame) {
+            int cs2 = cu/2;
+            tc_mv_s smv = { n->mv_x, n->mv_y };
+            tc_pixel_t f0[32*32], f1[32*32];
+            tc_inter_predict_chroma_decoder(dec->dpb[0].frame->cb, dec->dpb[0].frame->stride_c,
+                dec->width/2, dec->height/2, smv, f0, cs2, cs2);
+            tc_inter_predict_chroma_decoder(dec->dpb[0].frame->cr, dec->dpb[0].frame->stride_c,
+                dec->width/2, dec->height/2, smv, f1, cs2, cs2);
+            for (int yy=0; yy<cs2; yy++)
+                for (int xx=0; xx<cs2; xx++) {
+                    dec->cur->cb[(py/2+yy)*dec->cur->stride_c+(px/2+xx)] = f0[yy*cs2+xx];
+                    dec->cur->cr[(py/2+yy)*dec->cur->stride_c+(px/2+xx)] = f1[yy*cs2+xx];
+                }
+        }
         return;
     }
     uint64_t transform_start = dec->profile_enabled ? dec_now_ns() : 0;

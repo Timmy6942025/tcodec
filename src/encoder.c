@@ -246,6 +246,7 @@ typedef struct {
     /* v2 second reference active (MULTI_REF tool, P-frames): explicit
      * inter leaves carry a ref_sel bit choosing dpb[0]/dpb[1]. */
     int              multiref;
+    int              fresh_skip; /* TRIAL78 */
     tc_frame_type_t  frame_type;
     int              poc;
     tc_bs_writer_t  *bs;
@@ -724,6 +725,20 @@ static int64_t qt_leaf(qt_enc_t *e, int depth, int cx, int cy, int write)
                     tc_inter_predict(enc->dpb[0].frame->y,enc->dpb[0].frame->stride_y, enc->cfg.width,enc->cfg.height,mv,pred,cu,cu);
                 }
                 for (int i=0;i<cu*cu;i++) enc->recon->y[(py+i/cu)*enc->recon->stride_y+(px+i%cu)]=pred[i];
+                /* TRIAL78: fresh MC chroma on P skip when tool set; else stale (old). B skip never emitted (P-only trial), keep stale. */
+                if (e->fresh_skip && e->frame_type == TC_FRAME_INTER && enc->dpb[0].frame) {
+                    int cs2 = cu/2;
+                    tc_pixel_t fcb[32*32], fcr[32*32];
+                    tc_inter_predict_chroma(enc->dpb[0].frame->cb, enc->dpb[0].frame->stride_c,
+                        enc->cfg.width/2, enc->cfg.height/2, mv, fcb, cs2, cs2);
+                    tc_inter_predict_chroma(enc->dpb[0].frame->cr, enc->dpb[0].frame->stride_c,
+                        enc->cfg.width/2, enc->cfg.height/2, mv, fcr, cs2, cs2);
+                    for (int yy=0; yy<cs2; yy++)
+                        for (int xx=0; xx<cs2; xx++) {
+                            enc->recon->cb[(py/2+yy)*enc->recon->stride_c+(px/2+xx)] = fcb[yy*cs2+xx];
+                            enc->recon->cr[(py/2+yy)*enc->recon->stride_c+(px/2+xx)] = fcr[yy*cs2+xx];
+                        }
+                }
             }
         }
 
@@ -954,6 +969,51 @@ static int64_t qt_leaf(qt_enc_t *e, int depth, int cx, int cy, int write)
             int bits_merge = 1+1+1+1+1+1+lb;
             int64_t cost2 = dl2 + e->lambda*bits_merge;
             if (cost2<best_cost) { best_cost=cost2;b_intra=0;b_merge=1;b_skip=0;b_mvdx=disp.x;b_mvdy=disp.y; b_dct=TC_BLOCK_8x8_ID;b_ch=0;b_cmode=0;b_imode=1;b_refsel=0;b_bi=0; won_global=0; }
+        }
+        /* TRIAL78 skip-9 perfect-match (fresh chroma, FRESH_SKIP bit).
+         * mvp MC (dpb[0]) luma pred already in pred[] (same as merge).
+         * Perfect luma (SSE==0) + perfect fresh chroma (SSE==0) → skip
+         * (2 bits P, zero residual, exact-copy, no poisoning). Fires only
+         * on static (frozen/screen/sita/vidyo bg); never on nature (safe).
+         * With fixed MVP (hill-41), frozen predicts 0 (was -96). */
+        if (!fast_mode && e->frame_type == TC_FRAME_INTER && enc->dpb[0].frame) {
+            const tc_pixel_t *origL = enc->cur->y + py*enc->cur->stride_y + px;
+            int64_t sseL = 0;
+            for (int yy=0; yy<cu && sseL==0; yy++)
+                for (int xx=0; xx<cu; xx++) {
+                    int d = (int)origL[yy*enc->cur->stride_y+xx] - (int)pred[yy*cu+xx];
+                    sseL += (int64_t)d*d;
+                    if (sseL != 0) break;
+                }
+            if (sseL == 0) {
+                tc_mv_s smv = {mvp.x+px*4, mvp.y+py*4};
+                int cs2 = cu/2;
+                tc_pixel_t scb[32*32], scr[32*32];
+                tc_inter_predict_chroma(enc->dpb[0].frame->cb, enc->dpb[0].frame->stride_c,
+                    enc->cfg.width/2, enc->cfg.height/2, smv, scb, cs2, cs2);
+                tc_inter_predict_chroma(enc->dpb[0].frame->cr, enc->dpb[0].frame->stride_c,
+                    enc->cfg.width/2, enc->cfg.height/2, smv, scr, cs2, cs2);
+                const tc_pixel_t *origCb = enc->cur->cb + (py/2)*enc->cur->stride_c + px/2;
+                const tc_pixel_t *origCr = enc->cur->cr + (py/2)*enc->cur->stride_c + px/2;
+                int64_t sseC = 0;
+                for (int yy=0; yy<cs2 && sseC==0; yy++)
+                    for (int xx=0; xx<cs2; xx++) {
+                        int db = (int)origCb[yy*enc->cur->stride_c+xx] - (int)scb[yy*cs2+xx];
+                        int dr = (int)origCr[yy*enc->cur->stride_c+xx] - (int)scr[yy*cs2+xx];
+                        sseC += (int64_t)db*db + (int64_t)dr*dr;
+                        if (sseC != 0) break;
+                    }
+                if (sseC == 0) {
+                    int bits_skip = 1 + 1; /* P skip: intra(0) + skip(1); honest */
+                    int64_t cost_skip = e->lambda * (int64_t)bits_skip; /* distortion 0 */
+                    if (cost_skip < best_cost) {
+                        best_cost = cost_skip;
+                        b_intra=0; b_skip=1; b_merge=0; b_dct=TC_BLOCK_8x8_ID;
+                        b_mvdx=0; b_mvdy=0; b_ch=0; b_cmode=0; b_imode=1;
+                        b_refsel=0; b_bi=0; won_global=0;
+                    }
+                }
+            }
         }
     }
 
@@ -1229,6 +1289,7 @@ static void encode_ctu_v2(tc_encoder_t *enc, int row, int col, int qp,
     e.multiref = (enc->cfg.use_v2 && enc->cfg.preset >= TC_PRESET_MEDIUM &&
                   enc->cfg.profile >= TC_PROFILE_STREAMING_MAIN &&
                   frame_type == TC_FRAME_INTER);
+    e.fresh_skip = (enc->cfg.use_v2 && enc->cfg.preset >= TC_PRESET_MEDIUM); /* TRIAL78 */
     e.frame_type=frame_type; e.poc=poc; e.bs=bs; e.tans=tans; e.rc=rc; e.rc_ctx=rc_ctx;
     e.node=enc->v2_node; e.grid=enc->v2_grid;
     memset(e.node, 0, (size_t)TC_QT_NODES * sizeof(qt_node_t));
@@ -2531,6 +2592,11 @@ static tc_error_t encode_poc_frame(tc_encoder_t *enc,
         /* v2 always carries one bounded SAO-present flag per CTU. */
         if (enc->cfg.use_v2) {
             tools |= TC_TOOL_SAO;
+        }
+        /* TRIAL78: FRESH_SKIP (skip fresh MC chroma). v2 medium+ (all profiles;
+         * decoder cost negative: skip has no residual to parse/transform!). */
+        if (enc->cfg.use_v2 && enc->cfg.preset >= TC_PRESET_MEDIUM) {
+            tools |= TC_TOOL_FRESH_SKIP;
         }
         /* Future tools (not yet implemented):
          * TC_TOOL_DERINGING      — directional deringing (Phase 7)

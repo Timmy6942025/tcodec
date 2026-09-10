@@ -109,8 +109,9 @@ Vs practical H.264 (veryfast): +37..+159% remains open (Tier-2).
    scaling 1.2× (starvation), parse serial; needs entry-points format +
    volume cuts (MVP fix helps volume) + variance work. Program in docs/D9_PLAN.md.
 2. **Nature compression**: MVP disp-storage fix (hill-77: probe −10.5%, park
-   −8.2%, screen −2.9%) closes part of +68..+159% BD gap; unlocks skip-8
-   (decent MVP first — now fixed) + merge-list (see docs/MERGELIST_DESIGN.md,
-   unblocked) + v2.1 batch. B-ladder retune deferred.
+   −8.2%, screen −2.9%) closes part of +68..+159% BD gap; skip-9 infra kept
+   (hill-78: FRESH_SKIP bit + fresh paths + rejection, firing 0% perfect —
+   needs near-exact threshold + ρ/mb-tree next) + merge-list unblocked next
+   (decent MVP fixed, see docs/MERGELIST_DESIGN.md) + v2.1 batch. B-ladder deferred.
 3. Remaining corpus (fetched, unbenchmarked): 1080p decode rows beyond
    baselines; nothing else outstanding on content.

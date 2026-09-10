@@ -273,7 +273,15 @@ typedef struct tc_frame_header {
 #define TC_TOOL_AFFINE_MOTION     (1u << 12) /* Affine motion model (future) */
 #define TC_TOOL_EXTENDED_PART     (1u << 13) /* Extended partition types (future) */
 #define TC_TOOL_CONTEXT_RESET     (1u << 14) /* Context model reset point */
-/* Bit 15 reserved (must be 0) */
+#define TC_TOOL_FRESH_SKIP         (1u << 15) /* TRIAL78: skip fresh MC chroma (was stale by design) */
+/* Bit 15 now FRESH_SKIP (was reserved; MPM batched, coordinate v2.1) */
+
+/* Implemented tool mask (decoder rejects any bit outside this; encoder never
+ * sets future/unimplemented bits). TRIAL78 adds FRESH_SKIP + rejection. */
+#define TC_TOOLS_IMPLEMENTED (TC_TOOL_SKIP_MERGE | TC_TOOL_CFL_CHROMA | \
+    TC_TOOL_JND_WEIGHTING | TC_TOOL_MEDIAN_MV_PRED | TC_TOOL_MULTI_REF | \
+    TC_TOOL_SIX_TAP_INTERP | TC_TOOL_ENTROPY_CODED | TC_TOOL_SAO | \
+    TC_TOOL_BIPRED | TC_TOOL_CONTEXT_RESET | TC_TOOL_FRESH_SKIP)
 
 /* Default tool_flags per profile */
 #define TC_TOOLS_BASELINE_MOBILE  (TC_TOOL_SKIP_MERGE | TC_TOOL_CFL_CHROMA | \
