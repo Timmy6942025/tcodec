@@ -723,6 +723,14 @@ static TCODEC_FORCEINLINE int32_t qt_read_se(qt_dec_t *d, int base_ctx)
     return value;
 }
 
+/* MVP divergence meter (TRIAL77 forensics, mirrors encoder TC_MVPDBG). */
+static int mvpdbg_dec_on = -1;
+static int mvpdbg_dec_active(void)
+{
+    if (mvpdbg_dec_on < 0) mvpdbg_dec_on = (getenv("TC_MVPDBG") != 0) ? 1 : 0;
+    return mvpdbg_dec_on;
+}
+
 /* MV predictor — must match encoder qt_mvp() exactly (median of the
  * left / above / above-right 8×8 MV-grid cells, in the same relative
  * MV convention). */
@@ -739,9 +747,13 @@ static tc_mv_s qt_dec_mvp(const qt_dec_t *d, int cx, int cy)
     if (!hc) c = ha ? a : b;
     /* TRIAL54: min-magnitude candidate (mirrors encoder qt_mvp exactly). */
     { int64_t qa=(int64_t)a.x*a.x+(int64_t)a.y*a.y, qb=(int64_t)b.x*b.x+(int64_t)b.y*b.y, qc=(int64_t)c.x*c.x+(int64_t)c.y*c.y;
-      if (qb < qa && qb <= qc) return (tc_mv_s){b.x,b.y};
-      if (qc < qa && qc < qb) return (tc_mv_s){c.x,c.y};
-      return (tc_mv_s){a.x,a.y}; }
+      tc_mv_s _r;
+      if (qb < qa && qb <= qc) _r = (tc_mv_s){b.x,b.y};
+      else if (qc < qa && qc < qb) _r = (tc_mv_s){c.x,c.y};
+      else _r = (tc_mv_s){a.x,a.y};
+      if (mvpdbg_dec_active()) fprintf(stderr, "MVPDEC cx=%d cy=%d ha=%d hb=%d hc=%d a=(%d,%d) b=(%d,%d) c=(%d,%d) mvp=(%d,%d)\n",
+        cx,cy,ha,hb,hc,a.x,a.y,b.x,b.y,c.x,c.y,_r.x,_r.y);
+      return _r; }
 }
 
 static const uint8_t qt_band4[16] = {
@@ -1411,6 +1423,7 @@ static void v2_parse_leaf(v2_parse_ctx_t *p, int depth, int cx, int cy)
     if (q1 < q0 && q1 <= q2) { mvp.x = vx[1]; mvp.y = vy[1]; }
     else if (q2 < q0 && q2 < q1) { mvp.x = vx[2]; mvp.y = vy[2]; }
     else { mvp.x = vx[0]; mvp.y = vy[0]; }
+    if (mvpdbg_dec_active()) fprintf(stderr, "MVPPARSE cx=%d cy=%d mvp=(%d,%d) px=%d py=%d\n", cx,cy,mvp.x,mvp.y,px,py);
     n->mv_x = (int16_t)(mvp.x + px * 4 + ((n->skip || n->merge || n->intra) ? 0 : n->mvd_x));
     n->mv_y = (int16_t)(mvp.y + py * 4 + ((n->skip || n->merge || n->intra) ? 0 : n->mvd_y));
 

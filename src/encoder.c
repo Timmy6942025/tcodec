@@ -51,6 +51,16 @@ static TCODEC_FORCEINLINE int brk_active(void)
     return brk_on;
 }
 
+/* MVP divergence meter (TRIAL77 forensics, env-gated TC_MVPDBG=1): logs
+ * per-leaf MVP (cx,cy, ha/hb/hc, a/b/c, mvp) for encoder vs decoder
+ * comparison on frozen content. Zero behavior change when unset. */
+static int mvpdbg_on = -1;
+static TCODEC_FORCEINLINE int mvpdbg_active(void)
+{
+    if (mvpdbg_on < 0) mvpdbg_on = (getenv("TC_MVPDBG") != 0) ? 1 : 0;
+    return mvpdbg_on;
+}
+
 static TCODEC_FORCEINLINE void enc_write_bits(
     tc_bs_writer_t *bs, tc_rc_enc_t *rc, tc_rc_ctx_t *ctx,
     int base_ctx, uint32_t val, int nbits)
@@ -396,9 +406,13 @@ static tc_mv_s qt_mvp(qt_enc_t *e, int cx, int cy, const qt_mvcell_t *grid)
      * neighbors disagree (measured mvp-MC SSE 550/cu2 frozen). Coherent
      * fields unaffected (all candidates ~equal); static pulls to zero. */
     { int64_t qa=(int64_t)a.x*a.x+(int64_t)a.y*a.y, qb=(int64_t)b.x*b.x+(int64_t)b.y*b.y, qc=(int64_t)c.x*c.x+(int64_t)c.y*c.y;
-      if (qb < qa && qb <= qc) return (tc_mv_s){b.x,b.y};
-      if (qc < qa && qc < qb) return (tc_mv_s){c.x,c.y};
-      return (tc_mv_s){a.x,a.y}; }
+      tc_mv_s _r;
+      if (qb < qa && qb <= qc) _r = (tc_mv_s){b.x,b.y};
+      else if (qc < qa && qc < qb) _r = (tc_mv_s){c.x,c.y};
+      else _r = (tc_mv_s){a.x,a.y};
+      if (mvpdbg_active()) fprintf(stderr, "MVPENC cx=%d cy=%d ha=%d hb=%d hc=%d a=(%d,%d) b=(%d,%d) c=(%d,%d) mvp=(%d,%d)\n",
+        cx,cy,ha,hb,hc,a.x,a.y,b.x,b.y,c.x,c.y,_r.x,_r.y);
+      return _r; }
 }
 
 static int64_t qt_code_chroma(qt_enc_t *e, int px, int py, int cu,
