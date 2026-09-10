@@ -106,12 +106,12 @@ static TCODEC_FORCEINLINE void enc_write_se(
 static TCODEC_FORCEINLINE void enc_write_coeffs(
     tc_bs_writer_t *bs, tc_tans_enc_t *tans,
     tc_rc_enc_t *rc, tc_rc_ctx_t *rc_ctx,
-    const tc_coeff_t *coeffs, int n, tc_block_size_t dct_size, int brk_plane)
+    const tc_coeff_t *coeffs, int n, tc_block_size_t dct_size, int brk_plane, int is_chroma) /* TRIAL85 */
 {
     size_t b0 = 0;
     int brk = brk_active();
     if (brk && bs) b0 = tc_bs_writer_bytes(bs);
-    if (rc) tc_rc_enc_coeffs(rc, rc_ctx, coeffs, n, dct_size);
+    if (rc) tc_rc_enc_coeffs(rc, rc_ctx, coeffs, n, dct_size, is_chroma); /* TRIAL85 */
     else if (tans) tc_tans_enc_coeffs(tans, coeffs, n, dct_size);
     if (brk && bs && brk_plane >= 0 && brk_plane < 3)
         brk_resid[brk_plane] += (long long)tc_bs_writer_bytes(bs) - (long long)b0;
@@ -456,7 +456,7 @@ static int64_t qt_code_chroma(qt_enc_t *e, int px, int py, int cu,
                  /* Coeffs follow the same entropy path as every other
                   * v2 syntax element (range coder when rc!=NULL, EG
                   * otherwise) so encoder and decoder can never drift. */
-                 if (write) { enc_write_coeffs(e->bs,e->tans,e->rc,e->rc_ctx, c4, 16, TC_BLOCK_4x4_ID, 1); brk_est_add(c4,16); }
+                 if (write) { enc_write_coeffs(e->bs,e->tans,e->rc,e->rc_ctx, c4, 16, TC_BLOCK_4x4_ID, 1, 1); brk_est_add(c4,16); }
                  else { int last=-1; for (int i=15;i>=0;i--) if (c4[i]) {last=i;break;}bits += 1 + 2*nz + count_siglevel_bits(c4,last) + lastpos_cost(last,16); }
                  tc_coeff_t iq[16];
                  for (int i=0;i<16;i++){ int band=tc_freq_band(i,4); iq[i]=(tc_coeff_t)tc_dequant_coeff(c4[i],eff4_band[band]); }
@@ -499,7 +499,7 @@ static int64_t qt_code_luma(qt_enc_t *e, int px, int py, int cu,
               for (int i=0;i<64;i++){ int band=tc_freq_band(i,8); tu[i]=(tc_coeff_t)tc_quant_coeff(tu[i],eff8_band[band]); }
               nz = rdoq_level1(tu, qo8, 64, 1, qp, e->lambda); /* RDOQ-lite */
               for (int i=0;i<64;i++){ coeffs[(ty*ntu+tx)*64+i]=tu[i]; } }
-            if (write) { enc_write_bits(e->bs,e->rc,e->rc_ctx,RC_CTX_DCT_SIZE,TC_BLOCK_8x8_ID,1); enc_write_coeffs(e->bs,e->tans,e->rc,e->rc_ctx,coeffs+(ty*ntu+tx)*64,64,TC_BLOCK_8x8_ID, 0); brk_est_add(coeffs+(ty*ntu+tx)*64,64); }
+            if (write) { enc_write_bits(e->bs,e->rc,e->rc_ctx,RC_CTX_DCT_SIZE,TC_BLOCK_8x8_ID,1); enc_write_coeffs(e->bs,e->tans,e->rc,e->rc_ctx,coeffs+(ty*ntu+tx)*64,64,TC_BLOCK_8x8_ID, 0, 0); brk_est_add(coeffs+(ty*ntu+tx)*64,64); }
             else { int last=-1; const tc_coeff_t *cc8=coeffs+(ty*ntu+tx)*64; for (int i=63;i>=0;i--) if (cc8[i]) {last=i;break;}bits += 1 + 2*nz + count_siglevel_bits(cc8,last) + lastpos_cost(last,64); }
             tc_coeff_t iq[64];
             for (int i=0;i<64;i++){ int band=tc_freq_band(i,8); iq[i]=(tc_coeff_t)tc_dequant_coeff(coeffs[(ty*ntu+tx)*64+i],eff8_band[band]); }
@@ -525,7 +525,7 @@ static int64_t qt_code_luma(qt_enc_t *e, int px, int py, int cu,
                   for (int i=0;i<16;i++){ int band=tc_freq_band(i,4); c4[i]=(tc_coeff_t)tc_quant_coeff(c4[i],eff4_band[band]); }
                   nz = rdoq_level1(c4, qo4b, 16, 0, qp, e->lambda); /* RDOQ-lite */
                   for (int i=0;i<16;i++){ coeffs[base+q*16+i]=c4[i]; } }
-                if (write) { enc_write_bits(e->bs,e->rc,e->rc_ctx,RC_CTX_DCT_SIZE,TC_BLOCK_4x4_ID,1); enc_write_coeffs(e->bs,e->tans,e->rc,e->rc_ctx,coeffs+base+q*16,16,TC_BLOCK_4x4_ID, 0); brk_est_add(coeffs+base+q*16,16); }
+                if (write) { enc_write_bits(e->bs,e->rc,e->rc_ctx,RC_CTX_DCT_SIZE,TC_BLOCK_4x4_ID,1); enc_write_coeffs(e->bs,e->tans,e->rc,e->rc_ctx,coeffs+base+q*16,16,TC_BLOCK_4x4_ID, 0, 0); brk_est_add(coeffs+base+q*16,16); }
                 else { int last=-1; const tc_coeff_t *cc4=coeffs+base+q*16; for (int i=15;i>=0;i--) if (cc4[i]) {last=i;break;}bits += 1 + 2*nz + count_siglevel_bits(cc4,last) + lastpos_cost(last,16); }
                 tc_coeff_t iq4[16];
                 for (int i=0;i<16;i++){ int band=tc_freq_band(i,4); iq4[i]=(tc_coeff_t)tc_dequant_coeff(c4[i],eff4_band[band]); }
@@ -2053,11 +2053,11 @@ static void encode_block(tc_encoder_t *enc, tc_ctu_info_t *ctu,
                             sub[r * 4 + c] = dct_out[(sy * 4 + r) * 8 + (sx * 4 + c)];
                         }
                     }
-                    enc_write_coeffs(bs, tans, rc, rc_ctx, sub, 16, TC_BLOCK_4x4_ID, 2);
+                    enc_write_coeffs(bs, tans, rc, rc_ctx, sub, 16, TC_BLOCK_4x4_ID, 2, 0);
                 }
             }
         } else {
-            enc_write_coeffs(bs, tans, rc, rc_ctx, dct_out, n_coeff, TC_BLOCK_8x8_ID, 2);
+            enc_write_coeffs(bs, tans, rc, rc_ctx, dct_out, n_coeff, TC_BLOCK_8x8_ID, 2, 0);
         }
 
         /* ── Reconstruct (dequantize + IDCT + add prediction) ── */
@@ -2190,7 +2190,7 @@ static void encode_block(tc_encoder_t *enc, tc_ctu_info_t *ctu,
         /* DCT + quantize + encode (residual-mode) */
         tc_fwht4x4(c_res, 4, c_dct);
         tc_quantize(c_dct, 16, tc_clip(qp + 1, 0, 63), 0);
-        enc_write_coeffs(bs, tans, rc, rc_ctx, c_dct, 16, TC_BLOCK_4x4_ID, 2);
+        enc_write_coeffs(bs, tans, rc, rc_ctx, c_dct, 16, TC_BLOCK_4x4_ID, 2, 0);
 
         /* Reconstruct chroma */
         tc_dequantize(c_dct, 16, tc_clip(qp + 1, 0, 63), 0);

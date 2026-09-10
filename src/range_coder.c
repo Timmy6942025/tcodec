@@ -219,8 +219,10 @@ uint32_t tc_rc_enc_ue(tc_rc_enc_t *rc, tc_rc_ctx_t *ctx,
 
 void tc_rc_enc_coeffs(tc_rc_enc_t *rc, tc_rc_ctx_t *ctx,
                       const tc_coeff_t *coeffs, int n,
-                      tc_block_size_t dct_size)
+                      tc_block_size_t dct_size, int is_chroma) /* TRIAL85 */
 {
+    const int coff = is_chroma ? (RC_CTX_CHROMA_BASE - RC_CTX_SIG) : 0; /* 65 */
+    (void)coff; /* used below via COFF() macro? Actually add offset to each ctx index. Simpler: define local macro CO(x) ((x)+coff) and replace RC_CTX_* uses in this function with CO(...). Do manual replacements below for each ctx use in enc_coeffs (LAST, SIG, GT1, GT2, LEVEL, SIGN + DC variants). */
     (void)dct_size;
 
     int last_nz = -1;
@@ -229,24 +231,24 @@ void tc_rc_enc_coeffs(tc_rc_enc_t *rc, tc_rc_ctx_t *ctx,
     }
 
     if (last_nz < 0) {
-        tc_rc_enc_bit(rc, &ctx[RC_CTX_LAST], 0);
+        tc_rc_enc_bit(rc, &ctx[RC_CTX_LAST+coff], 0);
         return;
     }
 
     /* Signal that coefficients exist */
-    tc_rc_enc_bit(rc, &ctx[RC_CTX_LAST], 1);
+    tc_rc_enc_bit(rc, &ctx[RC_CTX_LAST+coff], 1);
 
     /* Truncated unary prefix + EG suffix for last_nz */
     int prefix = (last_nz < 4) ? last_nz : 4;
     for (int i = 0; i < prefix; i++) {
-        int cidx = RC_CTX_LAST + (i % 4);
+        int cidx = RC_CTX_LAST+coff + (i % 4);
         tc_rc_enc_bit(rc, &ctx[cidx], 0);
     }
     if (last_nz < 4) {
-        int cidx = RC_CTX_LAST + (prefix % 4);
+        int cidx = RC_CTX_LAST+coff + (prefix % 4);
         tc_rc_enc_bit(rc, &ctx[cidx], 1);
     } else {
-        tc_rc_enc_ue(rc, ctx, RC_CTX_LAST, (uint32_t)(last_nz - 4));
+        tc_rc_enc_ue(rc, ctx, RC_CTX_LAST+coff, (uint32_t)(last_nz - 4));
     }
 
     /* Coefficients in reverse order */
@@ -254,7 +256,7 @@ void tc_rc_enc_coeffs(tc_rc_enc_t *rc, tc_rc_ctx_t *ctx,
     for (int i = last_nz; i >= 0; i--) {
         int c = coeffs[i];
         int is_dc = (i == 0);
-        int cidx_sig = is_dc ? RC_CTX_SIG_DC : RC_CTX_SIG + (i * 8 / n);
+        int cidx_sig = is_dc ? RC_CTX_SIG_DC+coff : RC_CTX_SIG+coff + (i * 8 / n);
         if (cidx_sig >= RC_CTX_MAX) cidx_sig = RC_CTX_MAX - 1;
 
         if (c == 0) {
@@ -267,15 +269,15 @@ void tc_rc_enc_coeffs(tc_rc_enc_t *rc, tc_rc_ctx_t *ctx,
         int mag = tc_abs(c);
 
         /* GT1 flag */
-        int cidx_gt1 = is_dc ? RC_CTX_GT1_DC : RC_CTX_GT1 + tc_min(gt1_count, 5);
+        int cidx_gt1 = is_dc ? RC_CTX_GT1_DC+coff : RC_CTX_GT1+coff + tc_min(gt1_count, 5);
         tc_rc_enc_bit(rc, &ctx[cidx_gt1], (mag > 1) ? 1 : 0);
 
         if (mag > 1) {
-            int cidx_gt2 = is_dc ? RC_CTX_GT2_DC : RC_CTX_GT2 + tc_min(gt1_count, 1);
+            int cidx_gt2 = is_dc ? RC_CTX_GT2_DC+coff : RC_CTX_GT2+coff + tc_min(gt1_count, 1);
             tc_rc_enc_bit(rc, &ctx[cidx_gt2], (mag > 2) ? 1 : 0);
 
             if (mag > 2) {
-                tc_rc_enc_ue(rc, ctx, is_dc ? RC_CTX_LEVEL_DC : RC_CTX_LEVEL, (uint32_t)(mag - 3));
+                tc_rc_enc_ue(rc, ctx, is_dc ? RC_CTX_LEVEL_DC+coff : RC_CTX_LEVEL+coff, (uint32_t)(mag - 3));
             }
             gt1_count++;
             if (gt1_count > 5) gt1_count = 5;
@@ -283,7 +285,7 @@ void tc_rc_enc_coeffs(tc_rc_enc_t *rc, tc_rc_ctx_t *ctx,
 
         /* Sign bit */
         int sign_bit = (c < 0) ? 1 : 0;
-        tc_rc_enc_bit(rc, &ctx[is_dc ? RC_CTX_SIGN_DC : RC_CTX_SIGN], sign_bit);
+        tc_rc_enc_bit(rc, &ctx[is_dc ? RC_CTX_SIGN_DC+coff : RC_CTX_SIGN+coff], sign_bit);
     }
 }
 
@@ -384,8 +386,9 @@ uint32_t tc_rc_dec_ue(tc_rc_dec_t *rc, tc_rc_ctx_t *ctx, int base_ctx)
 
 void tc_rc_dec_coeffs(tc_rc_dec_t *rc, tc_rc_ctx_t *ctx,
                       tc_coeff_t *coeffs, int n,
-                      tc_block_size_t dct_size)
+                      tc_block_size_t dct_size, int is_chroma) /* TRIAL85 */
 {
+    const int coff = is_chroma ? (RC_CTX_CHROMA_BASE - RC_CTX_SIG) : 0; /* 65 */
     (void)dct_size;
     memset(coeffs, 0, (size_t)n * sizeof(tc_coeff_t));
 
@@ -394,11 +397,11 @@ void tc_rc_dec_coeffs(tc_rc_dec_t *rc, tc_rc_ctx_t *ctx,
      * call for every significance/level/sign symbol; the arithmetic state
      * machine and context mutation remain exactly unchanged. */
     tc_rc_ctx_t *cbase = ctx;
-    if (rc_dec_bit_core(rc, &cbase[RC_CTX_LAST]) == 0) return;
+    if (rc_dec_bit_core(rc, &cbase[RC_CTX_LAST+coff]) == 0) return;
 
     int last_nz = 0, found = 0;
     for (int i = 0; i < 4; i++) {
-        int cidx = RC_CTX_LAST + (i % 4);
+        int cidx = RC_CTX_LAST+coff + (i % 4);
         if (rc_dec_bit_core(rc, &cbase[cidx]) == 1) {
             last_nz = i;
             found = 1;
@@ -406,7 +409,7 @@ void tc_rc_dec_coeffs(tc_rc_dec_t *rc, tc_rc_ctx_t *ctx,
         }
     }
     if (!found) {
-        uint32_t extra = tc_rc_dec_ue(rc, cbase, RC_CTX_LAST);
+        uint32_t extra = tc_rc_dec_ue(rc, cbase, RC_CTX_LAST+coff);
         if (extra > (uint32_t)n) {
             rc->bs->error = 1;
             return;
@@ -421,24 +424,24 @@ void tc_rc_dec_coeffs(tc_rc_dec_t *rc, tc_rc_ctx_t *ctx,
     int gt1_count = 0;
     for (int i = last_nz; i >= 0; i--) {
         int is_dc = (i == 0);
-        int cidx_sig = is_dc ? RC_CTX_SIG_DC : RC_CTX_SIG + (i * 8 / n);
+        int cidx_sig = is_dc ? RC_CTX_SIG_DC+coff : RC_CTX_SIG+coff + (i * 8 / n);
         if (cidx_sig >= RC_CTX_MAX) cidx_sig = RC_CTX_MAX - 1;
 
         if (!rc_dec_bit_core(rc, &cbase[cidx_sig])) { coeffs[i] = 0; continue; }
 
-        int cidx_gt1 = is_dc ? RC_CTX_GT1_DC : RC_CTX_GT1 + tc_min(gt1_count, 5);
+        int cidx_gt1 = is_dc ? RC_CTX_GT1_DC+coff : RC_CTX_GT1+coff + tc_min(gt1_count, 5);
         int gt1 = rc_dec_bit_core(rc, &cbase[cidx_gt1]);
         int mag;
 
         if (!gt1) {
             mag = 1;
         } else {
-            int cidx_gt2 = is_dc ? RC_CTX_GT2_DC : RC_CTX_GT2 + tc_min(gt1_count, 1);
+            int cidx_gt2 = is_dc ? RC_CTX_GT2_DC+coff : RC_CTX_GT2+coff + tc_min(gt1_count, 1);
             int gt2 = rc_dec_bit_core(rc, &cbase[cidx_gt2]);
             if (!gt2) {
                 mag = 2;
             } else {
-                mag = 3 + (int)tc_rc_dec_ue(rc, cbase, is_dc ? RC_CTX_LEVEL_DC : RC_CTX_LEVEL);
+                mag = 3 + (int)tc_rc_dec_ue(rc, cbase, is_dc ? RC_CTX_LEVEL_DC+coff : RC_CTX_LEVEL+coff);
             }
             gt1_count++;
             if (gt1_count > 5) gt1_count = 5;
@@ -448,7 +451,7 @@ void tc_rc_dec_coeffs(tc_rc_dec_t *rc, tc_rc_ctx_t *ctx,
             rc->bs->error = 1;
             return;
         }
-        int sign = rc_dec_bit_core(rc, &cbase[is_dc ? RC_CTX_SIGN_DC : RC_CTX_SIGN]);
+        int sign = rc_dec_bit_core(rc, &cbase[is_dc ? RC_CTX_SIGN_DC+coff : RC_CTX_SIGN+coff]);
         coeffs[i] = (tc_coeff_t)(sign ? -mag : mag);
     }
 }

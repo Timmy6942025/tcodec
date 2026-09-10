@@ -78,7 +78,7 @@ static TCODEC_FORCEINLINE int32_t dec_read_se(
 
 static TCODEC_FORCEINLINE void dec_read_coeffs(
     tc_tans_dec_t *tans, tc_rc_dec_t *rc, tc_rc_ctx_t *rc_ctx,
-    tc_coeff_t *coeffs, int n, tc_block_size_t dct_size)
+    tc_coeff_t *coeffs, int n, tc_block_size_t dct_size, int is_chroma) /* TRIAL85 */
 {
     /* Keep the hot context base in a register across the dispatch.  The
      * range decoder mutates it, so this is deliberately a local pointer,
@@ -92,7 +92,7 @@ static TCODEC_FORCEINLINE void dec_read_coeffs(
 #if defined(__GNUC__) || defined(__clang__)
         __builtin_prefetch(ctx, 0, 3);
 #endif
-        tc_rc_dec_coeffs(rc, ctx, coeffs, n, dct_size);
+        tc_rc_dec_coeffs(rc, ctx, coeffs, n, dct_size, is_chroma); /* TRIAL85 */
     }
     else    tc_tans_dec_coeffs(tans, coeffs, n, dct_size);
 }
@@ -495,7 +495,7 @@ static void decode_block(tc_decoder_t *dec, int ctu_idx, int blk_idx,
             for (int sy = 0; sy < 2; sy++) {
                 for (int sx = 0; sx < 2; sx++) {
                     tc_coeff_t sub[16];
-                    dec_read_coeffs(tans, rc, rc_ctx, sub, 16, TC_BLOCK_4x4_ID);
+                    dec_read_coeffs(tans, rc, rc_ctx, sub, 16, TC_BLOCK_4x4_ID, 0); /* TRIAL85 luma */
                     for (int i = 0; i < 16; i++) {
                         int band = tc_freq_band(i, 4);
                         int w = tc_jnd_weight(band, i);
@@ -523,7 +523,7 @@ static void decode_block(tc_decoder_t *dec, int ctu_idx, int blk_idx,
                 }
             }
         } else {
-            dec_read_coeffs(tans, rc, rc_ctx, dct_coeff, 64, TC_BLOCK_8x8_ID);
+            dec_read_coeffs(tans, rc, rc_ctx, dct_coeff, 64, TC_BLOCK_8x8_ID, 0); /* TRIAL85 luma */
             for (int i = 0; i < 64; i++) {
                 int band = tc_freq_band(i, 8);
                 int w = tc_jnd_weight(band, i);
@@ -616,7 +616,7 @@ static void decode_block(tc_decoder_t *dec, int ctu_idx, int blk_idx,
              * in tc_quantize/tc_dequantize, this decoder path must be updated
              * to apply matching JND weighting (like the luma path does inline). */
             tc_coeff_t c_coeff[16];
-            dec_read_coeffs(tans, rc, rc_ctx, c_coeff, 16, TC_BLOCK_4x4_ID);
+            dec_read_coeffs(tans, rc, rc_ctx, c_coeff, 16, TC_BLOCK_4x4_ID, 0); /* TRIAL85 legacy shared (no split, frozen) */
             tc_dequantize(c_coeff, 16, chroma_qp, 0);
 
             tc_coeff_t c_rec[16];
@@ -788,7 +788,7 @@ static void qt_dec_luma(qt_dec_t *d, int px, int py, int cu,
         if (dct == TC_BLOCK_8x8_ID) {
             tc_coeff_t tu[64], iq[64];
             uint64_t coeff_start = dec->profile_enabled ? dec_now_ns() : 0;
-            dec_read_coeffs(d->tans, d->rc, d->rc_ctx, tu, 64, TC_BLOCK_8x8_ID);
+            dec_read_coeffs(d->tans, d->rc, d->rc_ctx, tu, 64, TC_BLOCK_8x8_ID, 0); /* TRIAL85 luma */
             dec_profile_add(dec, &dec->profile_coeff_ns, coeff_start);
             const int (*eff_table)[64] = d->eff_scale;
             int nonzero = 0, dc_only = 1;
@@ -831,7 +831,7 @@ static void qt_dec_luma(qt_dec_t *d, int px, int py, int cu,
                 (void)qt_read_bits(d, RC_CTX_DCT_SIZE, 1);
                  tc_coeff_t c4[16], iq4[16];
                  uint64_t coeff_start = dec->profile_enabled ? dec_now_ns() : 0;
-                 dec_read_coeffs(d->tans, d->rc, d->rc_ctx, c4, 16, TC_BLOCK_4x4_ID);
+                 dec_read_coeffs(d->tans, d->rc, d->rc_ctx, c4, 16, TC_BLOCK_4x4_ID, 0); /* TRIAL85 luma 4x4 sub-block (fix misclassify) */
                  dec_profile_add(dec, &dec->profile_coeff_ns, coeff_start);
                  const int (*eff4_table)[64] = d->eff_scale;
                  int nonzero = 0, dc_only = 1;
@@ -879,7 +879,7 @@ static void qt_dec_chroma(qt_dec_t *d, int px, int py, int cu,
                 int ox=tx*4, oy=ty*4;
                 tc_coeff_t c4[16], iq[16];
                 uint64_t coeff_start = dec->profile_enabled ? dec_now_ns() : 0;
-                dec_read_coeffs(d->tans, d->rc, d->rc_ctx, c4, 16, TC_BLOCK_4x4_ID);
+                dec_read_coeffs(d->tans, d->rc, d->rc_ctx, c4, 16, TC_BLOCK_4x4_ID, 1); /* TRIAL85 chroma */
                 dec_profile_add(dec, &dec->profile_coeff_ns, coeff_start);
                 /* Preserve the normative per-frequency-band chroma
                  * dequantization, but reuse the QP-local table built once
@@ -1317,7 +1317,7 @@ static TCODEC_FORCEINLINE int32_t v2_parse_se(v2_parse_ctx_t *p, int base)
 }
 
 static int v2_cmd_push_coeffs(v2_parse_ctx_t *p, int n,
-                               uint16_t *off_out)
+                               uint16_t *off_out, int is_chroma) /* TRIAL85 */
 {
     if ((int)p->cmd->coeff_count + n > V2_CMD_MAX_COEFFS) {
         p->bs->error = 1;
@@ -1327,7 +1327,7 @@ static int v2_cmd_push_coeffs(v2_parse_ctx_t *p, int n,
     uint64_t start = p->dec->profile_enabled ? dec_now_ns() : 0;
     dec_read_coeffs(p->tans, p->rc, p->rc_ctx,
                     p->cmd->coeff + off, n,
-                    n == 64 ? TC_BLOCK_8x8_ID : TC_BLOCK_4x4_ID);
+                    n == 64 ? TC_BLOCK_8x8_ID : TC_BLOCK_4x4_ID, is_chroma); /* TRIAL85 */
     dec_profile_add(p->dec, &p->dec->profile_coeff_ns, start);
     p->cmd->coeff_count = (uint16_t)(off + n);
     *off_out = off;
@@ -1346,7 +1346,7 @@ static void v2_parse_luma(v2_parse_ctx_t *p, v2_cmd_leaf_t *n, int cu)
             n->luma_flags[n->luma_flag_count++] = (uint8_t)dct;
         if (dct == TC_BLOCK_8x8_ID) {
             uint16_t off;
-            if (!v2_cmd_push_coeffs(p, 64, &off)) return;
+            if (!v2_cmd_push_coeffs(p, 64, &off, 0)) return; /* TRIAL85 luma */
             n->luma_count = (uint16_t)(n->luma_count + 64);
         } else {
             for (int q = 0; q < 4; q++) {
@@ -1354,7 +1354,7 @@ static void v2_parse_luma(v2_parse_ctx_t *p, v2_cmd_leaf_t *n, int cu)
                 if (n->luma_flag_count < sizeof(n->luma_flags))
                     n->luma_flags[n->luma_flag_count++] = (uint8_t)sub_dct;
                 uint16_t off;
-                if (!v2_cmd_push_coeffs(p, 16, &off)) return;
+                if (!v2_cmd_push_coeffs(p, 16, &off, 0)) return; /* TRIAL85 luma */
                 n->luma_count = (uint16_t)(n->luma_count + 16);
             }
         }
@@ -1370,7 +1370,7 @@ static void v2_parse_chroma(v2_parse_ctx_t *p, v2_cmd_leaf_t *n, int cu)
         for (int ty = 0; ty < cs / 4; ty++)
             for (int tx = 0; tx < cs / 4; tx++) {
                 uint16_t off;
-                if (!v2_cmd_push_coeffs(p, 16, &off)) return;
+                if (!v2_cmd_push_coeffs(p, 16, &off, 1)) return; /* TRIAL85 chroma */
                 n->chroma_count = (uint16_t)(n->chroma_count + 16);
             }
 }

@@ -3292,7 +3292,7 @@ static void test_rc_coeff_coding(void)
             tc_rc_ctx_t enc_ctx[TC_NUM_CONTEXTS_RC];
             tc_rc_ctx_init(enc_ctx, TC_NUM_CONTEXTS_RC);
 
-            tc_rc_enc_coeffs(&rc_enc, enc_ctx, coeffs, n, dct_size);
+            tc_rc_enc_coeffs(&rc_enc, enc_ctx, coeffs, n, dct_size, 0); /* TRIAL85 luma */
             tc_rc_enc_flush(&rc_enc);
 
             size_t sz = tc_bs_writer_bytes(&bs_w);
@@ -3305,7 +3305,7 @@ static void test_rc_coeff_coding(void)
             tc_rc_ctx_init(dec_ctx, TC_NUM_CONTEXTS_RC);
 
             tc_coeff_t decoded[64] = {1};  /* deliberately nonzero */
-            tc_rc_dec_coeffs(&rc_dec, dec_ctx, decoded, n, dct_size);
+            tc_rc_dec_coeffs(&rc_dec, dec_ctx, decoded, n, dct_size, 0); /* TRIAL85 luma */
 
             for (int i = 0; i < n; i++) {
                 ASSERT_EQ(decoded[i], 0, "all-zero: decoded coeff not zero");
@@ -3325,7 +3325,7 @@ static void test_rc_coeff_coding(void)
             tc_rc_ctx_t enc_ctx[TC_NUM_CONTEXTS_RC];
             tc_rc_ctx_init(enc_ctx, TC_NUM_CONTEXTS_RC);
 
-            tc_rc_enc_coeffs(&rc_enc, enc_ctx, coeffs, n, dct_size);
+            tc_rc_enc_coeffs(&rc_enc, enc_ctx, coeffs, n, dct_size, 0); /* TRIAL85 luma */
             tc_rc_enc_flush(&rc_enc);
 
             size_t sz = tc_bs_writer_bytes(&bs_w);
@@ -3338,7 +3338,7 @@ static void test_rc_coeff_coding(void)
             tc_rc_ctx_init(dec_ctx, TC_NUM_CONTEXTS_RC);
 
             tc_coeff_t decoded[64] = {0};
-            tc_rc_dec_coeffs(&rc_dec, dec_ctx, decoded, n, dct_size);
+            tc_rc_dec_coeffs(&rc_dec, dec_ctx, decoded, n, dct_size, 0); /* TRIAL85 luma */
 
             for (int i = 0; i < n; i++) {
                 if (i == 0) ASSERT_EQ(decoded[i], 5, "single coeff: DC mismatch");
@@ -3364,7 +3364,7 @@ static void test_rc_coeff_coding(void)
             tc_rc_ctx_t enc_ctx[TC_NUM_CONTEXTS_RC];
             tc_rc_ctx_init(enc_ctx, TC_NUM_CONTEXTS_RC);
 
-            tc_rc_enc_coeffs(&rc_enc, enc_ctx, coeffs, n, dct_size);
+            tc_rc_enc_coeffs(&rc_enc, enc_ctx, coeffs, n, dct_size, 0); /* TRIAL85 luma */
             tc_rc_enc_flush(&rc_enc);
 
             size_t sz = tc_bs_writer_bytes(&bs_w);
@@ -3377,7 +3377,7 @@ static void test_rc_coeff_coding(void)
             tc_rc_ctx_init(dec_ctx, TC_NUM_CONTEXTS_RC);
 
             tc_coeff_t decoded[64] = {0};
-            tc_rc_dec_coeffs(&rc_dec, dec_ctx, decoded, n, dct_size);
+            tc_rc_dec_coeffs(&rc_dec, dec_ctx, decoded, n, dct_size, 0); /* TRIAL85 luma */
 
             for (int i = 0; i < n; i++) {
                 if (decoded[i] != coeffs[i]) {
@@ -3410,7 +3410,7 @@ static void test_rc_coeff_coding(void)
             tc_rc_ctx_t enc_ctx[TC_NUM_CONTEXTS_RC];
             tc_rc_ctx_init(enc_ctx, TC_NUM_CONTEXTS_RC);
 
-            tc_rc_enc_coeffs(&rc_enc, enc_ctx, coeffs, n, dct_size);
+            tc_rc_enc_coeffs(&rc_enc, enc_ctx, coeffs, n, dct_size, 0); /* TRIAL85 luma */
             tc_rc_enc_flush(&rc_enc);
 
             size_t sz = tc_bs_writer_bytes(&bs_w);
@@ -3423,7 +3423,7 @@ static void test_rc_coeff_coding(void)
             tc_rc_ctx_init(dec_ctx, TC_NUM_CONTEXTS_RC);
 
             tc_coeff_t decoded[64] = {0};
-            tc_rc_dec_coeffs(&rc_dec, dec_ctx, decoded, n, dct_size);
+            tc_rc_dec_coeffs(&rc_dec, dec_ctx, decoded, n, dct_size, 0); /* TRIAL85 luma */
 
             for (int i = 0; i < n; i++) {
                 if (decoded[i] != coeffs[i]) {

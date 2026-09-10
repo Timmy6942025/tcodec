@@ -368,10 +368,10 @@ uint32_t tc_rc_dec_ue(tc_rc_dec_t *rc, tc_rc_ctx_t *ctx, int base_ctx);
 /* Context-modeled coefficient coding (replaces EG coeff coding) */
 void tc_rc_enc_coeffs(tc_rc_enc_t *rc, tc_rc_ctx_t *ctx,
                        const tc_coeff_t *coeffs, int n,
-                       tc_block_size_t dct_size);
+                       tc_block_size_t dct_size, int is_chroma); /* TRIAL85 */
 void tc_rc_dec_coeffs(tc_rc_dec_t *rc, tc_rc_ctx_t *ctx,
                        tc_coeff_t *coeffs, int n,
-                       tc_block_size_t dct_size);
+                       tc_block_size_t dct_size, int is_chroma); /* TRIAL85 */
 
 /* Context indices (see range_coder.c for full enum) */
 #define RC_CTX_BLOCK_MODE  0
@@ -400,7 +400,9 @@ void tc_rc_dec_coeffs(tc_rc_dec_t *rc, tc_rc_ctx_t *ctx,
 #define RC_CTX_SAO_TYPE    76   /* v2 SAO off/band flag (TRIAL72: was 65, collided QT_SPLIT depth3) */
 #define RC_CTX_SAO_BAND    77   /* v2 SAO band position (5 bits: 77..81; was 66) */
 #define RC_CTX_SAO_OFFSET  82   /* v2 SAO signed offset (4 bits: 82..85; was 71) */
-#define RC_CTX_MAX         86
+/* TRIAL85 luma/chroma split: chroma bank duplicates luma coeff bank (21..53) at 86..118 (33 ctx). Luma keeps 21..53, chroma uses 86.. */
+#define RC_CTX_CHROMA_BASE 86
+#define RC_CTX_MAX         119
 
 /* Frequency band classification for a zigzag position.
  * Reserved for future JND-weighted quantization per coefficient.
