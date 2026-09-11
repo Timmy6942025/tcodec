@@ -67,3 +67,36 @@ sweep data), next: grain-without-vmaf spike or D9 kernels.
 4. MVP divergence (550/cu²) caps skip firing rate even when priced
    right — if skip fires <2%, verdict is "mechanism sound, MVP-bound"
    (still revert; MVP-temporal becomes the named next project).
+
+## 6. Update 2026-09-11 (trials 78-84, hill-41/44/45)
+
+- MVP divergence fixed (hill-41 disp-storage: frozen −96→0, probe −10.5%, park −8.2%).
+  Trial74 absolute-median desync explained (used absolute cell coords not sub-offsets;
+  disp-storage is clean fix, 4 storage sites, predictors untouched). Good.
+- Skip-9 perfect-match (hill-42 infra: FRESH_SKIP bit15 + fresh paths + rejection, P-only,
+  distortion==0 gate): firing 0% everywhere real (probe/park/screen identical; safe, neutral).
+  SKIPDBG forensics (hill-43): screen 10294 leaves 0% perfect (even MSE≤1 generous 0%);
+  frozen 148 leaves 100% perfect. Perfect too strict (screen scroll/noise → all MSE>1);
+  near-exact needs MSE>1 risking poisoning (trial19) for small prize (only frozen/sita wins,
+  sita already −48%). Skip parked 9th time. Infra kept for future (bit+fresh+rejection).
+- Stability infra kept (hill-44: prev-orig + per-CTU SAD + STABDBG; screen/frozen 100% static).
+- ρ-merge (trial83, P-only, encoder-only, S0=50k): probe +2.5%/flat, screen +11.3%/+0.10dB
+  poor rate → REVERT (fast-fail, no park). Confirms trial44 (ρ-adaptive −10%/−2.1dB,
+  uniform −1.3%/−0.9dB): ρ-weighting merge loses even with fixed MVP + stability.
+  Poisoning needs lookahead/propagation, not static penalty. Infra (44) kept.
+- Temporal extra ME center kept (hill-45: collocated prev disp, P base explicit only,
+  encoder-only zero syntax; prev/cur MV grids + CTU copy + swap + TEMPDBG meter infra).
+  Probe −8.1%/+0.09dB, park −1.9%/flat, screen identical (static temporal==spatial,
+  skip-if-identical, safe). TEMPDBG: park 37% temporal wins over spatial where neighbors
+  disagree. +9% encode time earns it. Unlocks temporal MVP signaled choice next?
+  No — signaled temporal predictor (MVD relative to temporal, 1-bit tax per inter leaf,
+  MVD 2.8% prize) loses like merge-list/MPM taxes (tax +1.6% vs saving 0.13% — net +1.5% loss).
+  Keep unsignaled extra center (no tax, already kept). Park signaled temporal (tax kills).
+- Next mb-tree program (multi-day, Pi-doable deterministic, no fps/VMAF needed):
+  lookahead-lite (future refs value, not just past stability) + per-block ρ (finer than CTU,
+  faces need finer — trial44 vidyo −13%/−1.4dB at S≤20000, neutral at S≤2000) + propagation
+  (don't zero epsilon that future frames need — trial19 lesson priced in? ρ-merge tried,
+  lost). Needs DPB history (prev-MV grids built hill-45, prev-orig built hill-44) + future
+  buffer (B-reorder 8 frames exists, P-only needs delay? Streaming latency vs compression
+  tradeoff — CBR? Complex). Design before code (like entry-points design). Do NOT drive by solo
+  (9 failures say why; needs lookahead/propagation, not static penalty).
