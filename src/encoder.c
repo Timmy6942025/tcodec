@@ -1388,7 +1388,7 @@ static void encode_ctu_v2(tc_encoder_t *enc, int row, int col, int qp,
     if (frame_type == TC_FRAME_INTER && enc->ctu_stab) {
         int ncols = enc->num_ctu_cols;
         int64_t stab = enc->ctu_stab[(size_t)row * ncols + col];
-        if (stab > 20000) e.lambda = (e.lambda * 3) / 2;
+        if (stab > 20000) e.lambda = (e.lambda * 2);
     }
     /* Must match the MULTI_REF tool-flag condition above: when set, the
      * decoder expects a ref_sel bit on every explicit v2 inter leaf. */
