@@ -1,7 +1,7 @@
 # TCodec Specification — Versions 0, 1, and 2
 
 **Status**: Working research prototype, not production-grade.
-**Bitstream Versions**: 0 (legacy), 1 (profiled), 2 (explicit quadtree payload)
+**Bitstream Versions**: 0 (legacy), 1 (profiled), 2 (explicit quadtree payload), 2.1 (scoped NOT implemented, see BITSTREAM §7.7)
 **Last Updated**: v2 quadtree, range-coded syntax, luma SAO Band Offset, and private `tcv1` ISO-BMFF carriage are implemented; stock-player native TCV decoding remains future work.
 
 This document specifies what TCodec **actually implements**. Where the
