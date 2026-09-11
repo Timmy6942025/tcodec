@@ -770,3 +770,45 @@ When a new bitstream version is needed:
 4. Update the applicable frame-header constant
 5. Add v2-specific tests
 6. Update this document
+
+## 7.7 Version 2.1 Batch (scoped NOT implemented, 2026-09-11)
+
+v2.1 batches syntax items needing bitstream additions into ONE version bump
+to avoid repeated compat breaks (see docs/V2_1_BATCH.md + docs/D9_ENTRY_POINTS_DESIGN.md
++ docs/MERGELIST_DESIGN.md + docs/MBTREE_DESIGN.md). All items tool-gated
+(decoder reads iff flag set; rejects unknown flags via TC_TOOLS_IMPLEMENTED,
+hill-42) so old v2 streams keep decoding. Goldens BEFORE captured (current as of
+hill-46 chroma split, manifest committed; v2 hashes current, v0/v1 identical).
+Do NOT bump without re-capturing (goldens regen + full suite + matrix, per
+trial72/78/85 precedent). Trial evidence (solo taxes eat wins; batch must fix
+taxes, not just sum neutrals):
+
+- FRESH_SKIP (bit15, kept hill-42, firing 0% perfect-match, fresh MC chroma paths
+  enc replay/serial/parallel + rejection): header-only goldens move, payload identical.
+  Keep bit15. Enables future near-exact+ρ+mb-tree (perfect too strict 0% real;
+  near-exact needs MSE>1 risking poisoning, trial19).
+- MERGELIST (trial80, net neutral/batched, 10-site impl correct, no desync):
+  P merge {median,left,above}, 1-bit alt +1-bit which iff alt (RC 66/67).
+  Probe −0.74%/+0.03dB win, park −0.13% neutral, screen +0.85% loss (coherent scroll
+  pays +1 median tax, alt never wins). Needs clean bit (borrowed bit7 DERINGING
+  future; batch reallocates with version bump) + tax-free signaling? (median +1 tax
+  hurts coherent). Do NOT drive solo.
+- MPM (trial75, screen wins/nature loses, batched, 7-site impl correct, no desync):
+  left-predicted 1-bit hit (RC 65), mode storage in grids. Probe +1%/+0.04dB
+  (up-slide), park +0.43%/flat, screen −0.61% win (structured edges). Needs clean
+  bit (bit15 taken by FRESH_SKIP) + better predictor (above+left?). Do NOT drive solo.
+- 1-bit ref_idx (trial70, neutral/batched, overcharge beats honest 3rd confirm):
+  refs 2-3 dead (trial61, search capped dpb[1]), save 1b/inter leaf + 1 parse bin.
+  Honest +0.07%/flat, overcharge −0.03%/flat (load-bearing deterrent). No new bit
+  (reduces 2→1 under existing MULTI_REF flag → breaks old 2-bit streams; needs
+  version bump, not tool gate). Batch with version bump.
+- ENTRY_POINTS (design docs/D9_ENTRY_POINTS_DESIGN.md, code deferred to perf-box
+  sprint): per-row payloads + u32 offset table + tool flag, row-independent grids/
+  contexts (reset per-row, breaking MV dependencies, 1-2% compression loss), parallel
+  parse (21% serial share → ~1.2x) + existing wavefront recon. Alone ~1.2-1.5x (not
+  3.5x), program needed (volume + variance + kernels + quiet box; timings noisy here).
+  Needs clean bit/version + goldens BEFORE + fps gates (warmed repeated median).
+
+Version ceremony (per checklist lines 1-6 above + trial72/78/85 precedent):
+goldens BEFORE (have), BITSTREAM §7.6→7.7 + version tables, full suite 54/54,
+matrix BD (bytes/PSNR deterministic; fps noisy, report with caveats), push per-milestone.
