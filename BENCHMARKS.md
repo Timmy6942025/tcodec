@@ -515,6 +515,29 @@ quiet-box scaling validation, volume cuts (fewer NZ via prediction/RDOQ/
 skip — helps parse+IDCT together), wavefront variance work. No
 bitstream or correctness shortcuts were taken for speed.
 
+### Quiet-box results 2026-09-11 (load ~1.2, best-of-8 internal)
+
+With the foreign load stopped, scaling materialized (t1→t4 1.6–1.9×)
+and 12/15 720p clips clear 60fps on entry-point streams:
+
+| Clip | preset/frames | t1 | t4 | ≥60? |
+|---|---|---:|---:|---|
+| csgo/ed/tree/screen/sintel/sita/vidyo | fast q32 30fr | 35–41 | 60–68 | ✅ |
+| old_town/stockholm/tos | med q32 10fr | 35–37 | 61–63 | ✅ |
+| park_joy | med q32 30fr | 31.6 | **60.5** | ✅ |
+| minecraft | med q32 30fr | 33.7 | **63.1** | ✅ |
+| bbb_nature | med q32 30fr | 31.9 | 55.6 | ❌ (8% short) |
+| parkrun | med q32 30fr | 30.1 | 56.9 | ❌ (5% short) |
+| ducks_takeoff | med q32 30fr | 27.4 | 52.6 | ❌ (14% short) |
+| park serial (pre-EP) med q32 30fr | 33.1 | 57.9 | ❌ (4% short; EP should beat it) |
+| sintel/tos 1080p fast q32 10fr | ~15 | ~25 | ❌ (need 30) |
+
+RDOQ-L2 trial (same day): extending keep-vs-zero to |q|==2 correctly
+fires never (killing all L2s: +0.5% size, −2.5dB) — reverted, no trace.
+EP+L2 park30 measured 376,522B @ 27.108dB vs serial 369,458B @ 27.1080dB:
+identical decisions, +1.9% pure entry-point overhead (table + context
+restarts), as designed.
+
 ### August 2026 decoder optimization measurement
 
 Host: aarch64 Cortex-A72, 4 cores, NEON build, QP 32, one decoder thread,
