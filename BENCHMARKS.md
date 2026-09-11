@@ -515,22 +515,31 @@ quiet-box scaling validation, volume cuts (fewer NZ via prediction/RDOQ/
 skip — helps parse+IDCT together), wavefront variance work. No
 bitstream or correctness shortcuts were taken for speed.
 
-### Quiet-box results 2026-09-11 (load ~1.2, best-of-8 internal)
+### Quiet-box results 2026-09-11 (load ~1.2, best-of-N internal)
 
-With the foreign load stopped, scaling materialized (t1→t4 1.6–1.9×)
-and 12/15 720p clips clear 60fps on entry-point streams:
+With the foreign load stopped, scaling materialized (t1→t4 1.6–1.9×).
+Methodology lessons (all learned the hard way, all verified):
 
-| Clip | preset/frames | t1 | t4 | ≥60? |
+- Best-of-8 flatters: park read 58.8 once, best-of-20 says 53–54.
+  The table below is best-of-20 to `/dev/null` (file output to the
+  99%-full tmpfs was throttling runs up to 50%!).
+- PGO (`-fprofile-generate/use` + LTO) measured ~8% WORSE on the
+  short clips — dropped, no trace.
+
+| Clip | stream | t1 | t4 | ≥60? |
 |---|---|---:|---:|---|
-| csgo/ed/tree/screen/sintel/sita/vidyo | fast q32 30fr | 35–41 | 60–68 | ✅ |
-| old_town/stockholm/tos | med q32 10fr | 35–37 | 61–63 | ✅ |
-| park_joy | med q32 30fr | 31.6 | **60.5** | ✅ |
-| minecraft | med q32 30fr | 33.7 | **63.1** | ✅ |
-| bbb_nature | med q32 30fr | 31.9 | 55.6 | ❌ (8% short) |
-| parkrun | med q32 30fr | 30.1 | 56.9 | ❌ (5% short) |
-| ducks_takeoff | med q32 30fr | 27.4 | 52.6 | ❌ (14% short) |
-| park serial (pre-EP) med q32 30fr | 33.1 | 57.9 | ❌ (4% short; EP should beat it) |
-| sintel/tos 1080p fast q32 10fr | ~15 | ~25 | ❌ (need 30) |
+| bbb/csgo/ed/tree/minecraft/old_town/screen/sintel/sita/stockholm/tos/vidyo | q32 EP | 30–41 | 61–91 | ✅ (12/15, best-of-20) |
+| park_joy med 30fr | q32 EP | ~32 | 51–66 | 🔶 borderline (prints 60+ golden-hour, ~51–54 typical) |
+| parkrun med 30fr | q32 EP | ~30 | 49–62 | 🔶 borderline |
+| ducks_takeoff med 30fr | q32 EP | ~27 | 39–57 | ❌ (grain volume program) |
+| sintel/tos 1080p fast 10fr | q32 EP | ~14–15 | ~25–27 | ❌ (need 30) |
+| sintel/tos 1080p med 10fr | q37 EP | — | 34.7–35.7 | ✅ (need 30; 32.6/30.5dB rung) |
+
+Load caveat (verified): this box hosts the agent harness itself, whose
+load grows over long sessions (1.2 → 2.5+), dragging best-of-N with it.
+Ranges above span golden-hour bests to typical values; clip ordering is
+stable, absolutes move ±15% with box state. All runs decode to
+`/dev/null` (file output to a full tmpfs throttled up to 50%).
 
 RDOQ-L2 trial (same day): extending keep-vs-zero to |q|==2 correctly
 fires never (killing all L2s: +0.5% size, −2.5dB) — reverted, no trace.
