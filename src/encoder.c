@@ -2738,11 +2738,17 @@ static tc_error_t encode_poc_frame(tc_encoder_t *enc,
         if (enc->cfg.use_v2 && enc->cfg.preset >= TC_PRESET_MEDIUM) {
             tools |= TC_TOOL_FRESH_SKIP;
         }
+        /* v2 per-row entry points (D9): every v2 frame carries a
+         * byte-offset table so rows parse independently (parallel
+         * parse + independent per-row range streams). MV grids are
+         * already per-CTU on both sides, so no prediction change. */
+        if (enc->cfg.use_v2) {
+            tools |= TC_TOOL_ENTRY_POINTS;
+        }
         /* Future tools (not yet implemented):
-         * TC_TOOL_DERINGING      — directional deringing (Phase 7)
-         * TC_TOOL_SAO            — sample adaptive offset (Phase 7)
          * TC_TOOL_GRAIN_SYNTHESIS — film grain synthesis (Phase 7)
-         * TC_TOOL_BIPRED         — bi-prediction (Phase 6)
+         * (bit-7 deringing slot taken by ENTRY_POINTS; deringing
+         * was never implemented and stays future work.)
          */
 
         hdr.tool_flags = tools;
@@ -2841,6 +2847,73 @@ static tc_error_t encode_poc_frame(tc_encoder_t *enc,
     rctx.frame_type = frame_type;
     rctx.poc = poc;
 
+    /* v2 per-row entry points (D9): rows carry independent byte streams
+     * with independent entropy state, so the decoder parses rows in
+     * parallel. Rows still encode serially top-to-bottom (above-row
+     * recon stays available for intra/RDO); MV grids already reset per
+     * CTU on both sides, so only the entropy streams are per-row. */
+    int v2_ep = (enc->cfg.use_v2 &&
+                 (hdr.tool_flags & TC_TOOL_ENTRY_POINTS)) ? 1 : 0;
+    if (v2_ep) {
+        int nrows = enc->num_ctu_rows;
+        /* Entry table: u16 row count + one u32 byte offset per row
+         * (u32: dense rows exceed 64KB; park-q27 rows reach ~75KB). */
+        tc_bs_writer_write_bits(&enc->bs, (uint32_t)nrows, 16);
+        size_t ep_table = enc->bs.byte_pos;
+        for (int i = 0; i < nrows; i++)
+            tc_bs_writer_write_bits(&enc->bs, 0, 32); /* placeholder */
+        tc_bs_writer_byte_align(&enc->bs);
+        size_t ep_payload = enc->bs.byte_pos;
+        size_t per_row = enc->out_buf_size / (size_t)tc_max(nrows, 1) + 1024;
+        uint32_t row_off[64];
+        int ep_fail = 0;
+        if (nrows > 64) ep_fail = 1; /* 4096/64 bound; loud, not corrupt */
+        for (int row = 0; row < nrows && !ep_fail; row++) {
+            uint8_t *rbuf = (uint8_t *)calloc(per_row, 1);
+            if (!rbuf) { ep_fail = 1; break; }
+            tc_bs_writer_t rbs;
+            tc_bs_writer_init(&rbs, rbuf, per_row);
+            tc_tans_enc_t rtans;
+            tc_tans_enc_init(&rtans, &rbs);
+            tc_rc_enc_t rrc;
+            tc_rc_ctx_t rctxbuf[TC_NUM_CONTEXTS_RC];
+            tc_rc_enc_t *rrc_ptr = NULL;
+            tc_rc_ctx_t *rctx_ptr = NULL;
+            if (enc->use_entropy_coded) {
+                tc_rc_ctx_init(rctxbuf, TC_NUM_CONTEXTS_RC);
+                tc_rc_enc_init(&rrc, &rbs);
+                rrc_ptr = &rrc;
+                rctx_ptr = rctxbuf;
+            }
+            for (int col = 0; col < enc->num_ctu_cols; col++) {
+                int ctu_idx = row * enc->num_ctu_cols + col;
+                tc_ctu_info_t *ctu = &enc->ctu_data[ctu_idx];
+                ctu->row = row;
+                ctu->col = col;
+                encode_ctu_v2(enc, row, col, qp, frame_type, poc,
+                              &rbs, &rtans, rrc_ptr, rctx_ptr);
+            }
+            tc_tans_enc_flush(&rtans);
+            if (rrc_ptr) tc_rc_enc_flush(rrc_ptr);
+            tc_bs_writer_byte_align(&rbs);
+            size_t rbytes = tc_bs_writer_bytes(&rbs);
+            if (rbytes > per_row) { free(rbuf); ep_fail = 1; break; }
+            row_off[row] = (uint32_t)(enc->bs.byte_pos - ep_payload);
+            if (rbytes > 0)
+                memcpy(enc->out_buf + enc->bs.byte_pos, rbuf, rbytes);
+            enc->bs.byte_pos += rbytes;
+            free(rbuf);
+        }
+        if (ep_fail) return TC_ERR_MEMORY;
+        for (int i = 0; i < nrows; i++) {
+            size_t p = ep_table + (size_t)i * 4;
+            enc->out_buf[p]     = (uint8_t)(row_off[i] >> 24);
+            enc->out_buf[p + 1] = (uint8_t)(row_off[i] >> 16);
+            enc->out_buf[p + 2] = (uint8_t)(row_off[i] >> 8);
+            enc->out_buf[p + 3] = (uint8_t)(row_off[i]);
+        }
+    } else {
+
     /* Set up range coder state if entropy coded is active.
      * Contexts are initialized fresh per frame (not persisted). */
     tc_rc_enc_t  rc_enc_local;
@@ -2925,11 +2998,11 @@ static tc_error_t encode_poc_frame(tc_encoder_t *enc,
         if (rc_ptr) tc_rc_enc_flush(rc_ptr);
         tc_bs_writer_byte_align(&enc->bs);
     }
+    } /* end else (non entry-points paths) */
 
-    /* WPP+RC not yet supported: flush per-row range coders before merge.
-     * When WPP+RC is implemented (Phase 9), per-row flush happens per-row
-     * and contexts are propagated between rows. */
-    (void)rc_ptr;
+    /* Per-row range state (v2 entry points) is flushed per row inside
+     * its branch above; the shared coder only exists on the paths
+     * inside the else block. */
 
     /* Append CRC-16 if the header carries TC_FLAG_CRC (v1/v2) */
     if (hdr.version != TC_VERSION_V0 && hdr.has_crc) {

@@ -664,8 +664,6 @@ typedef struct tc_encoder {
      * then rows are merged into the main bitstream in order. */
     tc_bs_writer_t   *row_bs;
     tc_tans_enc_t    *row_tans;
-    tc_rc_enc_t      *row_rc;         /* Per-row range coder (Phase 3) */
-    tc_rc_ctx_t      *row_rc_ctx;     /* Flat: num_rows * TC_NUM_CONTEXTS_RC */
     uint8_t         **row_buf;         /* Per-row output buffer pointers */
     size_t           *row_buf_size;    /* Per-row output buffer sizes */
     int               num_threads;     /* Number of WPP worker threads */
@@ -724,6 +722,12 @@ typedef struct tc_decoder {
     int32_t           num_ctu_cols;
     int32_t           num_ctu_rows;
     int32_t           prev_qp;
+    /* Persistent v2 parse/recon scratch (avoids 8-15MB calloc+free per
+     * frame at 720p: 240 CTUs × ~62KB). Reused across frames when the
+     * CTU count fits; per-CTU coeff_count/sao reset before each parse.
+     * void* here to avoid exposing the decoder-internal v2_cmd type. */
+    void             *v2_cmds_buf;
+    size_t            v2_cmds_cap;
     /* Thread pool for WPP (only when threading enabled) */
 #if !defined(TCODEC_NO_THREADS)
     tc_threadpool_t  *pool;

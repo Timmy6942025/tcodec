@@ -612,9 +612,10 @@ coeff_block(n) {
 
 Version 2 keeps the 14-byte v1 header layout but changes only the payload
 syntax. It is selected explicitly with `tc_config_t.use_v2 = 1` or the CLI
-`--v2`; v1 remains the default. A v2 payload is sequential and must not set
-`TC_FLAG_WPP`. Range-coded v2 resets its range state and all contexts at each
-frame, then codes CTUs in raster order (left-to-right, top-to-bottom).
+`--v2`; v1 remains the default. A v2 payload is row-segmented (see entry
+points below) and must not set `TC_FLAG_WPP`. Range-coded v2 resets its
+range state and all contexts at each frame and at each CTU row, then codes
+CTUs in raster order (left-to-right, top-to-bottom).
 
 Each in-frame 64×64 CTU is a quadtree of 64, 32, 16, or 8 pixel CUs. A node
 at depth 0..2 starts with one split flag. Split children are emitted in
@@ -667,10 +668,38 @@ is decoded. When `TC_TOOL_SAO` is set, each CTU then carries `sao_present`
 Code 15 is reserved and invalid. The selected luma Band Offset is applied
 after deblocking and is clipped to [0,255]; chroma is unchanged. The encoder
 sets `TC_TOOL_SAO` for every v2 frame, including frames whose per-CTU flag is
-zero. v0/v1 never consume this syntax. The frame payload is byte-aligned
-after entropy flush, followed by CRC-16 when enabled. A v2 decoder rejects
+zero. v0/v1 never consume this syntax. Each row payload is byte-aligned
+after its own entropy flush, followed by CRC-16 when enabled. A v2 decoder rejects
 WPP-marked packets, unsupported versions, underflow, and invalid v2 syntax
 rather than routing it through the legacy block decoder.
+
+### 7.6.1 v2 Per-Row Entry Points (`TC_TOOL_ENTRY_POINTS`, bit 7)
+
+Every v2 encoder sets `TC_TOOL_ENTRY_POINTS`, and every v2 frame carries a
+row table between the frame header and the row payloads:
+
+```
+u16 num_rows                     (= ceil(height/64), 1..64)
+u32 row_offset[num_rows]         (bytes from payload base; row 0 is 0,
+                                  non-decreasing, in-bounds)
+<row 0 payload, byte-aligned> ... <row N-1 payload, byte-aligned>
+```
+
+Each row payload is an independent byte stream: its own range-coder
+initial state (4 eager bytes) and freshly zeroed contexts, coding that
+row's CTUs left-to-right with the standard v2 quadtree syntax. MV
+predictor grids already reset per CTU on both sides (encoder decision,
+encoder replay, decoder parse), so row independence changes no
+prediction — only entropy adaptation restarts per row (~1–2% size cost
+plus ~110 bytes/frame of table and per-row flush at 720p). Intra pixel
+references still come from the above-row reconstruction (rows encode
+top-to-bottom; the decoder reconstructs on the dependency-safe
+wavefront), so pixels are unaffected.
+
+Decoders read `TC_TOOLS_IMPLEMENTED` to reject unknown tool bits, so
+pre-entry-point decoders reject entry-point streams cleanly, and current
+decoders still accept bit-clear legacy v2 streams through the serial
+parse path. Streams with the bit set on a non-v2 version are rejected.
 
 ## 8. Bitstream Compliance
 
@@ -802,12 +831,16 @@ taxes, not just sum neutrals):
   Honest +0.07%/flat, overcharge −0.03%/flat (load-bearing deterrent). No new bit
   (reduces 2→1 under existing MULTI_REF flag → breaks old 2-bit streams; needs
   version bump, not tool gate). Batch with version bump.
-- ENTRY_POINTS (design docs/D9_ENTRY_POINTS_DESIGN.md, code deferred to perf-box
-  sprint): per-row payloads + u32 offset table + tool flag, row-independent grids/
-  contexts (reset per-row, breaking MV dependencies, 1-2% compression loss), parallel
-  parse (21% serial share → ~1.2x) + existing wavefront recon. Alone ~1.2-1.5x (not
-  3.5x), program needed (volume + variance + kernels + quiet box; timings noisy here).
-  Needs clean bit/version + goldens BEFORE + fps gates (warmed repeated median).
+- ENTRY_POINTS (IMPLEMENTED 2026-09-11, D9 decode sprint): per-row payloads +
+  u16 count + u32 offset table + tool bit 7 (bit-7 deringing slot repurposed;
+  deringing never implemented, no streams exist; see §7.6.1). MV grids
+  already reset per CTU on all three sites (encoder RDO, encoder replay,
+  decoder parse), so rows were prediction-independent with no grid change —
+  only range state + contexts reset per row (~1–2% size + ~110B/frame
+  table/flush @720p). Parallel row parse over the thread pool + existing
+  cost-aware wavefront recon (parse/recon pipelined for legacy streams).
+  Legacy bit-clear v2 streams keep decoding via the serial path
+  (verified bit-exact). Goldens regen'd for the new v2 bytes.
 
 Version ceremony (per checklist lines 1-6 above + trial72/78/85 precedent):
 goldens BEFORE (have), BITSTREAM §7.6→7.7 + version tables, full suite 54/54,

@@ -644,6 +644,20 @@ void tc_inter_predict_decoder(const tc_pixel_t *ref, int ref_stride,
     static long r_fx=0, r_fy=0, r_rm=0, r_bm=0, r_sz=0;
     static int disp_on = -1;
     if (disp_on < 0) disp_on = (getenv("TC_DISPATCH") != 0);
+    /* Integer-pel fast path before SIMD dispatch: a memcpy is cheaper
+     * than NEON 6-tap setup for exact-pel MVs. Bit-exact with the scalar
+     * integer path in tc_inter_predict (same row copies). */
+    if ((mv.x & 3) == 0 && (mv.y & 3) == 0) {
+        int fx0 = mv.x >> 2, fy0 = mv.y >> 2;
+        if (fx0 >= 0 && fy0 >= 0 &&
+            fx0 + blk_size <= ref_w && fy0 + blk_size <= ref_h) {
+            for (int y = 0; y < blk_size; y++)
+                memcpy(dst + y * dst_stride,
+                       ref + (fy0 + y) * ref_stride + fx0,
+                       (size_t)blk_size);
+            return;
+        }
+    }
 #if TCODEC_NEON
     {
     const int fx = mv.x >> 2, fy = mv.y >> 2;

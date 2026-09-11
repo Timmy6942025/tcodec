@@ -484,6 +484,36 @@ inverse-transform fast paths in the decoder. Further gains require either
 algorithmic changes to the v2 bitstream (e.g., WPP entry points for multi-thread
 decode) or a faster transform pipeline.
 
+### September 2026 D9 sprint (this box, contended — foreign load avg ~10)
+
+What landed (all bit-exact, 53/53 + fuzz green; see BITSTREAM §7.6.1):
+`-O3 -mcpu=cortex-a72 -DNDEBUG -flto` actually linked (was `-O2` generic,
+LTO flag dead); persistent v2 command store (no 8–15MB calloc/free per
+frame); per-frame quant tables + flat dequant tables; coeff tail-only
+memset; integer-MV memcpy before NEON dispatch; deblock threshold hoist
++ horiz double-eval fix; range byte-refill fast path + divide-free
+context bands; serial-parse→recon pipeline overlap; cost-aware
+(cost = residual volume) wavefront scheduling; **v2 per-row entry
+points** (u16 count + u32 offsets, independent per-row range streams,
+parallel row parse; MV grids were already per-CTU on all three sites).
+
+Best-of-N internal fps (reps=6, `tools/d9_bench.py`; wall is lower and
+noisier; absolute numbers depressed by the saturated box — scaling proof
+needs quiet hardware):
+
+| Clip (720p unless noted) | t1 | t4 | note |
+|---|---:|---:|---|
+| park q32 medium, serial (pre-EP) | ~20 | ~24–31 | baseline for sprint |
+| park q32 medium, entry-points | ~18 | ~24 | T1==T4 bit-exact; parallel parse engaged |
+| park q37 (15-clip matrix) | — | 30–48 | screen 46, sita 45, ducks 30 (hardest) |
+| sintel 1080p fast q32 (5fr) | ~12 | ~15 | need 30 (2× away) |
+
+Standing: ~1.5–1.9× over the August serial code on the same box, but
+60fps@720p nature and 30fps@1080p are NOT met here. Remaining program:
+quiet-box scaling validation, volume cuts (fewer NZ via prediction/RDOQ/
+skip — helps parse+IDCT together), wavefront variance work. No
+bitstream or correctness shortcuts were taken for speed.
+
 ### August 2026 decoder optimization measurement
 
 Host: aarch64 Cortex-A72, 4 cores, NEON build, QP 32, one decoder thread,

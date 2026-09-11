@@ -73,11 +73,14 @@ gaming +32–49%); byte-breakdown says
 
 ## Decoder performance (D9 — NOT MET, program in docs/D9_PLAN.md)
 
-Park 720p30 qp32: t1/t2/t3/t4 = 16.9/21.3/17.0/18.0 fps (warmed).
-Component split: motion 25%, transform 24%, coeff parse 16%, deblock
-17%, chroma 12%, headers 5%. Thread scaling ≈1.2× (wavefront
-starvation: 40–60% worker idle, stragglers). 60fps needs ~3.5×:
-multi-win kernel + scaling program, scheduled post-compression.
+Park 720p30 qp32: t1/t4 ≈ 18/24 fps best-internal on the contended box
+(was 16.9/18.0; q37 matrix 30–48fps over 15 clips).
+Component split: motion 23%, transform 21%, coeff parse 18%, deblock
+16%, chroma 12%, headers 10%. Thread scaling is contention-masked here
+(foreign load avg ~10); the code now parallelizes parse (entry points)
+and schedules the wavefront by cost. 60fps needs ~2.5× more:
+quiet-box scaling proof + volume cuts (MVP fix helps volume) +
+variance work. Program in docs/D9_PLAN.md.
 
 ## D0–D12 status
 
@@ -92,7 +95,7 @@ multi-win kernel + scaling program, scheduled post-compression.
 | D6 | Pass | Deblock (rewritten, HEVC-direction) + luma BO SAO ×6 (EO/chroma-SAO deferred) |
 | D7 | Pass | RDO −66.4% vs SAD-only; RDOQ-lite on top |
 | D8 | Pass | 11-clip × 4-codec BD matrix above; corpus 11 masters + manifest |
-| D9 | **Not met** | 17–21fps@720p; scaling 1.2×; see D9 plan |
+| D9 | **Not met** | 18–24fps@720p nature (30–48fps q37 matrix); 15fps@1080p; see D9 plan |
 | D10 | Pass | TCMX/TCMF, tcv1 MP4, H.264 bridge (scripts green) |
 | D11 | Pass | SPEC/BITSTREAM truth-passed (incl. merge+bi codepoint); BENCHMARKS current |
 | D12 | Pass | Clean tree on origin/main; this report; goldens regen'd |

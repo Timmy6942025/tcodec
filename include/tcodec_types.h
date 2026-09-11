@@ -265,7 +265,12 @@ typedef struct tc_frame_header {
 #define TC_TOOL_MULTI_REF         (1u << 4)  /* Multiple reference frames */
 #define TC_TOOL_SIX_TAP_INTERP    (1u << 5)  /* 6-tap luma interpolation filter */
 #define TC_TOOL_ENTROPY_CODED     (1u << 6)  /* Context-modeled entropy */
-#define TC_TOOL_DERINGING         (1u << 7)  /* Directional deringing (future) */
+#define TC_TOOL_ENTRY_POINTS      (1u << 7)  /* v2 per-CTU-row entry points
+                                              * (parallel parse; D9). Takes the
+                                              * bit-7 slot: directional
+                                              * deringing was never
+                                              * implemented (no streams exist)
+                                              * and remains future work. */
 #define TC_TOOL_SAO               (1u << 8)  /* v2 luma SAO Band Offset */
 #define TC_TOOL_GRAIN_SYNTHESIS   (1u << 9)  /* Film grain synthesis (future) */
 #define TC_TOOL_BIPRED            (1u << 10) /* B-frames: bi-directional prediction (D4) */
@@ -280,7 +285,8 @@ typedef struct tc_frame_header {
  * sets future/unimplemented bits). TRIAL78 adds FRESH_SKIP + rejection. */
 #define TC_TOOLS_IMPLEMENTED (TC_TOOL_SKIP_MERGE | TC_TOOL_CFL_CHROMA | \
     TC_TOOL_JND_WEIGHTING | TC_TOOL_MEDIAN_MV_PRED | TC_TOOL_MULTI_REF | \
-    TC_TOOL_SIX_TAP_INTERP | TC_TOOL_ENTROPY_CODED | TC_TOOL_SAO | \
+    TC_TOOL_SIX_TAP_INTERP | TC_TOOL_ENTROPY_CODED | TC_TOOL_ENTRY_POINTS | \
+    TC_TOOL_SAO | \
     TC_TOOL_BIPRED | TC_TOOL_CONTEXT_RESET | TC_TOOL_FRESH_SKIP)
 
 /* Default tool_flags per profile */

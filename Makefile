@@ -18,7 +18,7 @@
 
 CC      ?= gcc
 AR      ?= ar
-CFLAGS  ?= -O2
+CFLAGS  ?= -O3
 LDFLAGS ?=
 
 # ── Architecture detection ──────────────────────────────────────
@@ -26,8 +26,9 @@ LDFLAGS ?=
 UNAME_M := $(shell uname -m)
 
 ifeq ($(UNAME_M),aarch64)
-    # ARM64 — NEON always available
-    ARCH_CFLAGS  = -march=armv8-a -DTCODEC_NEON=1
+    # ARM64 — NEON always available; tune for Cortex-A72 (Pi4 target).
+    # -mcpu implies the right -march/-mtune + crypto/crc extensions.
+    ARCH_CFLAGS  = -mcpu=cortex-a72 -DTCODEC_NEON=1
     ARCH_LDFLAGS = -lpthread
     NEON_SRC     = $(wildcard neon/*.c)
 else ifeq ($(UNAME_M),arm64)
@@ -85,9 +86,10 @@ TEST_BIN   = $(BUILD_DIR)/test_tcodec
 WARN_FLAGS = -Wall -Wextra -Wno-unused-parameter -Wno-sign-compare
 
 COMMON_CFLAGS = $(CFLAGS) $(ARCH_CFLAGS) $(WARN_FLAGS) \
-                -I$(INC_DIR) -std=c11 -D_GNU_SOURCE
+                -I$(INC_DIR) -std=c11 -D_GNU_SOURCE -DNDEBUG
 
-RELEASE_CFLAGS = $(COMMON_CFLAGS) -DNDEBUG -flto
+RELEASE_CFLAGS = $(COMMON_CFLAGS) -flto -fno-semantic-interposition
+OPT_LDFLAGS = -flto
 SAN_FLAGS     ?= -fsanitize=address,undefined -fno-sanitize-recover=undefined \
                  -fno-omit-frame-pointer
 DEBUG_CFLAGS   = $(COMMON_CFLAGS) -g -DTCODEC_DEBUG $(SAN_FLAGS)
@@ -133,23 +135,23 @@ $(LIB_STATIC): $(ALL_OBJ) | $(BUILD_DIR)
 shared: $(LIB_SHARED)
 
 $(LIB_SHARED): $(ALL_OBJ) | $(BUILD_DIR)
-	$(CC) -shared -o $@ $^ $(ARCH_LDFLAGS) $(LDFLAGS)
+	$(CC) $(OPT_LDFLAGS) -shared -o $@ $^ $(ARCH_LDFLAGS) $(LDFLAGS)
 
 # ── CLI tools ────────────────────────────────────────────────────
 
 $(ENC_BIN): $(TOOL_DIR)/tcenc.c $(LIB_STATIC) | $(BUILD_DIR)
-	$(CC) $(COMMON_CFLAGS) -o $@ $< $(LIB_STATIC) $(ARCH_LDFLAGS) $(LDFLAGS) -lm
+	$(CC) $(COMMON_CFLAGS) $(OPT_LDFLAGS) -o $@ $< $(LIB_STATIC) $(ARCH_LDFLAGS) $(LDFLAGS) -lm
 
 $(DEC_BIN): $(TOOL_DIR)/tcdec.c $(LIB_STATIC) | $(BUILD_DIR)
-	$(CC) $(COMMON_CFLAGS) -o $@ $< $(LIB_STATIC) $(ARCH_LDFLAGS) $(LDFLAGS) -lm
+	$(CC) $(COMMON_CFLAGS) $(OPT_LDFLAGS) -o $@ $< $(LIB_STATIC) $(ARCH_LDFLAGS) $(LDFLAGS) -lm
 
 $(MUX_BIN): $(TOOL_DIR)/tcmux.c | $(BUILD_DIR)
-	$(CC) $(COMMON_CFLAGS) -o $@ $< $(ARCH_LDFLAGS) $(LDFLAGS)
+	$(CC) $(COMMON_CFLAGS) $(OPT_LDFLAGS) -o $@ $< $(ARCH_LDFLAGS) $(LDFLAGS)
 
 # ── Test binary ──────────────────────────────────────────────────
 
 $(TEST_BIN): $(TEST_SRC) $(LIB_STATIC) $(wildcard $(INC_DIR)/*.h) | $(BUILD_DIR)
-	$(CC) $(COMMON_CFLAGS) -o $@ $< $(LIB_STATIC) $(ARCH_LDFLAGS) $(LDFLAGS) -lm
+	$(CC) $(COMMON_CFLAGS) $(OPT_LDFLAGS) -o $@ $< $(LIB_STATIC) $(ARCH_LDFLAGS) $(LDFLAGS) -lm
 
 # The default regression is intentionally fast enough for constrained ARM hosts.
 # It retains every unit test except the separately gated 300-frame 1080p soak.

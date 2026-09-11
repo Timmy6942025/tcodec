@@ -256,7 +256,9 @@ void tc_rc_enc_coeffs(tc_rc_enc_t *rc, tc_rc_ctx_t *ctx,
     for (int i = last_nz; i >= 0; i--) {
         int c = coeffs[i];
         int is_dc = (i == 0);
-        int cidx_sig = is_dc ? RC_CTX_SIG_DC+coff : RC_CTX_SIG+coff + (i * 8 / n);
+        /* i*8/n with n∈{16,64}: exact shifts, no udiv in hot loop. */
+        int band = (n == 64) ? (i >> 3) : (n == 16) ? (i >> 1) : (i * 8 / n);
+        int cidx_sig = is_dc ? RC_CTX_SIG_DC+coff : RC_CTX_SIG+coff + band;
         if (cidx_sig >= RC_CTX_MAX) cidx_sig = RC_CTX_MAX - 1;
 
         if (c == 0) {
@@ -293,6 +295,23 @@ void tc_rc_enc_coeffs(tc_rc_enc_t *rc, tc_rc_ctx_t *ctx,
  *  Decoder (32-bit sliding window — reads bytes from stream)
  * ══════════════════════════════════════════════════════════════ */
 
+/* Fast byte refill for the range decoder. The range stream is written
+ * byte-aligned, so the reader is byte-aligned on this path: a direct
+ * buffer load replaces the generic bit-loop (branches + shifts + mask).
+ * EOF semantics match the old path (no error flag here; truncated
+ * streams fail deterministically downstream). */
+static TCODEC_FORCEINLINE uint32_t rc_dec_refill_byte(tc_bs_reader_t *bs)
+{
+    if (bs->bit_pos == 0) {
+        if (bs->byte_pos < bs->size)
+            return bs->buf[bs->byte_pos++];
+        return 0;
+    }
+    if (bs->byte_pos >= bs->size)
+        return 0;
+    return tc_bs_reader_read_bits(bs, 8);
+}
+
 void tc_rc_dec_init(tc_rc_dec_t *rc, tc_bs_reader_t *bs)
 {
     rc->bs    = bs;
@@ -306,7 +325,7 @@ void tc_rc_dec_init(tc_rc_dec_t *rc, tc_bs_reader_t *bs)
      * of the first few bits (or from flush at end of stream). */
     for (int i = 0; i < 4; i++) {
         if (!tc_bs_reader_eof(rc->bs))
-            rc->low = (rc->low << 8) | tc_bs_reader_read_bits(rc->bs, 8);
+            rc->low = (rc->low << 8) | rc_dec_refill_byte(rc->bs);
         else
             rc->low = rc->low << 8;
     }
@@ -318,7 +337,7 @@ static void rc_dec_normalize(tc_rc_dec_t *rc)
         rc->low   = (rc->low << 8) & 0xFFFFFFFFu;
         rc->range = (rc->range == 0) ? 0xFF : (rc->range << 8);
         if (!tc_bs_reader_eof(rc->bs))
-            rc->low |= tc_bs_reader_read_bits(rc->bs, 8);
+            rc->low |= rc_dec_refill_byte(rc->bs);
     }
 }
 
@@ -390,14 +409,16 @@ void tc_rc_dec_coeffs(tc_rc_dec_t *rc, tc_rc_ctx_t *ctx,
 {
     const int coff = is_chroma ? (RC_CTX_CHROMA_BASE - RC_CTX_SIG) : 0; /* 65 */
     (void)dct_size;
-    memset(coeffs, 0, (size_t)n * sizeof(tc_coeff_t));
 
     /* Keep the context base local in this hot routine.  More importantly,
      * use the force-inlined core below instead of an out-of-line public
      * call for every significance/level/sign symbol; the arithmetic state
      * machine and context mutation remain exactly unchanged. */
     tc_rc_ctx_t *cbase = ctx;
-    if (rc_dec_bit_core(rc, &cbase[RC_CTX_LAST+coff]) == 0) return;
+    if (rc_dec_bit_core(rc, &cbase[RC_CTX_LAST+coff]) == 0) {
+        memset(coeffs, 0, (size_t)n * sizeof(tc_coeff_t));
+        return;
+    }
 
     int last_nz = 0, found = 0;
     for (int i = 0; i < 4; i++) {
@@ -420,11 +441,18 @@ void tc_rc_dec_coeffs(tc_rc_dec_t *rc, tc_rc_ctx_t *ctx,
         rc->bs->error = 1;
         return;
     }
+    /* The reverse loop below writes [0..last_nz]; zero the untouched
+     * tail explicitly (the old path memsetting the whole block). */
+    if (last_nz + 1 < n)
+        memset(coeffs + last_nz + 1, 0,
+               (size_t)(n - last_nz - 1) * sizeof(tc_coeff_t));
 
     int gt1_count = 0;
     for (int i = last_nz; i >= 0; i--) {
         int is_dc = (i == 0);
-        int cidx_sig = is_dc ? RC_CTX_SIG_DC+coff : RC_CTX_SIG+coff + (i * 8 / n);
+        /* i*8/n with n∈{16,64}: exact shifts, no udiv in hot loop. */
+        int band = (n == 64) ? (i >> 3) : (n == 16) ? (i >> 1) : (i * 8 / n);
+        int cidx_sig = is_dc ? RC_CTX_SIG_DC+coff : RC_CTX_SIG+coff + band;
         if (cidx_sig >= RC_CTX_MAX) cidx_sig = RC_CTX_MAX - 1;
 
         if (!rc_dec_bit_core(rc, &cbase[cidx_sig])) { coeffs[i] = 0; continue; }

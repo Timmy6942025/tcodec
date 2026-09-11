@@ -85,3 +85,15 @@ volume cuts (encoder), (c) variance reduction. Multi-week program.
 - TC_WAVESTAT (wait/work per frame), TC_DISPATCH (neon/scalar split),
   TC_BYTEBREAK (encoder byte shares). All env-gated, zero behavior
   change when unset.
+
+## 6. Sprint results 2026-09-11 (all bit-exact, suite + fuzz green)
+
+Kernels: O3/mcpu/LTO linked; persistent v2 cmds; per-frame + flat
+quant tables; coeff tail memset; integer-MV fast path; deblock hoist;
+range refill/divide fixes. System: parse→recon pipeline, cost-aware
+wavefront, **v2 entry points** (BITSTREAM §7.6.1; grids already per-CTU
+so prediction unchanged). Best-internal (contended box): park q32
+t1/t4 18/24fps; q37 matrix 30–48fps; 1080p ~15fps. Fixed a real
+pipeline-abort deadlock found by bit-flip fuzz. Box saturated
+(foreign avg ~10): scaling numbers need quiet hardware. Still short of
+60/30: next is volume (fewer NZ) + variance + quiet-box proof.

@@ -1520,7 +1520,8 @@ static void v2_parse_ctu(tc_decoder_t *dec, int row, int col, int qp,
 
 static void v2_recon_luma(tc_decoder_t *dec, const v2_cmd_ctu_t *cmd,
                           const v2_cmd_leaf_t *n, int px, int py, int cu,
-                          const int eff[4][64], const tc_pixel_t *pred)
+                          const int eff8[64], const int eff4[16],
+                          const tc_pixel_t *pred)
 {
     int rs = dec->cur->stride_y, fi = 0, ci = n->luma_off;
     int ntu = cu / 8;
@@ -1531,9 +1532,8 @@ static void v2_recon_luma(tc_decoder_t *dec, const v2_cmd_ctu_t *cmd,
             tc_coeff_t iq[64], res[64];
             int nonzero = 0, dc_only = 1;
             for (int i = 0; i < 64; i++) {
-                int b = qt_band8[i];
                 int q = cmd->coeff[ci++];
-                iq[i] = (tc_coeff_t)tc_dequant_coeff(q, eff[b][i]);
+                iq[i] = (tc_coeff_t)tc_dequant_coeff(q, eff8[i]);
                 if (iq[i]) nonzero = 1;
                 if (i && iq[i]) dc_only = 0;
             }
@@ -1554,9 +1554,8 @@ static void v2_recon_luma(tc_decoder_t *dec, const v2_cmd_ctu_t *cmd,
                 tc_coeff_t iq[16], res[16];
                 int nonzero = 0, dc_only = 1;
                 for (int i = 0; i < 16; i++) {
-                    int b = qt_band4[i];
                     int qv = cmd->coeff[ci++];
-                    iq[i] = (tc_coeff_t)tc_dequant_coeff(qv, eff[b][i]);
+                    iq[i] = (tc_coeff_t)tc_dequant_coeff(qv, eff4[i]);
                     if (iq[i]) nonzero = 1;
                     if (i && iq[i]) dc_only = 0;
                 }
@@ -1579,7 +1578,7 @@ static void v2_recon_luma(tc_decoder_t *dec, const v2_cmd_ctu_t *cmd,
 
 static void v2_recon_chroma(tc_decoder_t *dec, const v2_cmd_ctu_t *cmd,
                             const v2_cmd_leaf_t *n, int px, int py, int cu,
-                            const int eff_c[4][64], const tc_pixel_t *pred[2])
+                            const int effc4[16], const tc_pixel_t *pred[2])
 {
     int cs = cu / 2, rs = dec->cur->stride_c, ci = n->chroma_off;
     tc_pixel_t *rec[2] = { dec->cur->cb, dec->cur->cr };
@@ -1590,8 +1589,7 @@ static void v2_recon_chroma(tc_decoder_t *dec, const v2_cmd_ctu_t *cmd,
             int nonzero = 0, dc_only = 1;
             for (int i = 0; i < 16; i++) {
                 int q = cmd->coeff[ci++];
-                int b = qt_band4[i];
-                iq[i] = (tc_coeff_t)tc_dequant_coeff(q, eff_c[b][0]);
+                iq[i] = (tc_coeff_t)tc_dequant_coeff(q, effc4[i]);
                 if (iq[i]) nonzero = 1;
                 if (i && iq[i]) dc_only = 0;
             }
@@ -1617,7 +1615,8 @@ static void v2_recon_chroma(tc_decoder_t *dec, const v2_cmd_ctu_t *cmd,
 
 static void v2_recon_leaf(tc_decoder_t *dec, const v2_cmd_ctu_t *cmd,
                           const v2_cmd_leaf_t *n, int px, int py, int cu,
-                          const int eff[4][64], const int eff_c[4][64],
+                          const int eff8[64], const int eff4[16],
+                          const int effc4[16],
                           tc_frame_type_t frame_type, int poc)
 {
     tc_pixel_t pred[TC_CTU_SIZE * TC_CTU_SIZE];
@@ -1684,7 +1683,7 @@ static void v2_recon_leaf(tc_decoder_t *dec, const v2_cmd_ctu_t *cmd,
         return;
     }
     uint64_t transform_start = dec->profile_enabled ? dec_now_ns() : 0;
-    v2_recon_luma(dec, cmd, n, px, py, cu, eff, pred);
+    v2_recon_luma(dec, cmd, n, px, py, cu, eff8, eff4, pred);
     dec_profile_add(dec, &dec->profile_transform_ns, transform_start);
     uint64_t chroma_start = dec->profile_enabled ? dec_now_ns() : 0;
     if (is_intra) {
@@ -1749,13 +1748,14 @@ static void v2_recon_leaf(tc_decoder_t *dec, const v2_cmd_ctu_t *cmd,
         }
         }
     }
-    v2_recon_chroma(dec, cmd, n, px, py, cu, eff_c, cpred);
+    v2_recon_chroma(dec, cmd, n, px, py, cu, effc4, cpred);
     dec_profile_add(dec, &dec->profile_chroma_ns, chroma_start);
 }
 
 static void v2_recon_split(tc_decoder_t *dec, const v2_cmd_ctu_t *cmd,
                            int depth, int cx, int cy,
-                           const int eff[4][64], const int eff_c[4][64],
+                           const int eff8[64], const int eff4[16],
+                           const int effc4[16],
                            tc_frame_type_t frame_type, int poc,
                            int ctu_x, int ctu_y)
 {
@@ -1768,7 +1768,7 @@ static void v2_recon_split(tc_decoder_t *dec, const v2_cmd_ctu_t *cmd,
     if (!in_frame && cu > TC_QT_MIN_CU) {
         for (int q = 0; q < 4; q++) v2_recon_split(dec, cmd, depth + 1,
             cx + ((q & 1) << (2 - depth)), cy + ((q >> 1) << (2 - depth)),
-            eff, eff_c, frame_type, poc, ctu_x, ctu_y);
+            eff8, eff4, effc4, frame_type, poc, ctu_x, ctu_y);
         return;
     }
     if (!in_frame) return;
@@ -1776,18 +1776,21 @@ static void v2_recon_split(tc_decoder_t *dec, const v2_cmd_ctu_t *cmd,
     if (cmd->node[idx].split) for (int q = 0; q < 4; q++)
         v2_recon_split(dec, cmd, depth + 1,
             cx + ((q & 1) << (2 - depth)), cy + ((q >> 1) << (2 - depth)),
-            eff, eff_c, frame_type, poc, ctu_x, ctu_y);
+            eff8, eff4, effc4, frame_type, poc, ctu_x, ctu_y);
     else {
         int absx = (cmd->node[idx].valid ? 0 : 0); (void)absx;
         /* The CTU origin is supplied by the caller through cmd-local fields
          * in v2_recon_ctu; this helper's cx/cy are local 8x8 coordinates. */
         v2_recon_leaf(dec, cmd, &cmd->node[idx],
-                      px, py, cu, eff, eff_c, frame_type, poc);
+                      px, py, cu, eff8, eff4, effc4, frame_type, poc);
     }
 }
 
 static void v2_recon_ctu(tc_decoder_t *dec, const v2_cmd_ctu_t *cmd,
-                         int row, int col, int qp, tc_frame_type_t frame_type, int poc)
+                         int row, int col, int qp,
+                         const int eff8[64], const int eff4[16],
+                         const int effc4[16],
+                         tc_frame_type_t frame_type, int poc)
 {
     /* Reconstruct helpers address local coordinates; offset the frame base
      * temporarily by using a CTU-origin wrapper below. */
@@ -1795,12 +1798,11 @@ static void v2_recon_ctu(tc_decoder_t *dec, const v2_cmd_ctu_t *cmd,
      * are translated by this small command-independent wrapper by passing a
      * CTU origin through the command traversal. */
     int ox = col * TC_CTU_SIZE, oy = row * TC_CTU_SIZE;
-    int eff[4][64], eff_c[4][64];
-    tc_build_eff_scale_table(qp, eff);
-    tc_build_eff_scale_table(tc_clip(qp + 1, 0, 63), eff_c);
+    /* eff/eff_c are frame-constant (built once per frame in
+     * v2_decode_frame_parallel); qp remains for deblock strength. */
     /* Inline traversal with absolute coordinates to avoid mutable globals. */
     /* A local recursive lambda is not C; use the explicit worker below. */
-    v2_recon_split(dec, cmd, 0, 0, 0, eff, eff_c, frame_type, poc, ox, oy);
+    v2_recon_split(dec, cmd, 0, 0, 0, eff8, eff4, effc4, frame_type, poc, ox, oy);
     if (ox + TC_CTU_SIZE <= dec->width && oy + TC_CTU_SIZE <= dec->height) {
         uint64_t deblock_start = dec->profile_enabled ? dec_now_ns() : 0;
         tc_deblock_ctu(dec->cur->y, dec->cur->stride_y,
@@ -1818,9 +1820,17 @@ typedef struct {
     tc_decoder_t *dec;
     v2_cmd_ctu_t *cmds;
     int rows, cols, qp;
+    const int *eff8;
+    const int *eff4;
+    const int *effc4;
     tc_frame_type_t frame_type;
     int poc;
     uint8_t *done, *deps;
+    /* Pipeline overlap: parse (main thread, raster) runs concurrently
+     * with wavefront recon (workers). A CTU enters the ready queue only
+     * when parsed AND its above/left recon deps are met. */
+    uint8_t *parsed;
+    int parse_error;
     int *ready;
     int ready_head, ready_tail;
     int remaining;
@@ -1830,9 +1840,51 @@ typedef struct {
     unsigned long long wait_ns, work_ns;
 } v2_wave_ctx_t;
 
+/* Cost-aware wavefront scheduling: the ready queue is a max-heap keyed
+ * by parsed residual volume (cmds[task].coeff_count). Heavy CTUs
+ * (water-inter stragglers) start as soon as their deps allow instead of
+ * in FIFO diagonal order, so their latency overlaps more parallel work.
+ * Order never affects output (deps are still enforced per task). */
+static uint32_t v2_task_cost(v2_wave_ctx_t *w, int task)
+{
+    return w->cmds[task].coeff_count;
+}
+
 static void v2_ready_push(v2_wave_ctx_t *w, int task)
 {
-    w->ready[w->ready_tail++] = task;
+    int i = w->ready_tail++;
+    w->ready[i] = task;
+    while (i > w->ready_head) {
+        int p = w->ready_head + ((i - w->ready_head - 1) >> 1);
+        if (v2_task_cost(w, w->ready[p]) >= v2_task_cost(w, w->ready[i]))
+            break;
+        int t = w->ready[p]; w->ready[p] = w->ready[i]; w->ready[i] = t;
+        i = p;
+    }
+}
+
+static int v2_ready_pop(v2_wave_ctx_t *w)
+{
+    int top = w->ready[w->ready_head];
+    int last = w->ready[--w->ready_tail];
+    if (w->ready_head != w->ready_tail) {
+        int i = w->ready_head;
+        w->ready[i] = last;
+        for (;;) {
+            int l = w->ready_head + (((i - w->ready_head) << 1) + 1);
+            int r = l + 1, m = i;
+            if (l < w->ready_tail &&
+                v2_task_cost(w, w->ready[l]) > v2_task_cost(w, w->ready[m]))
+                m = l;
+            if (r < w->ready_tail &&
+                v2_task_cost(w, w->ready[r]) > v2_task_cost(w, w->ready[m]))
+                m = r;
+            if (m == i) break;
+            int t = w->ready[m]; w->ready[m] = w->ready[i]; w->ready[i] = t;
+            i = m;
+        }
+    }
+    return top;
 }
 
 static void *v2_wave_worker(void *opaque)
@@ -1843,19 +1895,21 @@ static void *v2_wave_worker(void *opaque)
         int task;
         pthread_mutex_lock(&w->mutex);
         uint64_t t0 = wstat ? dec_now_ns() : 0;
-        while (w->ready_head == w->ready_tail && w->remaining != 0)
+        while (w->ready_head == w->ready_tail && w->remaining != 0 &&
+               !w->parse_error)
             pthread_cond_wait(&w->cond, &w->mutex);
         if (wstat) w->wait_ns += dec_now_ns() - t0;
-        if (w->remaining == 0) {
+        if (w->remaining == 0 || w->parse_error) {
             pthread_mutex_unlock(&w->mutex);
             return NULL;
         }
-        task = w->ready[w->ready_head++];
+        task = v2_ready_pop(w);
         pthread_mutex_unlock(&w->mutex);
 
         uint64_t r0 = wstat ? dec_now_ns() : 0;
         v2_recon_ctu(w->dec, &w->cmds[task], task / w->cols,
-                     task % w->cols, w->qp, w->frame_type, w->poc);
+                     task % w->cols, w->qp, w->eff8, w->eff4, w->effc4,
+                     w->frame_type, w->poc);
         if (wstat) {
             uint64_t r1 = dec_now_ns();
             pthread_mutex_lock(&w->mutex);
@@ -1864,19 +1918,26 @@ static void *v2_wave_worker(void *opaque)
         }
 
         pthread_mutex_lock(&w->mutex);
+        if (w->parse_error) {
+            /* Frame aborted while this task reconstructed: discard and
+             * exit without touching the remaining count (the main thread
+             * no longer waits on it). */
+            pthread_mutex_unlock(&w->mutex);
+            return NULL;
+        }
         w->remaining--;
         int row = task / w->cols, col = task % w->cols;
         int released = 0;
         if (col + 1 < w->cols) {
             int next = task + 1;
-            if (--w->deps[next] == 0) {
+            if (--w->deps[next] == 0 && w->parsed[next]) {
                 v2_ready_push(w, next);
                 released++;
             }
         }
         if (row + 1 < w->rows) {
             int next = task + w->cols;
-            if (--w->deps[next] == 0) {
+            if (--w->deps[next] == 0 && w->parsed[next]) {
                 v2_ready_push(w, next);
                 released++;
             }
@@ -1977,22 +2038,214 @@ static void v2_pool_destroy(v2_pool_t *pool)
     free(pool);
 }
 
-static void v2_pool_submit(v2_pool_t *pool, v2_wave_ctx_t *ctx)
+static void v2_pool_start(v2_pool_t *pool, v2_wave_ctx_t *ctx)
 {
     pthread_mutex_lock(&pool->mutex);
     pool->ctx = ctx;
     pool->gen++;          /* New generation wakes every idle worker */
     pool->finished = 0;
     pthread_cond_broadcast(&pool->cond);
+    pthread_mutex_unlock(&pool->mutex);
+}
+
+static void v2_pool_wait(v2_pool_t *pool)
+{
+    pthread_mutex_lock(&pool->mutex);
     while (pool->finished != pool->count)
         pthread_cond_wait(&pool->cond, &pool->mutex);
     /* Every worker has returned from v2_wave_worker and detached from the
-     * frame context before the caller frees its command storage. */
+     * frame context before the caller reuses its command storage. */
     pool->ctx = NULL;
     pthread_cond_broadcast(&pool->cond);
     pthread_mutex_unlock(&pool->mutex);
 }
 #endif
+
+#if !defined(TCODEC_NO_THREADS)
+/* v2 entry-points parallel parse: one task per CTU row, using that
+ * row's independent reader/entropy streams. Rows are disjoint in the
+ * command store; shared decoder state is read-only here (header,
+ * dimensions, DPB presence) except atomic profile counters. */
+typedef struct {
+    tc_decoder_t   *dec;
+    v2_cmd_ctu_t   *cmds;
+    int             rows, cols, qp;
+    tc_frame_type_t frame_type;
+    int             poc;
+    tc_bs_reader_t *row_bs;
+    tc_tans_dec_t  *row_tans;
+    tc_rc_dec_t    *row_rc;      /* NULL when frame is not entropy-coded */
+    tc_rc_ctx_t    *row_ctx;     /* flat rows*TC_NUM_CONTEXTS_RC or NULL */
+} ep_parse_ctx_t;
+
+static void ep_parse_row_fn(void *ctx, int row)
+{
+    ep_parse_ctx_t *p = (ep_parse_ctx_t *)ctx;
+    tc_rc_dec_t *rc = p->row_rc ? &p->row_rc[row] : NULL;
+    tc_rc_ctx_t *cx = p->row_ctx ?
+        &p->row_ctx[(size_t)row * TC_NUM_CONTEXTS_RC] : NULL;
+    for (int c = 0; c < p->cols; c++) {
+        if (p->row_bs[row].error) break;
+        v2_parse_ctu(p->dec, row, c, p->qp, p->frame_type, p->poc,
+                     &p->row_bs[row], &p->row_tans[row], rc, cx,
+                     &p->cmds[(size_t)row * p->cols + c]);
+    }
+}
+#endif
+
+static int v2_ep_decode(tc_decoder_t *dec, int qp,
+                        tc_frame_type_t frame_type, int poc,
+                        tc_bs_reader_t *bs,
+                        v2_cmd_ctu_t *cmds, int rows, int cols,
+                        const int eff8[64], const int eff4[16],
+                        const int effc4[16])
+{
+    /* Per-row entry-point table: u16 row count + one u32 byte offset
+     * per row (offsets relative to the payload base just past the
+     * table). Rows are independently parseable: own byte range, own
+     * range state, own contexts. MV grids already reset per CTU on
+     * both sides, so prediction is unchanged. */
+    if (rows < 1 || rows > 64 || cols < 1) return 0;
+    if (bs->bit_pos > 0) { bs->byte_pos++; bs->bit_pos = 0; }
+    if (bs->byte_pos >= bs->size) return 0;
+    uint32_t nrows = tc_bs_reader_read_bits(bs, 16);
+    if (bs->error || nrows != (uint32_t)rows) return 0;
+    uint32_t off[64];
+    for (int i = 0; i < rows; i++) {
+        off[i] = tc_bs_reader_read_bits(bs, 32);
+        if (bs->error) return 0;
+    }
+    size_t payload = bs->byte_pos;
+    size_t data_end = bs->size;
+    if (dec->last_header.has_crc) {
+        if (data_end < 2) return 0;
+        data_end -= 2;
+    }
+    if (data_end < payload) return 0;
+    size_t datalen = data_end - payload;
+    if (off[0] != 0) return 0;
+    for (int i = 1; i < rows; i++)
+        if (off[i] < off[i - 1] || off[i] > datalen) return 0;
+    if (datalen > 0 && off[rows - 1] > datalen) return 0;
+
+    /* Frame-local per-row streams (rows <= 64; ~11KB stack). */
+    tc_bs_reader_t rbs[64];
+    tc_tans_dec_t rtans[64];
+    tc_rc_dec_t rrc[64];
+    tc_rc_ctx_t rctx[64 * TC_NUM_CONTEXTS_RC];
+    int use_rc = dec->use_entropy_coded ? 1 : 0;
+    for (int r = 0; r < rows; r++) {
+        size_t start = payload + off[r];
+        size_t end = (r + 1 < rows) ? payload + off[r + 1] : data_end;
+        if (end < start || end > bs->size) return 0;
+        tc_bs_reader_init(&rbs[r], bs->buf + start, end - start);
+        tc_tans_dec_init(&rtans[r], &rbs[r]);
+        if (use_rc) {
+            tc_rc_ctx_init(&rctx[(size_t)r * TC_NUM_CONTEXTS_RC],
+                           TC_NUM_CONTEXTS_RC);
+            tc_rc_dec_init(&rrc[r], &rbs[r]);
+        }
+    }
+
+    /* Parse rows (parallel when the pool exists). Row tasks touch
+     * disjoint command entries; shared decoder state is read-only. */
+#if defined(TCODEC_NO_THREADS)
+    for (int r = 0; r < rows; r++) {
+        tc_rc_dec_t *rr = use_rc ? &rrc[r] : NULL;
+        tc_rc_ctx_t *rx = use_rc ? &rctx[(size_t)r * TC_NUM_CONTEXTS_RC]
+                                 : NULL;
+        for (int c = 0; c < cols; c++) {
+            if (rbs[r].error) break;
+            v2_parse_ctu(dec, r, c, qp, frame_type, poc,
+                         &rbs[r], &rtans[r], rr, rx,
+                         &cmds[(size_t)r * cols + c]);
+        }
+        if (rbs[r].error) return 0;
+    }
+#else
+    if (dec->pool && rows > 1) {
+        ep_parse_ctx_t p;
+        p.dec = dec; p.cmds = cmds; p.rows = rows; p.cols = cols;
+        p.qp = qp; p.frame_type = frame_type; p.poc = poc;
+        p.row_bs = rbs; p.row_tans = rtans;
+        p.row_rc = use_rc ? rrc : NULL;
+        p.row_ctx = use_rc ? rctx : NULL;
+        tc_threadpool_run(dec->pool, ep_parse_row_fn, &p, rows);
+        for (int r = 0; r < rows; r++)
+            if (rbs[r].error) return 0;
+    } else {
+        for (int r = 0; r < rows; r++) {
+            tc_rc_dec_t *rr = use_rc ? &rrc[r] : NULL;
+            tc_rc_ctx_t *rx = use_rc ? &rctx[(size_t)r * TC_NUM_CONTEXTS_RC]
+                                     : NULL;
+            for (int c = 0; c < cols; c++) {
+                if (rbs[r].error) break;
+                v2_parse_ctu(dec, r, c, qp, frame_type, poc,
+                             &rbs[r], &rtans[r], rr, rx,
+                             &cmds[(size_t)r * cols + c]);
+            }
+            if (rbs[r].error) return 0;
+        }
+    }
+#endif
+
+    /* Reconstruct on the dependency-safe wavefront (all rows parsed). */
+#if defined(TCODEC_NO_THREADS)
+    for (int r = 0; r < rows; r++) for (int c = 0; c < cols; c++)
+        v2_recon_ctu(dec, &cmds[(size_t)r * cols + c], r, c, qp,
+                     eff8, eff4, effc4, frame_type, poc);
+    return 1;
+#else
+    {
+        size_t count = (size_t)rows * (size_t)cols;
+        v2_wave_ctx_t w;
+        memset(&w, 0, sizeof(w));
+        w.dec = dec; w.cmds = cmds; w.rows = rows;
+        w.cols = cols; w.qp = qp;
+        w.eff8 = eff8; w.eff4 = eff4; w.effc4 = effc4;
+        w.frame_type = frame_type; w.poc = poc;
+        w.deps = (uint8_t *)calloc(count, 1);
+        w.ready = (int *)malloc(count * sizeof(*w.ready));
+        w.parsed = (uint8_t *)calloc(count, 1);
+        if (!w.deps || !w.ready || !w.parsed) {
+            free(w.deps); free(w.ready); free(w.parsed);
+            return 0;
+        }
+        for (int r = 0; r < rows; r++) for (int c = 0; c < cols; c++) {
+            w.deps[(size_t)r * cols + c] = (uint8_t)((r > 0) + (c > 0));
+            w.parsed[(size_t)r * cols + c] = 1;
+        }
+        w.ready_head = w.ready_tail = 0;
+        v2_ready_push(&w, 0);
+        w.remaining = (int)count;
+        pthread_mutex_init(&w.mutex, NULL); pthread_cond_init(&w.cond, NULL);
+        v2_pool_t *pool = (v2_pool_t *)dec->v2_pool;
+        if (!pool) {
+            int nt = dec->num_threads > 0 ? dec->num_threads : 1;
+            pthread_t th[8]; if (nt > 8) nt = 8; int made = 0;
+            for (int i = 0; i < nt; i++)
+                if (pthread_create(&th[made], NULL, v2_wave_worker, &w) == 0)
+                    made++;
+            if (!made) {
+                pthread_mutex_destroy(&w.mutex);
+                pthread_cond_destroy(&w.cond);
+                free(w.deps); free(w.ready); free(w.parsed);
+                return 0;
+            }
+            for (int i = 0; i < made; i++) pthread_join(th[i], NULL);
+        } else {
+            v2_pool_start(pool, &w);
+            v2_pool_wait(pool);
+        }
+        if (getenv("TC_WAVESTAT"))
+            fprintf(stderr, "WAVESTAT work=%.1fms wait=%.1fms tasks=%d\n",
+                    w.work_ns / 1e6, w.wait_ns / 1e6, rows * cols);
+        pthread_mutex_destroy(&w.mutex); pthread_cond_destroy(&w.cond);
+        free(w.deps); free(w.ready); free(w.parsed);
+        return 1;
+    }
+#endif
+}
 
 static int v2_decode_frame_parallel(tc_decoder_t *dec, int qp,
                                     tc_frame_type_t frame_type, int poc,
@@ -2001,49 +2254,149 @@ static int v2_decode_frame_parallel(tc_decoder_t *dec, int qp,
 {
     int rows = dec->num_ctu_rows, cols = dec->num_ctu_cols;
     size_t count = (size_t)rows * (size_t)cols;
-    v2_cmd_ctu_t *cmds = (v2_cmd_ctu_t *)calloc(count, sizeof(*cmds));
-    if (!cmds) return 0;
+    /* Frame-constant quant tables: built once here, shared read-only by
+     * all recon workers (was rebuilt per-CTU: 240×512 mults/frame).
+     * Flat per-position tables skip the per-coeff band lookup + 2-D
+     * index in every dequant loop. */
+    int eff[4][64], eff_c[4][64];
+    int eff8[64], eff4[16], effc4[16];
+    tc_build_eff_scale_table(qp, eff);
+    tc_build_eff_scale_table(tc_clip(qp + 1, 0, 63), eff_c);
+    for (int i = 0; i < 64; i++) eff8[i] = eff[qt_band8[i]][i];
+    for (int i = 0; i < 16; i++) eff4[i] = eff[qt_band4[i]][i];
+    for (int i = 0; i < 16; i++) effc4[i] = eff_c[qt_band4[i]][0];
+    /* Persistent command store: reuse across frames when capacity fits,
+     * avoiding 8-15MB calloc+free per frame. Parse overwrites every
+     * in-frame split/leaf; only the write cursor + SAO presence need an
+     * explicit reset (calloc zeroed them on the old path). */
+    v2_cmd_ctu_t *cmds = (v2_cmd_ctu_t *)dec->v2_cmds_buf;
+    int reused = (cmds != NULL && dec->v2_cmds_cap >= count);
+    if (!reused) {
+        free(dec->v2_cmds_buf);
+        cmds = (v2_cmd_ctu_t *)malloc(count * sizeof(*cmds));
+        if (!cmds) { dec->v2_cmds_buf = NULL; dec->v2_cmds_cap = 0; return 0; }
+        dec->v2_cmds_buf = cmds;
+        dec->v2_cmds_cap = count;
+    }
+    for (size_t i = 0; i < count; i++) {
+        cmds[i].coeff_count = 0;
+        cmds[i].sao_has = 0;
+        cmds[i].sao_band = 0;
+        cmds[i].sao_offset = 0;
+    }
+    /* Entry-point frames (tool bit set by every v2 encoder): per-row
+     * offset table + independent row streams + parallel parse. Legacy
+     * v2 streams (bit clear) keep the serial-parse pipeline below. */
+    if (dec->use_v2 &&
+        (dec->last_header.tool_flags & TC_TOOL_ENTRY_POINTS)) {
+        if (!v2_ep_decode(dec, qp, frame_type, poc, bs, cmds, rows, cols,
+                          eff8, eff4, effc4))
+            return 0;
+        return 1;
+    }
+#if defined(TCODEC_NO_THREADS)
     for (int r = 0; r < rows; r++) for (int c = 0; c < cols; c++)
         v2_parse_ctu(dec, r, c, qp, frame_type, poc, bs, tans, rc, rc_ctx,
                       &cmds[r * cols + c]);
-    if (bs->error) { free(cmds); return 0; }
-#if defined(TCODEC_NO_THREADS)
+    if (bs->error) { return 0; }
     for (int r = 0; r < rows; r++) for (int c = 0; c < cols; c++)
-        v2_recon_ctu(dec, &cmds[r * cols + c], r, c, qp, frame_type, poc);
+        v2_recon_ctu(dec, &cmds[r * cols + c], r, c, qp, eff8, eff4, effc4,
+                     frame_type, poc);
 #else
+    /* Pipelined parse/recon: the serial range-coded parse (main thread,
+     * raster) overlaps the wavefront recon (workers). A CTU becomes
+     * runnable only when parsed AND its above/left recon deps are met,
+     * so output stays bit-exact while the ~10ms/frame parse barrier
+     * hides inside parallel recon. */
     v2_wave_ctx_t w;
     memset(&w, 0, sizeof(w)); w.dec = dec; w.cmds = cmds; w.rows = rows;
-    w.cols = cols; w.qp = qp; w.frame_type = frame_type; w.poc = poc;
+    w.cols = cols; w.qp = qp; w.eff8 = eff8; w.eff4 = eff4; w.effc4 = effc4;
+    w.frame_type = frame_type; w.poc = poc;
     w.deps = (uint8_t *)calloc(count, 1);
     w.ready = (int *)malloc(count * sizeof(*w.ready));
-    if (!w.deps || !w.ready) { free(w.deps); free(w.ready); free(cmds); return 0; }
+    w.parsed = (uint8_t *)calloc(count, 1);
+    if (!w.deps || !w.ready || !w.parsed) {
+        free(w.deps); free(w.ready); free(w.parsed);
+        return 0;
+    }
     for (int r = 0; r < rows; r++) for (int c = 0; c < cols; c++)
         w.deps[r * cols + c] = (uint8_t)((r > 0) + (c > 0));
     w.ready_head = w.ready_tail = 0;
-    v2_ready_push(&w, 0);
     w.remaining = rows * cols;
     pthread_mutex_init(&w.mutex, NULL); pthread_cond_init(&w.cond, NULL);
     v2_pool_t *pool = (v2_pool_t *)dec->v2_pool;
-    if (!pool) {
+    int use_pool = (pool != NULL);
+    pthread_t th[8];
+    int made = 0;
+    if (!use_pool) {
         int nt = dec->num_threads > 0 ? dec->num_threads : 1;
-        pthread_t th[8]; if (nt > 8) nt = 8; int made = 0;
+        if (nt > 8) nt = 8;
         for (int i = 0; i < nt; i++)
             if (pthread_create(&th[made], NULL, v2_wave_worker, &w) == 0) made++;
         if (!made) {
+            /* Threadless fallback: serial parse then serial recon. */
+            for (int r = 0; r < rows; r++) for (int c = 0; c < cols; c++)
+                v2_parse_ctu(dec, r, c, qp, frame_type, poc, bs, tans, rc,
+                             rc_ctx, &cmds[r * cols + c]);
+            int ok = !bs->error;
+            if (ok) {
+                for (int r = 0; r < rows; r++) for (int c = 0; c < cols; c++)
+                    v2_recon_ctu(dec, &cmds[r * cols + c], r, c, qp,
+                                 eff8, eff4, effc4, frame_type, poc);
+                /* Sequential path has no wavefront deps to satisfy. */
+            }
             pthread_mutex_destroy(&w.mutex); pthread_cond_destroy(&w.cond);
-            free(w.deps); free(w.ready); free(cmds); return 0;
+            free(w.deps); free(w.ready); free(w.parsed);
+            return ok;
         }
+    } else {
+        v2_pool_start(pool, &w);
+    }
+    /* Main thread: serial parse, publishing each CTU to the wavefront. */
+    int parse_ok = 1;
+    for (int r = 0; r < rows && parse_ok; r++) for (int c = 0; c < cols; c++) {
+        v2_parse_ctu(dec, r, c, qp, frame_type, poc, bs, tans, rc, rc_ctx,
+                      &cmds[r * cols + c]);
+        if (bs->error) { parse_ok = 0; break; }
+        int idx = r * cols + c;
+        pthread_mutex_lock(&w.mutex);
+        w.parsed[idx] = 1;
+        if (w.deps[idx] == 0) {
+            v2_ready_push(&w, idx);
+            pthread_cond_signal(&w.cond);
+        }
+        pthread_mutex_unlock(&w.mutex);
+    }
+    if (!parse_ok) {
+        /* Abort: workers observe parse_error and return promptly (those
+         * mid-recon discard their task); the frame is discarded
+         * (bitstream error). remaining is left alone so live workers
+         * never drive it negative. */
+        pthread_mutex_lock(&w.mutex);
+        w.parse_error = 1;
+        pthread_cond_broadcast(&w.cond);
+        pthread_mutex_unlock(&w.mutex);
+        if (!use_pool) {
+            for (int i = 0; i < made; i++) pthread_join(th[i], NULL);
+        } else {
+            v2_pool_wait(pool);
+        }
+        pthread_mutex_destroy(&w.mutex); pthread_cond_destroy(&w.cond);
+        free(w.deps); free(w.ready); free(w.parsed);
+        return 0;
+    }
+    if (!use_pool) {
         for (int i = 0; i < made; i++) pthread_join(th[i], NULL);
     } else {
-        v2_pool_submit(pool, &w);
+        v2_pool_wait(pool);
     }
     if (getenv("TC_WAVESTAT"))
         fprintf(stderr, "WAVESTAT work=%.1fms wait=%.1fms tasks=%d\n",
                 w.work_ns / 1e6, w.wait_ns / 1e6, rows * cols);
     pthread_mutex_destroy(&w.mutex); pthread_cond_destroy(&w.cond);
-    free(w.deps); free(w.ready);
+    free(w.deps); free(w.ready); free(w.parsed);
 #endif
-    free(cmds);
+    /* cmds stays owned by dec->v2_cmds_buf for reuse; do not free here. */
     return 1;
 }
 
@@ -2122,6 +2475,7 @@ void tc_decoder_destroy(tc_decoder_t *dec)
         tc_frame_free(dec->dpb[i].frame);
     }
     free(dec->ctu_data);
+    free(dec->v2_cmds_buf);
 #if !defined(TCODEC_NO_THREADS)
     free(dec->row_bs);
     free(dec->row_tans);
@@ -2212,6 +2566,13 @@ tc_error_t tc_decoder_decode(tc_decoder_t *dec,
     dec->use_v2 = (hdr.version == TC_VERSION_V2) ? 1 : 0;
     dec->cur_qp = hdr.qp;
 
+    /* Entry points are a v2-only tool (per-CTU-row offset table). A
+     * non-v2 stream carrying the bit is malformed: the legacy paths
+     * would mis-parse the table as row data. */
+    if ((hdr.tool_flags & TC_TOOL_ENTRY_POINTS) && !dec->use_v2) {
+        return TC_ERR_BITSTREAM;
+    }
+
     /* Update dimensions if auto-detect */
     if (dec->width == 0 || dec->height == 0) {
         dec->width  = hdr.width;
@@ -2251,11 +2612,18 @@ tc_error_t tc_decoder_decode(tc_decoder_t *dec,
     }
     dec->use_entropy_coded = use_entropy_coded;
 
+    /* v2 entry-point frames carry per-row range streams: the frame-level
+     * range init below must NOT consume table bytes from the main
+     * reader. Per-row init happens in v2_decode_frame_parallel, which
+     * reads dec->use_entropy_coded to decide. */
+    int v2_ep_frame = (dec->use_v2 &&
+                       (hdr.tool_flags & TC_TOOL_ENTRY_POINTS)) ? 1 : 0;
+
     /* Set up range coder if entropy coded is active */
     tc_rc_dec_t  rc_dec_local;
     tc_rc_ctx_t *rc_ctx_ptr = NULL;
     tc_rc_dec_t *rc_ptr     = NULL;
-    if (use_entropy_coded) {
+    if (use_entropy_coded && !v2_ep_frame) {
         tc_rc_ctx_init(dec->rc_ctx, TC_NUM_CONTEXTS_RC);
         tc_rc_dec_init(&rc_dec_local, &dec->bs);
         rc_ctx_ptr = dec->rc_ctx;
