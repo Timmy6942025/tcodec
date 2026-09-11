@@ -1038,13 +1038,14 @@ static int64_t qt_leaf(qt_enc_t *e, int depth, int cx, int cy, int write)
         if (!fast_mode && e->frame_type == TC_FRAME_INTER && enc->dpb[0].frame) {
             const tc_pixel_t *origL = enc->cur->y + py*enc->cur->stride_y + px;
             int64_t sseL = 0;
-            for (int yy=0; yy<cu && sseL==0; yy++)
+            /* TRIAL93a near-exact skip SSE<=cu (very strict, MSE<=1/cu? 8x8 SSE<=8 MSE<=0.125). */
+            for (int yy=0; yy<cu && sseL<=cu; yy++)
                 for (int xx=0; xx<cu; xx++) {
                     int d = (int)origL[yy*enc->cur->stride_y+xx] - (int)pred[yy*cu+xx];
                     sseL += (int64_t)d*d;
-                    if (sseL != 0) break;
+                    if (sseL > cu) break;
                 }
-            if (sseL == 0) {
+            if (sseL <= cu) {
                 tc_mv_s smv = {mvp.x+px*4, mvp.y+py*4};
                 int cs2 = cu/2;
                 tc_pixel_t scb[32*32], scr[32*32];
@@ -1055,12 +1056,13 @@ static int64_t qt_leaf(qt_enc_t *e, int depth, int cx, int cy, int write)
                 const tc_pixel_t *origCb = enc->cur->cb + (py/2)*enc->cur->stride_c + px/2;
                 const tc_pixel_t *origCr = enc->cur->cr + (py/2)*enc->cur->stride_c + px/2;
                 int64_t sseC = 0;
-                for (int yy=0; yy<cs2 && sseC==0; yy++)
+                /* TRIAL93a chroma SSE<=cu (generous, same threshold cu; chroma MSE twice luma, okay less important). */
+                for (int yy=0; yy<cs2 && sseC<=cu; yy++)
                     for (int xx=0; xx<cs2; xx++) {
                         int db = (int)origCb[yy*enc->cur->stride_c+xx] - (int)scb[yy*cs2+xx];
                         int dr = (int)origCr[yy*enc->cur->stride_c+xx] - (int)scr[yy*cs2+xx];
                         sseC += (int64_t)db*db + (int64_t)dr*dr;
-                        if (sseC != 0) break;
+                        if (sseC > cu) break;
                     }
                 if (skipdbg_active()) {
                     /* Full SSE (no early break) for distribution forensics. */
@@ -1096,7 +1098,7 @@ static int64_t qt_leaf(qt_enc_t *e, int depth, int cx, int cy, int write)
                             (long long)best_cost, (long long)e->lambda, (cost_sk < best_cost) ? 1 : 0);
                     }
                 }
-                if (sseC == 0) {
+                if (sseC <= cu) { /* TRIAL93a near-exact (was perfect ==0) */
                     int bits_skip = 1 + 1; /* P skip: intra(0) + skip(1); honest */
                     int64_t cost_skip = e->lambda * (int64_t)bits_skip; /* distortion 0 */
                     if (cost_skip < best_cost) {
