@@ -1,8 +1,8 @@
 # TCodec Profiles and Levels — Versions 0, 1, and 2
 
 **Status**: v1 profiles/levels and the explicit v2 quadtree payload are implemented and enforced where applicable.
-**Bitstream Versions**: 0 (no profile/level), 1 (profiles + levels + tool flags), 2 (explicit quadtree payload)
-**Last Updated**: v2 quadtree payload and luma SAO Band Offset are implemented; EO/restoration remain reserved.
+**Bitstream Versions**: 0 (no profile/level), 1 (profiles + levels + tool flags), 2 (explicit quadtree payload), 2.1 (scoped NOT implemented: FRESH_SKIP kept firing 0%, MERGELIST/MPM/1-bit/ENTRY_POINTS batched, see BITSTREAM §7.7 + docs/V2_1_BATCH.md)
+**Last Updated**: v2 quadtree payload and luma SAO Band Offset are implemented; v2.1 batch scoped (FRESH_SKIP kept, others batched, see BITSTREAM §7.7); EO/restoration remain reserved.
 
 ---
 
