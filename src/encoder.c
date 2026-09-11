@@ -1024,10 +1024,16 @@ static int64_t qt_leaf(qt_enc_t *e, int depth, int cx, int cy, int write)
         }
         if (enc->cfg.preset >= TC_PRESET_MEDIUM) {
             tc_mv_s mm={mvp.x+px*4,mvp.y+py*4}; tc_inter_predict(enc->dpb[0].frame->y,enc->dpb[0].frame->stride_y, enc->cfg.width,enc->cfg.height,mm,pred,cu,cu);
-            int64_t dl2 = qt_code_luma(e,px,py,cu,TC_BLOCK_8x8_ID,pred,&lb,0);
+            /* TRIAL-MERGETU: evaluate both TU sizes like explicit inter
+             * (was hardcoded 8x8, overpricing merge whenever 4x4 fits).
+             * Write + decoder already carry per-TU flags for merge. */
+            uint8_t m_dct = TC_BLOCK_8x8_ID;
+            int64_t dl2;
+            if (cu <= 32) dl2 = qt_code_best(e,px,py,cu,pred,&lb,&m_dct);
+            else dl2 = qt_code_luma(e,px,py,cu,TC_BLOCK_8x8_ID,pred,&lb,0);
             int bits_merge = 1+1+1+1+1+1+lb;
             int64_t cost2 = dl2 + e->lambda*bits_merge;
-            if (cost2<best_cost) { best_cost=cost2;b_intra=0;b_merge=1;b_skip=0;b_mvdx=disp.x;b_mvdy=disp.y; b_dct=TC_BLOCK_8x8_ID;b_ch=0;b_cmode=0;b_imode=1;b_refsel=0;b_bi=0; won_global=0; }
+            if (cost2<best_cost) { best_cost=cost2;b_intra=0;b_merge=1;b_skip=0;b_mvdx=disp.x;b_mvdy=disp.y; b_dct=m_dct;b_ch=0;b_cmode=0;b_imode=1;b_refsel=0;b_bi=0; won_global=0; }
         }
         /* TRIAL78 skip-9 perfect-match (fresh chroma, FRESH_SKIP bit).
          * mvp MC (dpb[0]) luma pred already in pred[] (same as merge).

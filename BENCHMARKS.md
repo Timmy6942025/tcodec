@@ -558,6 +558,12 @@ reverted (exchange collapses: −16%/−0.6dB); RDOQ-3L reverted
 60.5fps. parkrun30: → 440KB @ 25.42dB, decode 65.5fps. park30: →
 340KB @ 26.87dB, decode 60.1fps. 53/53 green (1.5x and 2.0x builds).
 
+MERGETU (kept): P-merge evaluates both TU sizes via qt_code_best for
+cu≤32 (was hardcoded 8×8 while explicit inter compared both — RDO
+correctness fix, encoder-only, per-TU flags already in syntax).
+ducks10 −0.53%/−0.09dB, park10 −0.84%/−0.03dB, sita identical, all
+decodes rc=0. 53/53 green. Small, green-green, zero decode cost.
+
 ### August 2026 decoder optimization measurement
 
 Host: aarch64 Cortex-A72, 4 cores, NEON build, QP 32, one decoder thread,
