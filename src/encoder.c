@@ -2390,6 +2390,12 @@ tc_encoder_t *tc_encoder_create(const tc_config_t *config)
     enc->num_ctu_cols = (config->width  + TC_CTU_SIZE - 1) / TC_CTU_SIZE;
     enc->num_ctu_rows = (config->height + TC_CTU_SIZE - 1) / TC_CTU_SIZE;
     enc->ctu_stab = (int64_t *)calloc((size_t)enc->num_ctu_cols * (size_t)enc->num_ctu_rows, sizeof(int64_t));
+    /* TRIAL90 per-block stability grid (encoder-only). */
+    {
+        int bgw = (config->width + 7) / 8, bgh = (config->height + 7) / 8;
+        enc->blk_stab_w = bgw; enc->blk_stab_h = bgh;
+        enc->blk_stab = (int32_t *)calloc((size_t)bgw * (size_t)bgh, sizeof(int32_t));
+    }
     /* TRIAL84 temporal MVP grids (frame-level 8x8 cells, encoder-only). */
     {
         int mgw = (config->width + 7) / 8, mgh = (config->height + 7) / 8;
@@ -2521,6 +2527,7 @@ void tc_encoder_destroy(tc_encoder_t *enc)
     free(enc->out_buf);
     tc_frame_free(enc->prev_orig); /* TRIAL82 (NULL-safe? tc_frame_free handles NULL? Check: if (!frame) return? Assume yes (like cur/recon free in destroy without NULL check? Actually destroy frees cur/recon without check (they're non-NULL after successful create). prev_orig allocated (may fail? If alloc fails, create continues? We don't check prev_orig alloc failure – to be safe, allow NULL (tc_frame_free must handle NULL). Check tc_frame_free NULL handling. If not NULL-safe, add check. For now, assume NULL-safe (most free funcs check). If crash, fix. */
     free(enc->ctu_stab); /* TRIAL82 (free NULL-safe) */
+    free(enc->blk_stab); /* TRIAL90 (free NULL-safe) */
     free(enc->prev_mvgrid); free(enc->cur_mvgrid); /* TRIAL84 (free NULL-safe) */
 #if !defined(TCODEC_NO_THREADS)
     /* Free per-row bitstream buffers */
@@ -2796,6 +2803,27 @@ static tc_error_t encode_poc_frame(tc_encoder_t *enc,
             }
             if (stabdbg_on) fprintf(stderr, "STABDBG poc=%d n=%d avg=%lld min=%lld max=%lld static2000=%d (%.1f%%)\n",
                 poc, nct, (long long)(nct?ssum/nct:0), (long long)(nct?smin:0), (long long)smax, nstatic, nct?100.0*nstatic/nct:0.0);
+            /* TRIAL90 per-block 8x8 SADs (for faces, finer than CTU). */
+            if (enc->blk_stab) {
+                int64_t bsum=0, bmin=((int64_t)1<<60), bmax=0; int bstatic=0, bct=0;
+                for (int by=0; by<enc->blk_stab_h; by++) for (int bx=0; bx<enc->blk_stab_w; bx++) {
+                    int ox=bx*8, oy=by*8;
+                    int cw=8, ch=8;
+                    if (ox+cw > enc->cfg.width) cw = enc->cfg.width-ox;
+                    if (oy+ch > enc->cfg.height) ch = enc->cfg.height-oy;
+                    int sad=0;
+                    for (int yy=0; yy<ch; yy++)
+                        for (int xx=0; xx<cw; xx++) {
+                            int o = enc->cur->y[(oy+yy)*enc->cur->stride_y+(ox+xx)];
+                            int pr = enc->prev_orig->y[(oy+yy)*enc->prev_orig->stride_y+(ox+xx)];
+                            int d=o-pr; sad += d<0?-d:d;
+                        }
+                    enc->blk_stab[by*enc->blk_stab_w+bx]=(int32_t)sad;
+                    bsum+=sad; if(sad<bmin)bmin=sad; if(sad>bmax)bmax=sad; if(sad<=31)bstatic++; bct++;
+                }
+                if (stabdbg_on) fprintf(stderr, "BLKSTABDBG poc=%d n=%d avg=%lld min=%lld max=%lld static31=%d (%.1f%%)\n",
+                    poc, bct, (long long)(bct?bsum/bct:0), (long long)(bct?bmin:0), (long long)bmax, bstatic, bct?100.0*bstatic/bct:0.0);
+            }
         }
     }
 

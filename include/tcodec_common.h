@@ -639,6 +639,9 @@ typedef struct tc_encoder {
     tc_frame_buf_t   *prev_orig;
     int               prev_orig_valid;
     int64_t          *ctu_stab; /* num_ctu_cols*num_ctu_rows SADs, precomputed per inter frame */
+    /* Per-block 8x8 stability (TRIAL90 infra, encoder-only, no syntax): ((w+7)/8)*((h+7)/8) int32 SADs, for faces (finer than CTU). No RDO use yet (meter only). */
+    int32_t          *blk_stab;
+    int               blk_stab_w, blk_stab_h;
     /* Temporal MVP state (TRIAL84 infra, encoder-only, no syntax): frame-level
      * prev-frame MV disps per 8x8 block ((w/8)*(h/8) cells) + dims. No RDO use
      * yet (meter only). */
