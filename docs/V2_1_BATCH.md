@@ -89,11 +89,24 @@ adaptation without lookahead/propagation can't win. Concrete design
 - Both need the v2.1 version ceremony (goldens BEFORE — current as of
   hill-31+; BITSTREAM §7.6; compat plan below). Do NOT drive by solo.
 
-## Compatibility plan
+## Compatibility plan (current as of hill-46 + trials 70-87, 2026-09-11)
 
 - v2.1 = new payload version OR tool-gated optional syntax per item.
   Preference: tool-gated bits (decoder reads iff flag set; rejects
-  unknown flags) so old v2 streams keep decoding.
-- Golden v2 streams + conformance vectors must be captured BEFORE the
-  bump (none exist today — create them first).
-- BITSTREAM.md §7.6 documents each addition; bump the version tables.
+  unknown flags via TC_TOOLS_IMPLEMENTED mask, hill-42) so old v2 streams
+  keep decoding.
+- Golden v2 streams + conformance vectors captured BEFORE (current as of
+  hill-46 chroma split, manifest committed; v2 hashes current, v0/v1
+  identical (legacy frozen)). Do NOT bump without re-capturing (goldens
+  regen + full suite + matrix, per trial72/78/85 precedent).
+- BITSTREAM.md §7.6 documents each addition; bump version tables on bump.
+- Bit allocation (15 bits used 0-6,8,10,14,15; future 7,9,11,12,13; trials
+  borrowed bit7 (MERGELIST reverted, free) + bit15 (FRESH_SKIP kept, firing
+  0%) — batch must reallocate cleanly with version bump, not borrows):
+  - FRESH_SKIP (bit15, kept hill-42, firing 0%, fresh paths + rejection) — keep bit15.
+  - MERGELIST (trial80, net neutral/batched, 10-site impl correct, no desync) — needs clean bit (not borrowed bit7 DERINGING future) + tax-free signaling? (median +1 tax hurts coherent; needs better signaling or batch vehicle).
+  - MPM (trial75, screen wins/nature loses, batched, 7-site impl correct) — needs clean bit (bit15 taken by FRESH_SKIP; needs new bit/version) + better predictor (above+left?).
+  - 1-bit ref_idx (trial70, neutral/batched, overcharge beats honest 3rd confirm) — no new bit (reduces 2→1, breaks old 2-bit streams; needs version bump, not tool gate (existing MULTI_REF flag already set; changing bits under same flag breaks old). Batch with version bump.
+  - ENTRY_POINTS (design docs/D9_ENTRY_POINTS_DESIGN.md, code deferred to perf-box sprint) — needs clean bit/version + goldens BEFORE + fps gates (noisy here, need quiet box).
+- Trial evidence (solo taxes eat wins; batch must fix taxes, not just sum neutrals):
+  decompress? No — batch needs tax-free signaling (fractional adaptive? shared flags? versioned reset?) + better predictors (temporal (hill-45 kept, 37% wins) + absolute-median? No (trial74 desync) — disp-storage MVP (hill-41 kept) is the base) + volume (skip/mbtree needs lookahead, 9 failures). Do NOT batch neutrals (net neutral). Fix taxes first (or accept D9-only batch (entry-points, no RD change, fps win) separate from D8 batch (RD wins)).
