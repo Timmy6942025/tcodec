@@ -1379,6 +1379,17 @@ static void encode_ctu_v2(tc_encoder_t *enc, int row, int col, int qp,
      * NOTE: use the parameter (e.frame_type is not yet assigned; KEY==0
      * would fire everywhere on the zeroed struct). */
     if (frame_type == TC_FRAME_KEY) e.lambda = (e.lambda * 3) / 4;
+    /* TRIAL-STABLAM: unstable (high-SAD vs prev-orig) CTUs get 1.5x
+     * rate discipline: water/grain oversplits into tiny CUs whose
+     * flags cost 28% of bytes (ducks BYTEBREAK). Static CTUs keep
+     * base lambda (screen/sita untouched). Encoder-only, no syntax.
+     * ctu_stab is -1 when invalid (KEY/no-prev); threshold 20000
+     * sits above the static gate (2000) in the textured range. */
+    if (frame_type == TC_FRAME_INTER && enc->ctu_stab) {
+        int ncols = enc->num_ctu_cols;
+        int64_t stab = enc->ctu_stab[(size_t)row * ncols + col];
+        if (stab > 20000) e.lambda = (e.lambda * 3) / 2;
+    }
     /* Must match the MULTI_REF tool-flag condition above: when set, the
      * decoder expects a ref_sel bit on every explicit v2 inter leaf. */
     e.multiref = (enc->cfg.use_v2 && enc->cfg.preset >= TC_PRESET_MEDIUM &&

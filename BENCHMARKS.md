@@ -531,7 +531,7 @@ Methodology lessons (all learned the hard way, all verified):
 | bbb/csgo/ed/tree/minecraft/old_town/screen/sintel/sita/stockholm/tos/vidyo | q32 EP | 30–41 | 61–91 | ✅ (12/15, best-of-20) |
 | park_joy med 30fr | q32 EP | ~32 | 51–66 | 🔶 borderline (prints 60+ golden-hour, ~51–54 typical) |
 | parkrun med 30fr | q32 EP | ~30 | 49–62 | 🔶 borderline |
-| ducks_takeoff med 30fr | q32 EP | ~27 | 39–57 | ❌ (grain volume program) |
+| ducks_takeoff med 30fr | q32 EP | ~27 | 50–57 → **60.5** ✅ (STABLAM trial) |
 | sintel/tos 1080p fast 10fr | q32 EP | ~14–15 | ~25–27 | ❌ (need 30) |
 | sintel/tos 1080p med 10fr | q37 EP | — | 34.7–35.7 | ✅ (need 30; 32.6/30.5dB rung) |
 
@@ -546,6 +546,13 @@ fires never (killing all L2s: +0.5% size, −2.5dB) — reverted, no trace.
 EP+L2 park30 measured 376,522B @ 27.108dB vs serial 369,458B @ 27.1080dB:
 identical decisions, +1.9% pure entry-point overhead (table + context
 restarts), as designed.
+
+STABLAM trial (kept): per-CTU 1.5x lambda on unstable CTUs only
+(`ctu_stab > 20000`; static CTUs untouched; encoder-only, no syntax).
+ducks curve: q27 −2.4%/−0.15dB, q32 −5.3%/−0.24dB, q37 −8.6%/−0.22dB
+(BD-positive, stronger at high QP) + ~8% decode fps. ducks30:
+529KB → 415KB (−21% on later action frames) @ 26.66dB, decode 60.5fps.
+53/53 green. Static content provably unaffected (gate never fires).
 
 ### August 2026 decoder optimization measurement
 
