@@ -507,6 +507,7 @@ needs quiet hardware):
 | park q32 medium, entry-points | ~18 | ~24 | T1==T4 bit-exact; parallel parse engaged |
 | park q37 (15-clip matrix) | — | 30–48 | screen 46, sita 45, ducks 30 (hardest) |
 | sintel 1080p fast q32 (5fr) | ~12 | ~15 | need 30 (2× away) |
+| x264 park q32 (ffmpeg, same box) | — | 30.1 | reference parity: tcodec 24–31fps |
 
 Standing: ~1.5–1.9× over the August serial code on the same box, but
 60fps@720p nature and 30fps@1080p are NOT met here. Remaining program:
