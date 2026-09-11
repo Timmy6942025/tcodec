@@ -367,7 +367,7 @@ Phase 3 (entropy coding changes will modify the bitstream format).
 | D8 | Real-content BD-rate vs x264/x265/SVT-AV1 | ✅ Done | 15-clip × 4-codec BD matrix re-run x2 (MVP fix + temporal+chroma: tc +5..+138% avg +51%, screen WIN −3.8%, sita WIN −48%, ed +5%, sintel +6%; x265/svt sanity reproduce ±0.1pp); corpus 17 masters + manifest; svt overlap solved (CRF 54-63). 1080p decode baselines next |
 | D9 | ARM decode ≥60fps@720p / ≥30fps@1080p | ❌ Not met | park t1/t2/t4 16.9/21.3/18fps, sintel/tos 1080p 5–9fps; interp proven MEMORY-bound (SIMD futile); scaling 1.2× (starvation); parse serial. Program in docs/D9_PLAN.md |
 | D10 | Container/transport (tcmux, MP4 bridge, HLS) | ✅ Done | test_tcmux.sh and test_tcmux_mp4.sh pass |
-| D11 | Docs complete (SPEC/BITSTREAM/PROFILES/BENCHMARKS/README) | ✅ Done | SPEC/BITSTREAM (§7.7 v2.1 batch scoped)/PROFILES (v2.1 scoped) truth-passed; BENCHMARKS 2 matrices current (MVP + temporal+chroma); goldens multiref+B; FINISH_Tier1 rewritten; HILLCLIMB 89 rows; V2_1_BATCH + 4 design docs (MERGELIST/MBTREE/SUB4/D9_ENTRY_POINTS) |
+| D11 | Docs complete (SPEC/BITSTREAM/PROFILES/BENCHMARKS/README) | ✅ Done | SPEC/BITSTREAM (§7.7 v2.1 batch scoped)/PROFILES (v2.1 scoped) truth-passed; BENCHMARKS 2 matrices current (MVP + temporal+chroma); goldens multiref+B; FINISH_Tier1 rewritten; HILLCLIMB 90 rows; V2_1_BATCH + 4 design docs (MERGELIST/MBTREE/SUB4/D9_ENTRY_POINTS) |
 | D12 | Repo hygiene, commits, final report | ✅ Done | tree clean on origin/main (pushed per-milestone); FINISH_Tier1 current; goldens regen'd |
 
 **Tier-1 completion blockers:** D9 (decode sprint: 3.5× needed) + nature-vs-practical gap (projects: grain/vmaf, skip/mbtree-lookahead, v2.1 batch). Compression bar vs NAIVE H.264: MET (park −14%, tree −43% BD).
