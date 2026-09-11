@@ -286,6 +286,36 @@ overhead (ref_sel+bi bits, +1/+2 ladder tax, mismatched bwd refs on
 scroll). Benchmark tables stay P-only (our better config). B needs
 ladder+RDO retune (project, not trial) — do NOT default `-b` on.
 
+## D8 multi-codec matrix (2026-09-11 — temporal+chroma, SUPERSEDES 09-10 MVP matrix)
+
+BD-rate vs x264vf (3QP curves; tc med P-only t46 (hill-45 temporal + hill-46 chroma split), x264vf veryfast, x265 medium,
+svtav1p6 preset 6 @CRF 54/58/63; 30fr, screen 10fr):
+
+| Clip | class | tc BD | x265 BD | svt BD |
+|---|---|---|---|---|
+| park_joy | nature water | +60.1% | −14.4% | −47.3% |
+| ducks_takeoff | grain | +138.1% | −33.2% | −54.7% |
+| in_to_tree | detail | +45.6% | −37.8% | −65.0% |
+| old_town_cross | aerial | +114.3% | −29.0% | −54.7% |
+| parkrun | snow/grain | +121.8% | −15.3% | −46.9% |
+| stockholm | city pan | +90.2% | −22.6% | −55.2% |
+| vidyo_talk | talking head | +72.3% | −31.8% | −56.8% |
+| screen_ui | screen | **−3.8% (WIN)** | +72.1%¹ | −44.4% |
+| bbb_nature | 3D animation | +42.9% | −42.3% | −66.6% |
+| ed_dark | dark animation | +5.3% | −50.8% | −74.7% |
+| sita_flat | flat animation | **−48.4% (WIN)** | −67.6% | −86.9% |
+| csgo_gaming | HUD/text FPS | +49.3% | −19.1% | −54.5% |
+| minecraft_gaming | blocky voxel | +31.7% | −21.0% | −64.1% |
+| tos_vfx | VFX/grain live action | +45.2% | −36.4% | −57.5% |
+| sintel_action | animation fast-cut | +5.9% | −44.4% | −69.9% |
+
+¹ x265 worse than x264 on screen. Reading: temporal+chroma improves 15/15 vs 09-10 MVP matrix
+(park −10pp, ducks −15pp, tree −4pp, old_town −8pp, parkrun −16pp, stockholm −14pp,
+vidyo −11pp, screen holds WIN, bbb −9pp, ed −5pp, sita holds WIN, csgo −3pp,
+minecraft −11pp, tos −11pp, sintel −16pp). Average tc BD +60%→+51% (−9pp).
+Best non-sita/screen: ed +5%, sintel +6%. Worst grain (ducks +138%, parkrun +122%).
+x265/svt reproduce (±0.1pp sanity). Full CSVs in /tmp/matrix2 (60 files).
+
 ## D8 multi-codec matrix (2026-09-10 — MVP-fixed, SUPERSEDES 09-09 matrix)
 
 BD-rate vs x264vf (3QP curves; tc med P-only mvpfix, x264vf veryfast, x265 medium,
