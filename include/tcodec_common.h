@@ -649,6 +649,10 @@ typedef struct tc_encoder {
     qt_mvcell_t      *cur_mvgrid; /* TRIAL84: current frame MVs (built per-CTU, swapped to prev at frame end) */
     int               prev_mvgrid_w, prev_mvgrid_h;
     int               prev_mv_valid;
+    /* P lookahead buffer (TRIAL92 infra, encoder-only, no syntax): N=4 future inputs for propagation pricing (mb-tree future-reference value). No RDO use yet (buffer/copy only, no delay, no behavior change). */
+#define TC_LOOKAHEAD_N 4
+    tc_frame_buf_t   *la_frame[TC_LOOKAHEAD_N];
+    int               la_n; /* buffered count (0..N, no delay yet; future RDO use will delay encode by N) */
     /* Bitstream v2 quadtree scratch (per-encoder, not static) */
     qt_node_t        *v2_node;         /* TC_QT_NODES decision records */
     qt_mvcell_t      *v2_grid;         /* TC_MVGRID_STRIDE² MV grid */

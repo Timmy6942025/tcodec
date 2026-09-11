@@ -2406,6 +2406,10 @@ tc_encoder_t *tc_encoder_create(const tc_config_t *config)
         if (enc->prev_mvgrid) for (int i=0;i<mgw*mgh;i++) enc->prev_mvgrid[i].intra = 1;
         if (enc->cur_mvgrid) for (int i=0;i<mgw*mgh;i++) enc->cur_mvgrid[i].intra = 1;
     }
+    /* TRIAL92 P lookahead buffer (N=4 future inputs, encoder-only, no use yet). */
+    for (int i=0;i<TC_LOOKAHEAD_N;i++) enc->la_frame[i] = NULL;
+    enc->la_n = 0;
+    /* Note: frames allocated on demand in future RDO use (not pre-allocated, to avoid 5.6MB upfront when unused). NULL-safe free in destroy (like bf frames). No behavior change (buffers empty, no delay, no RDO). */
 
     /* Allocate CTU info */
     enc->ctu_data = (tc_ctu_info_t *)calloc(
@@ -2529,6 +2533,7 @@ void tc_encoder_destroy(tc_encoder_t *enc)
     free(enc->ctu_stab); /* TRIAL82 (free NULL-safe) */
     free(enc->blk_stab); /* TRIAL90 (free NULL-safe) */
     free(enc->prev_mvgrid); free(enc->cur_mvgrid); /* TRIAL84 (free NULL-safe) */
+    for (int i=0;i<TC_LOOKAHEAD_N;i++) tc_frame_free(enc->la_frame[i]); /* TRIAL92 (NULL-safe) */
 #if !defined(TCODEC_NO_THREADS)
     /* Free per-row bitstream buffers */
     if (enc->row_buf) {
