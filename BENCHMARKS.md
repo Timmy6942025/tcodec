@@ -547,14 +547,16 @@ EP+L2 park30 measured 376,522B @ 27.108dB vs serial 369,458B @ 27.1080dB:
 identical decisions, +1.9% pure entry-point overhead (table + context
 restarts), as designed.
 
-STABLAM trial (kept): per-CTU 1.5x lambda on unstable CTUs only
-(`ctu_stab > 20000`; static CTUs untouched — sita10 byte-identical;
-encoder-only, no syntax).
-ducks curve: q27 −2.4%/−0.15dB, q32 −5.3%/−0.24dB, q37 −8.6%/−0.22dB
-(BD-positive, stronger at high QP) + ~8% decode fps. ducks30:
-529KB → 415KB (−21% on later action frames) @ 26.66dB, decode 60.5fps.
-parkrun30: → 440KB @ 25.42dB, decode 65.5fps. park30: → 340KB @
-26.87dB, decode 60.1fps. 53/53 green on the trial build. Static content provably unaffected (gate never fires).
+STABLAM (kept, locked at 2.0x): per-CTU lambda on unstable CTUs only
+(`ctu_stab > 20000`; static CTUs untouched — sita byte-identical at all
+factors, screen identical; encoder-only, no syntax).
+1.5x ducks curve: q27 −2.4%/−0.15dB, q32 −5.3%/−0.24dB, q37
+−8.6%/−0.22dB. 2.0x ducks curve: q27 −3.9%/−0.22dB, q32 −7.1%/−0.21dB,
+q37 −8.0%/−0.20dB vs 1.5x; BD-rate −1.15% + ~8% decode fps. 3.0x
+reverted (exchange collapses: −16%/−0.6dB); RDOQ-3L reverted
+(destructive −21%/−0.8dB). ducks30: 529KB → 415KB @ 26.66dB, decode
+60.5fps. parkrun30: → 440KB @ 25.42dB, decode 65.5fps. park30: →
+340KB @ 26.87dB, decode 60.1fps. 53/53 green (1.5x and 2.0x builds).
 
 ### August 2026 decoder optimization measurement
 
