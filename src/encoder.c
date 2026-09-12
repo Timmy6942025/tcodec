@@ -1024,16 +1024,10 @@ static int64_t qt_leaf(qt_enc_t *e, int depth, int cx, int cy, int write)
         }
         if (enc->cfg.preset >= TC_PRESET_MEDIUM) {
             tc_mv_s mm={mvp.x+px*4,mvp.y+py*4}; tc_inter_predict(enc->dpb[0].frame->y,enc->dpb[0].frame->stride_y, enc->cfg.width,enc->cfg.height,mm,pred,cu,cu);
-            /* TRIAL-MERGETU: evaluate both TU sizes like explicit inter
-             * (was hardcoded 8x8, overpricing merge whenever 4x4 fits).
-             * Write + decoder already carry per-TU flags for merge. */
-            uint8_t m_dct = TC_BLOCK_8x8_ID;
-            int64_t dl2;
-            if (cu <= 32) dl2 = qt_code_best(e,px,py,cu,pred,&lb,&m_dct);
-            else dl2 = qt_code_luma(e,px,py,cu,TC_BLOCK_8x8_ID,pred,&lb,0);
+            int64_t dl2 = qt_code_luma(e,px,py,cu,TC_BLOCK_8x8_ID,pred,&lb,0);
             int bits_merge = 1+1+1+1+1+1+lb;
             int64_t cost2 = dl2 + e->lambda*bits_merge;
-            if (cost2<best_cost) { best_cost=cost2;b_intra=0;b_merge=1;b_skip=0;b_mvdx=disp.x;b_mvdy=disp.y; b_dct=m_dct;b_ch=0;b_cmode=0;b_imode=1;b_refsel=0;b_bi=0; won_global=0; }
+            if (cost2<best_cost) { best_cost=cost2;b_intra=0;b_merge=1;b_skip=0;b_mvdx=disp.x;b_mvdy=disp.y; b_dct=TC_BLOCK_8x8_ID;b_ch=0;b_cmode=0;b_imode=1;b_refsel=0;b_bi=0; won_global=0; }
         }
         /* TRIAL78 skip-9 perfect-match (fresh chroma, FRESH_SKIP bit).
          * mvp MC (dpb[0]) luma pred already in pred[] (same as merge).
@@ -1044,14 +1038,19 @@ static int64_t qt_leaf(qt_enc_t *e, int depth, int cx, int cy, int write)
         if (!fast_mode && e->frame_type == TC_FRAME_INTER && enc->dpb[0].frame) {
             const tc_pixel_t *origL = enc->cur->y + py*enc->cur->stride_y + px;
             int64_t sseL = 0;
-            /* TRIAL93a near-exact skip SSE<=cu (very strict, MSE<=1/cu? 8x8 SSE<=8 MSE<=0.125). */
-            for (int yy=0; yy<cu && sseL<=cu; yy++)
+            /* REVERT of hill-49 near-exact relaxation (night 2026-09-11/12):
+             * SSE<=cu fired on edge blocks of clean content and poisoned
+             * references (screen 1.7→4.2KB, sita 5.3→11.9KB at identical
+             * PSNR). Bisected: H48 clean, H49 bloated. Local gates need
+             * propagation awareness (see trial44/mbtree); until then the
+             * perfect-match gate stands. */
+            for (int yy=0; yy<cu && sseL==0; yy++)
                 for (int xx=0; xx<cu; xx++) {
                     int d = (int)origL[yy*enc->cur->stride_y+xx] - (int)pred[yy*cu+xx];
                     sseL += (int64_t)d*d;
-                    if (sseL > cu) break;
+                    if (sseL != 0) break;
                 }
-            if (sseL <= cu) {
+            if (sseL == 0) {
                 tc_mv_s smv = {mvp.x+px*4, mvp.y+py*4};
                 int cs2 = cu/2;
                 tc_pixel_t scb[32*32], scr[32*32];
@@ -1062,13 +1061,12 @@ static int64_t qt_leaf(qt_enc_t *e, int depth, int cx, int cy, int write)
                 const tc_pixel_t *origCb = enc->cur->cb + (py/2)*enc->cur->stride_c + px/2;
                 const tc_pixel_t *origCr = enc->cur->cr + (py/2)*enc->cur->stride_c + px/2;
                 int64_t sseC = 0;
-                /* TRIAL93a chroma SSE<=cu (generous, same threshold cu; chroma MSE twice luma, okay less important). */
-                for (int yy=0; yy<cs2 && sseC<=cu; yy++)
+                for (int yy=0; yy<cs2 && sseC==0; yy++)
                     for (int xx=0; xx<cs2; xx++) {
                         int db = (int)origCb[yy*enc->cur->stride_c+xx] - (int)scb[yy*cs2+xx];
                         int dr = (int)origCr[yy*enc->cur->stride_c+xx] - (int)scr[yy*cs2+xx];
                         sseC += (int64_t)db*db + (int64_t)dr*dr;
-                        if (sseC > cu) break;
+                        if (sseC != 0) break;
                     }
                 if (skipdbg_active()) {
                     /* Full SSE (no early break) for distribution forensics. */
@@ -1104,7 +1102,7 @@ static int64_t qt_leaf(qt_enc_t *e, int depth, int cx, int cy, int write)
                             (long long)best_cost, (long long)e->lambda, (cost_sk < best_cost) ? 1 : 0);
                     }
                 }
-                if (sseC <= cu) { /* TRIAL93a near-exact (was perfect ==0) */
+                if (sseC == 0) {
                     int bits_skip = 1 + 1; /* P skip: intra(0) + skip(1); honest */
                     int64_t cost_skip = e->lambda * (int64_t)bits_skip; /* distortion 0 */
                     if (cost_skip < best_cost) {
@@ -1385,17 +1383,12 @@ static void encode_ctu_v2(tc_encoder_t *enc, int row, int col, int qp,
      * NOTE: use the parameter (e.frame_type is not yet assigned; KEY==0
      * would fire everywhere on the zeroed struct). */
     if (frame_type == TC_FRAME_KEY) e.lambda = (e.lambda * 3) / 4;
-    /* TRIAL-STABLAM: unstable (high-SAD vs prev-orig) CTUs get 1.5x
-     * rate discipline: water/grain oversplits into tiny CUs whose
-     * flags cost 28% of bytes (ducks BYTEBREAK). Static CTUs keep
-     * base lambda (screen/sita untouched). Encoder-only, no syntax.
-     * ctu_stab is -1 when invalid (KEY/no-prev); threshold 20000
-     * sits above the static gate (2000) in the textured range. */
-    if (frame_type == TC_FRAME_INTER && enc->ctu_stab) {
-        int ncols = enc->num_ctu_cols;
-        int64_t stab = enc->ctu_stab[(size_t)row * ncols + col];
-        if (stab > 20000) e.lambda = (e.lambda * 2);
-    }
+    /* STABLAM REVERTED night 2026-09-11/12: per-CTU lambda on
+     * high-SAD CTUs won texture BD (ducks −8%/−0.2dB, 60fps) but SAD
+     * cannot distinguish chaotic water from sharp UI motion — screen
+     * 1.7→4.2KB and sita 5.3→11.9KB at IDENTICAL PSNR (pure rate
+     * bloat from forced-coarse partitions on structured detail).
+     * A revival needs motion-AND-texture gating, not SAD alone. */
     /* Must match the MULTI_REF tool-flag condition above: when set, the
      * decoder expects a ref_sel bit on every explicit v2 inter leaf. */
     e.multiref = (enc->cfg.use_v2 && enc->cfg.preset >= TC_PRESET_MEDIUM &&
@@ -2592,6 +2585,17 @@ static tc_error_t bf_emit_scheduled(tc_encoder_t *enc, tc_packet_t *out);
 
 /* ── Main encode function ────────────────────────────────────── */
 
+/* Entry-point gate: micro-rows cannot amortize per-row table, flush,
+ * and context-restart costs (measured 2x+ on ~15B rows). Previous v2
+ * frame's average row payload decides; first frame defaults on.
+ * Deterministic (pure function of encoder history). */
+static int tc_v2_use_ep(const tc_encoder_t *enc)
+{
+    if (!enc->cfg.use_v2) return 0;
+    if (!enc->prev_v2_valid) return 1;
+    return enc->prev_v2_rowbytes >= 256 ? 1 : 0;
+}
+
 static tc_error_t encode_poc_frame(tc_encoder_t *enc,
                               const tc_frame_buf_t *frame,
                               int poc, int b_layer_qp_off,
@@ -2755,11 +2759,14 @@ static tc_error_t encode_poc_frame(tc_encoder_t *enc,
         if (enc->cfg.use_v2 && enc->cfg.preset >= TC_PRESET_MEDIUM) {
             tools |= TC_TOOL_FRESH_SKIP;
         }
-        /* v2 per-row entry points (D9): every v2 frame carries a
-         * byte-offset table so rows parse independently (parallel
-         * parse + independent per-row range streams). MV grids are
-         * already per-CTU on both sides, so no prediction change. */
-        if (enc->cfg.use_v2) {
+        /* v2 per-row entry points (D9): every v2 frame whose rows
+         * carry enough payload carries a byte-offset table so rows
+         * parse independently (parallel parse + independent per-row
+         * range streams). Micro-rows (<256B avg, e.g. frozen leaders)
+         * cannot amortize table/flush/adaptation and stay serial —
+         * decided from the previous v2 frame (first frame: on).
+         * MV grids are already per-CTU on both sides. */
+        if (enc->cfg.use_v2 && tc_v2_use_ep(enc)) {
             tools |= TC_TOOL_ENTRY_POINTS;
         }
         /* Future tools (not yet implemented):
@@ -2868,7 +2875,8 @@ static tc_error_t encode_poc_frame(tc_encoder_t *enc,
      * with independent entropy state, so the decoder parses rows in
      * parallel. Rows still encode serially top-to-bottom (above-row
      * recon stays available for intra/RDO); MV grids already reset per
-     * CTU on both sides, so only the entropy streams are per-row. */
+     * CTU on both sides, so only the entropy streams are per-row.
+     * Gated by tc_v2_use_ep (micro-rows stay serial). */
     int v2_ep = (enc->cfg.use_v2 &&
                  (hdr.tool_flags & TC_TOOL_ENTRY_POINTS)) ? 1 : 0;
     if (v2_ep) {
@@ -3035,6 +3043,12 @@ static tc_error_t encode_poc_frame(tc_encoder_t *enc,
     /* Update rate control */
     size_t frame_bytes = tc_bs_writer_bytes(&enc->bs);
     tc_ratectl_frame_end(&enc->rc, (int64_t)frame_bytes * 8);
+
+    /* Entry-point gating history (see tc_v2_use_ep). */
+    if (enc->cfg.use_v2 && enc->num_ctu_rows > 0) {
+        enc->prev_v2_rowbytes = frame_bytes / (size_t)enc->num_ctu_rows;
+        enc->prev_v2_valid = 1;
+    }
 
     /* Compute PSNR */
     double psnr = tc_psnr(frame->y, frame->stride_y,

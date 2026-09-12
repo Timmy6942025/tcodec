@@ -529,9 +529,9 @@ Methodology lessons (all learned the hard way, all verified):
 | Clip | stream | t1 | t4 | ≥60? |
 |---|---|---:|---:|---|
 | bbb/csgo/ed/tree/minecraft/old_town/screen/sintel/sita/stockholm/tos/vidyo | q32 EP | 30–41 | 61–91 | ✅ (12/15, best-of-20) |
-| park_joy med 30fr | q32 EP+STABLAM | ~32 | **60.1** (med 58.6) | ✅ |
-| parkrun med 30fr | q32 EP+STABLAM | ~30 | **65.5** (med 64.2) | ✅ |
-| ducks_takeoff med 30fr | q32 EP | ~27 | 50–57 → **60.5** ✅ (STABLAM trial) |
+| park_joy med 30fr | q32 EP | ~32 | 53–58 (serial 57.9) | 🔶 borderline |
+| parkrun med 30fr | q32 EP | ~30 | 50–57 | 🔶 borderline |
+| ducks_takeoff med 30fr | q32 EP | ~27 | 50–57 | ❌ (grain volume program; STABLAM's 60.5 reverted with it) |
 | sintel/tos 1080p fast 10fr | q32 EP | ~14–15 | ~25–27 | ❌ (need 30) |
 | sintel/tos 1080p med 10fr | q37 EP | — | 34.7–35.7 | ✅ (need 30; 32.6/30.5dB rung) |
 
@@ -547,22 +547,28 @@ EP+L2 park30 measured 376,522B @ 27.108dB vs serial 369,458B @ 27.1080dB:
 identical decisions, +1.9% pure entry-point overhead (table + context
 restarts), as designed.
 
-STABLAM (kept, locked at 2.0x): per-CTU lambda on unstable CTUs only
-(`ctu_stab > 20000`; static CTUs untouched — sita byte-identical at all
-factors, screen identical; encoder-only, no syntax).
-1.5x ducks curve: q27 −2.4%/−0.15dB, q32 −5.3%/−0.24dB, q37
-−8.6%/−0.22dB. 2.0x ducks curve: q27 −3.9%/−0.22dB, q32 −7.1%/−0.21dB,
-q37 −8.0%/−0.20dB vs 1.5x; BD-rate −1.15% + ~8% decode fps. 3.0x
-reverted (exchange collapses: −16%/−0.6dB); RDOQ-3L reverted
-(destructive −21%/−0.8dB). ducks30: 529KB → 415KB @ 26.66dB, decode
-60.5fps. parkrun30: → 440KB @ 25.42dB, decode 65.5fps. park30: →
-340KB @ 26.87dB, decode 60.1fps. 53/53 green (1.5x and 2.0x builds).
+STABLAM REVERTED (night): per-CTU lambda on high-SAD CTUs won texture
+BD (2.0x ducks curve −3.9/−7.1/−8.0% for −0.22/−0.21/−0.20dB vs 1.5x;
+BD −1.15%; ducks30 529→415KB @ 26.66dB, 60.5fps; parkrun 65.5; park
+60.1) but SAD cannot distinguish chaotic water from sharp UI motion —
+screen 1.7→4.2KB and sita 5.3→11.9KB at IDENTICAL PSNR (forced-coarse
+partitions destroy structured detail; sita10 byte-identity only proved
+the frozen leader). Kept 12/15@60 would have rested on it; reverted
+with tombstone. Revival needs motion-AND-texture gating. 3.0x reverted
+earlier (exchange collapses); RDOQ-3L reverted (destructive).
 
-MERGETU (kept): P-merge evaluates both TU sizes via qt_code_best for
-cu≤32 (was hardcoded 8×8 while explicit inter compared both — RDO
-correctness fix, encoder-only, per-TU flags already in syntax).
-ducks10 −0.53%/−0.09dB, park10 −0.84%/−0.03dB, sita identical, all
-decodes rc=0. 53/53 green. Small, green-green, zero decode cost.
+MERGETU REVERTED (night): merge TU-honesty was green-green on texture
+(ducks −0.53%, park −0.84%) but the 30-frame matrix caught +124% on
+sita-style clean merge content (unpriced 4x4 sub-flags on zero
+residual; 10-frame frozen-leader guardrails were blind to it). RDO bit
+model omits sub-flag cost — noted for a future honest fix.
+
+ENTRY-POINT SIZE GATE (kept): rows averaging <256 payload bytes stay
+serial (previous-frame history; first frame on; deterministic).
+Micro-rows cost 2x+ under per-row table/flush/adaptation and carry no
+speed prize. Verified per-frame (screen E+9×serial, sita E+29×serial,
+park all-EP); screen/sita restored to matrix bytes, park keeps speed.
+v2.1-style format work unnecessary — the existing tool bit covers it.
 
 ### August 2026 decoder optimization measurement
 

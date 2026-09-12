@@ -675,7 +675,9 @@ rather than routing it through the legacy block decoder.
 
 ### 7.6.1 v2 Per-Row Entry Points (`TC_TOOL_ENTRY_POINTS`, bit 7)
 
-Every v2 encoder sets `TC_TOOL_ENTRY_POINTS`, and every v2 frame carries a
+Every v2 encoder sets `TC_TOOL_ENTRY_POINTS` on frames whose rows
+carry enough payload (previous v2 frame averaged ≥256 payload
+bytes/row; first frame: on), and every such frame carries a
 row table between the frame header and the row payloads:
 
 ```

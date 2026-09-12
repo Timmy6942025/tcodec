@@ -284,3 +284,22 @@ bit-exact test_v2_bframes. No new syntax (flags existed, unused for v2).
 | BD-rate B-vs-P | park −10.12%, screen −16.14% (3-QP curves, current code both) |
 | test_v2_bframes + suite | PASS, 53/53 |
 | deblock trials 32+33 + full suite | probe −30%/+4.5dB cumul; screen −42%/+2.0dB @QP32; park −22%/+1.6dB @QP32; FULL 54/54 incl. 300fr soak |
+
+## Night shift 2026-09-11/12 (D8 volume program, encoder-only rule)
+
+| # | Trial | Result |
+|---|---|---|
+| 94 | RDOQ-L2: keep-vs-zero for |q|==2 (4λ keep model) | fires never on bprobe+park (identical bytes); kill-all control +0.5%/−2.5dB proves L2s exist and are worth keeping | REVERTED |
+| 95 | RDOQ-3L: L1 keep 2λ→3λ | ducks −21%/−0.8dB, park −25%/−0.7dB — destructive | REVERTED (2λ adapted constant stands) |
+| 96 | LAM-global 1.5x (tc_lambda 200→300) | ducks −6.4%/−0.32dB (wash); taxes clean content | REVERTED |
+| 97 | LAM-3.0x | ducks −16%/−0.62dB, park −17%/−0.58dB — exchange collapses | REVERTED |
+| 98 | STABLAM-1.5x: per-CTU λ×1.5 when ctu_stab>20000 (unstable only) | ducks q27/32/37 −2.4/−5.3/−8.6% for −0.15/−0.24/−0.22dB; static provably untouched | KEPT |
+| 99 | STABLAM-2.0x | ducks curve −3.9/−7.1/−8.0% for −0.22/−0.21/−0.20dB vs 1.5x; BD −1.15%; sita+screen identical; 53/53 | KEPT (locked) |
+| 100 | THR-8k (gate 20k→8k) | ducks −0.7%/−0.03dB, park −0.3%/−0.01dB, sita moves (3.35→3.34KB) — nothing + touches near-static | REVERTED (20k confirmed both sides) |
+| 101 | CHAOS-tier (80k→3x over 2.0x base) | ducks byte-identical (never fires); park −8.7%/−0.30dB wash + second threshold | REVERTED |
+| 102 | MVDBITS: halve EG MVD estimate in 7 RDO sites (wire uses adaptive RC) | ducks +3.6%/+0.04dB, park +1.1%/flat — buys explicit inter nobody needs; EG model was right | REVERTED (7/7 sites restored) |
+| 103 | KEYQP: keyframe qp−3 (better GOP anchors) | ducks +9.2%/+0.51dB, park +9.6%/+0.40dB — buys exactly what it costs + fatter keyframes | REVERTED |
+| 104 | MERGETU: P-merge both TU sizes via qt_code_best cu≤32 (was hardcoded 8x8) | ducks −0.53%/−0.09dB, park −0.84%/−0.03dB, sita identical, decodes rc=0; 53/53 | KEPT (RDO correctness fix, zero syntax/decode cost) |
+| 105 | C-track motion family (merge TU-honesty dup, merge→skip promotion, RD ME refine, adaptive search range) | best −0.53%/−0.84% (dup of 104); skip 9th failure (+0.44%, cascade); rest neutral | ALL REVERTED, tree clean |
+| 106 | PGO (-fprofile-generate/use + LTO) | ~8% WORSE on short clips | REVERTED, no trace |
+| 107 | Hill-49 near-exact skip REVERTED (night bisect): H46/H48 reproduce matrix bytes (screen 1.69KB, sita 5.18KB); H49+ bloats screen 1.7→4.2KB, sita 5.3→11.9KB at IDENTICAL PSNR (pure signaling waste). Mechanism: SSE<=cu fires on edge blocks, poisons refs, recovery residuals swamp the 2-bit savings — same propagation-blindness as trial44. Restored ==0 perfect gate + tombstone. Pre-existing (not tonight's); tonight's matrix catches it going forward |

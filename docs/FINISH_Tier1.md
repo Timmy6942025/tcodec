@@ -95,7 +95,7 @@ variance work. Program in docs/D9_PLAN.md.
 | D6 | Pass | Deblock (rewritten, HEVC-direction) + luma BO SAO ×6 (EO/chroma-SAO deferred) |
 | D7 | Pass | RDO −66.4% vs SAD-only; RDOQ-lite on top |
 | D8 | Pass | 11-clip × 4-codec BD matrix above; corpus 11 masters + manifest |
-| D9 | **Met (see caveats)** | 720p t4 ≥60fps on all 15 clips (12 clean q32 EP + 3 via STABLAM); 1080p t4 34–36fps on q37 rung (need 30 ✅), 25–27 on q32; x264 parity at 30fps park |
+| D9 | **Nearly met (12/15 + rung)** | 720p t4 ≥60fps on 12 clips; park/parkrun borderline; ducks needs volume work; 1080p t4 34–36fps on q37 rung (need 30 ✅), 25–27 on q32; x264 parity at 30fps park |
 | D10 | Pass | TCMX/TCMF, tcv1 MP4, H.264 bridge (scripts green) |
 | D11 | Pass | SPEC/BITSTREAM truth-passed (incl. merge+bi codepoint); BENCHMARKS current |
 | D12 | Pass | Clean tree on origin/main; this report; goldens regen'd |

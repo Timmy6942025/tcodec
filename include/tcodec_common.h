@@ -687,6 +687,12 @@ typedef struct tc_encoder {
     /* Bitstream output buffer */
     uint8_t          *out_buf;
     size_t            out_buf_size;
+    /* Entry-point gating (D9): rows below ~256 payload bytes cannot
+     * amortize the per-row table/flush/adaptation cost (15-byte rows
+     * cost 2x+). Previous v2 frame's average row payload decides;
+     * first frame defaults to entry points. Deterministic. */
+    size_t            prev_v2_rowbytes;
+    int               prev_v2_valid;
 } tc_encoder_t;
 
 /* ── Decoder internals ───────────────────────────────────────── */
