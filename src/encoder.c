@@ -891,6 +891,32 @@ static int64_t qt_leaf(qt_enc_t *e, int depth, int cx, int cy, int write)
         }
     } else if (e->frame_type != TC_FRAME_KEY) {
         tc_mv_s mvp = qt_mvp(e,cx,cy,e->grid);
+        /* TEXDBG meter (env-gated TC_TEXDBG=1, no RDO change): orig luma
+         * variance + mvp-MC full SSE per evaluated leaf. Forensics for
+         * texture-gated lambda (motion-AND-texture gate). */
+        {
+            static int texdbg_on = -1;
+            if (texdbg_on < 0) texdbg_on = (getenv("TC_TEXDBG") != 0) ? 1 : 0;
+            if (texdbg_on && write == QT_DECIDE && e->frame_type == TC_FRAME_INTER && enc->dpb[0].frame) {
+                const tc_pixel_t *to = enc->cur->y + py*enc->cur->stride_y + px;
+                int fw = enc->cfg.width - px, fh = enc->cfg.height - py;
+                int ew = cu < fw ? cu : fw, eh = cu < fh ? cu : fh;
+                if (ew > 0 && eh > 0) {
+                    int64_t tsum = 0, tsumsq = 0;
+                    for (int tyy = 0; tyy < eh; tyy++)
+                        for (int txx = 0; txx < ew; txx++) { int tv = to[tyy*enc->cur->stride_y+txx]; tsum += tv; tsumsq += (int64_t)tv*tv; }
+                    int64_t tn = (int64_t)ew*eh;
+                    int64_t tvar = (tsumsq - tsum*tsum/tn) / tn;
+                    tc_mv_s tmm = { mvp.x+px*4, mvp.y+py*4 };
+                    tc_pixel_t tmp_[64*64];
+                    tc_inter_predict(enc->dpb[0].frame->y, enc->dpb[0].frame->stride_y, enc->cfg.width, enc->cfg.height, tmm, tmp_, cu, cu);
+                    int64_t tsse = 0;
+                    for (int tyy = 0; tyy < eh; tyy++)
+                        for (int txx = 0; txx < ew; txx++) { int td = (int)to[tyy*enc->cur->stride_y+txx] - (int)tmp_[tyy*cu+txx]; tsse += (int64_t)td*td; }
+                    fprintf(stderr, "TEXDBG cu=%d var=%lld sse=%lld area=%lld\n", cu, (long long)tvar, (long long)tsse, (long long)tn);
+                }
+            }
+        }
         /* v2 presets deliberately trade RDO breadth for predictable ARM
          * encode time. Fast uses a compact search; medium retains the
          * broader search used by the original v2 path. */
